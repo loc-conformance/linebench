@@ -1,0 +1,16 @@
+# Copy to linebench.conf (that exact name, beside this file) and point these at wherever you keep
+# them on THIS machine. There are no defaults on purpose.
+# A flag beats an environment variable, which beats this file.
+
+counters = "<the directory where setup keeps the counter binaries>"
+
+[corpora]
+linux = "<the checkout that gets counted>"
+
+# A build of your own, measured beside the release as the instance mezura@dev. The definition
+# is only needed when its flags differ from the release's.
+# [given."mezura@dev"]
+# binary     = "<path to the build>"
+# definition = "<its own definition file>"
+
+# out = "<where results go. The default is results/ in this checkout>"

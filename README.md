@@ -1,0 +1,316 @@
+# linebench
+
+A benchmark harness for line counters. It measures every counter on the same tree, on equal
+work, and puts beside every number what the machine was doing while it was measured: the
+background load, the power scheme, the antivirus state, whether the corpus was on the pinned
+commit, and a control run at both ends of the run that says whether the machine moved in
+between. The counters it measures are data, one `counters/<name>.toml` each, and it never
+builds a counter: it fetches the release, hashes it, and writes the hash into the record.
+
+Today it knows cloc, mezura, scc and tokei. Adding one is a definition file.
+
+## Prerequisites
+
+git and [hyperfine](https://github.com/sharkdp/hyperfine) on PATH. cargo only for a counter
+that publishes no binaries and has to be built (tokei), and perl for one that ships as a
+script (cloc on Linux and macOS).
+
+| system | command |
+|---|---|
+| Debian, Ubuntu | `sudo apt install hyperfine` |
+| Fedora, RHEL | `sudo dnf install hyperfine` |
+| Arch | `sudo pacman -S hyperfine` |
+| openSUSE | `sudo zypper install hyperfine` |
+| Alpine | `apk add hyperfine` |
+| Windows | `winget install sharkdp.hyperfine` |
+| macOS | `brew install hyperfine` |
+| anywhere else | `cargo install hyperfine` |
+
+## Running it
+
+Copy `linebench.conf.example` to `linebench.conf` (that exact name, in the directory you run
+from, gitignored) and say where the counter binaries and the corpus checkout live on this
+machine:
+
+```toml
+counters = "D:/counters"
+
+[corpora]
+linux = "D:/corpora/linux"
+```
+
+First time on a machine:
+
+```
+linebench setup
+```
+
+`setup` fetches every counter at the version its definition declares, into the counters
+directory, and the corpus at the commit its definition pins. What it fetched, and its sha256,
+goes into `linebench-fetched.toml` beside the binaries. A second `setup` answers "already
+here" for what matches and fetches again what does not.
+
+Then, on Linux and macOS:
+
+```
+sudo linebench run
+```
+
+On Windows the same, from a terminal opened with "Run as administrator":
+
+```
+linebench run
+```
+
+Elevated, it sets the cpu governor to `performance` (Linux) or the power scheme to High
+performance (Windows) and puts it back when the run ends, whether it finishes, fails or is
+interrupted with Ctrl-C. Before it changes anything it writes what it changed into
+`linebench-prep.toml` beside the binaries, so a run that dies outright leaves a file the next
+command finds and puts back, and prints the command to put it back by hand. Unelevated it
+prints what it would have changed and asks before doing any work. `--yes` answers that
+question, `--no-prep` skips the whole thing even when elevated, and with no terminal attached
+it carries on.
+
+The commands are `setup`, `check`, `noise`, `run` and `report`. `linebench help` lists every
+flag.
+
+## Where things are
+
+| setting | flag | environment | default |
+|---|---|---|---|
+| the counters directory | `--counters-dir` | `LINEBENCH_COUNTERS` | none, must be set |
+| the corpus | `--corpus <name>` | `LINEBENCH_CORPUS` | the only one in `[corpora]` |
+| its checkout | `--corpus-path` | | the `[corpora]` entry |
+| where results go | `--out` | `LINEBENCH_OUT` | `results/` in the current directory |
+| the definitions | `--definitions <checkout>` | | the ones built into the binary |
+
+A flag beats an environment variable, which beats the file. With nothing set, every command
+refuses with the recipe. Keep the corpus and the counters on a local disk: measuring across
+`/mnt` from WSL, or over a network share, measures the mount.
+
+The counters directory belongs to `setup`. A binary in it whose hash is not the one setup
+wrote is refused, with the two ways out: run setup again, or measure your own build as an
+instance, below.
+
+## What a run measures
+
+An instance is a definition, a binary and a name in the table. By default every counter
+definition is one instance, named after itself, with the binary setup fetched. `--counters`
+picks a subset and fixes the order:
+
+```
+linebench run --counters mezura,scc,tokei
+```
+
+The first instance named is the control, the one timed alone at the start and at the end of
+the run; `--control` names another. With no `--counters` the order is alphabetical, so name
+them when the control matters, and in a dev loop name your own counter first.
+
+A build of your own is an instance too, named `<counter>@<tag>`:
+
+```
+linebench run --counters mezura,mezura@dev --given mezura@dev=D:\dev\mezura\target\release\mezura.exe
+```
+
+The given binary is copied under `given/<instance>/` in the counters directory before anything
+reads it, fresh on every run, because the file cargo built measures slower than a plain copy
+of itself and because the same name in the same directory is what gets the same antivirus
+treatment. The copy is hashed and asked its version, and the record says `given` with the tag
+as its label. The instance runs under the counter's definition, or under its own when the
+flags of your build differ from the release's:
+
+```
+linebench run --counters mezura,mezura@dev --given mezura@dev=<path> --definition mezura@dev=D:\dev\mezura\.linebench\mezura.toml
+```
+
+Both fit in `linebench.conf`, so the dev loop is one word:
+
+```toml
+[given."mezura@dev"]
+binary     = "D:/dev/mezura/target/release/mezura.exe"
+definition = "D:/dev/mezura/.linebench/mezura.toml"
+```
+
+The tag is a column name. The bytes are identified afresh on every run by the hash and the
+version line in the record, so a stale entry cannot describe the wrong binary. A run holding
+any given instance is written under `results/local/`, which is gitignored, and the results page
+lists such runs in their own table under the release runs.
+
+## check
+
+```
+linebench check
+```
+
+Answers "is this machine ready to measure". It runs every instance once per table against the
+real corpus, reads the counts back, proves hyperfine works, and compares the counts with the
+corpus:
+
+```
+== check: linux at D:/corpora/linux
+   mezura         t1  ok       63,864 files      36,036,878 lines
+   scc            t1  ok       63,724 files      36,013,098 lines
+   tokei          t1  ok       63,782 files      36,022,156 lines
+   ...
+   hyperfine   ok
+   files   git 63,765   mezura 63,864   scc 63,724   tokei 63,782
+   lines   mezura 36,036,878   scc 36,013,098   tokei 36,022,156
+   within 1.0%
+
+all good.
+```
+
+The `git` number is the reference: the tracked files of the corpus carrying its extensions,
+counted by `git ls-files` with no counter involved, so "who is off" has an answer with two
+instances or with one. Lines have no such reference and are compared between instances. The
+tolerance belongs to the corpus, `tolerance = "1%"` in its definition, since how many odd files
+a tree holds is a property of the tree. Outside it a run still goes on, and the record and the
+page say what was found, because the times remain information, only no longer a comparison of
+equal work. This is what catches a definition that turns off less than it should.
+
+A count of zero fails the check: the definition names a language the tree does not have. On
+Windows the check also reports the MS Defender state, and unequal exclusions fail it exactly as
+they refuse a run.
+
+## noise
+
+```
+linebench noise
+```
+
+Answers "is this machine steady enough to benchmark right now", in about fifteen seconds. It
+samples the system-wide cpu with nothing of ours running, which is how many cores other
+processes are using, then runs the control five times, the first one cold on purpose. It
+reports the spread across the warm runs, the parallelism the workload reached, and whether the
+first run shows the tree was cold. `steady` and `relatively steady` exit 0, `somewhat
+unsteady` and `not steady` exit 1, so a script can gate on it.
+
+| | steady | relatively steady | somewhat unsteady | not steady |
+|---|---|---|---|---|
+| background | < 0.75 cores | 0.75 to 1.5 | 1.5 to 3 | 3 cores and up |
+| spread | < 5% | 5 to 10% | 10 to 15% | 15% and up |
+
+A real run samples the background the same way before it measures anything and records it.
+
+## Counters and corpora
+
+A counter is `counters/<name>.toml`. Its keys mirror the linejudge adapter where the idea is
+the same (`name`, `repository`, `version-flag`, `[acquisition]`, the `[read]` paths), so a
+block copies between the two files unchanged:
+
+```toml
+name         = "scc"
+repository   = "https://github.com/boyter/scc"
+version-flag = "--version"
+
+[acquisition]
+channel = "github-release-asset"
+name    = "boyter/scc"
+version = "4.0.0"
+
+[run]
+args           = ["{target}"]
+json           = ["--format", "json"]
+languages      = ["-i", "{extensions}"]
+same-work      = ["-c", "--no-cocomo", "--no-config"]
+same-work-note = "complexity and cost estimates off, no config file read"
+scrub-env      = ["SCC_CONFIG_PATH"]
+
+[read]
+each     = "[]"
+files    = "Count"
+lines    = "Lines"
+code     = "Code"
+comments = "Comment"
+blanks   = "Blank"
+```
+
+`args` is what gets timed and `json` is appended only for the capture that reads the counts.
+`languages` carries `{extensions}` or `{names}`; a counter that spells languages by name adds a
+`[language-names]` table from extension to its own name. `same-work` is what the same-work
+table adds, and `same-work-note` is what the results page prints for it. `scrub-env` names
+variables removed from the counter's environment. `[read]` says where the counts sit in the
+counter's own JSON, and every bucket beyond code and comments is read by name, so one block
+covers a counter that prints `blanks` in one mode and `extra` in another. A counter whose JSON
+the paths cannot reach declares `output = "tokei-json"` and a reader written here does it.
+
+The channels are `github-release-asset` (the file for this system and architecture is picked by
+the words in its name, and the published checksums are checked), `github-release-file` (a file
+named outright per system, `[acquisition.file]`), and `crates-io` (built with cargo, and the
+rustc that built it goes into the record). A counter that ships as a script runs through its
+own first line once the fetch has marked it runnable, and needs its interpreter on the
+machine, or `check` says so. A counter that is a script on Windows is the one case this format
+does not cover yet.
+
+A corpus is `corpora/<name>.toml`:
+
+```toml
+name       = "linux"
+remote     = "https://github.com/torvalds/linux.git"
+commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
+extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
+tolerance  = "1%"
+```
+
+Only what differs between one tree and another lives here. How each counter spells these
+extensions and what it turns off is in its own definition. A definition with a `commit` is
+checked before every run and every `check`: a checkout on anything else is refused. Leave
+`commit` blank to measure a tree as it stands, and the run is recorded as unpinned. `remote`
+is only needed to fetch.
+
+Both directories are built into the binary. To measure with a definition you are editing,
+point `--definitions` (or `definitions =` in the conf) at a checkout, and `counters/` and
+`corpora/` are read from there instead.
+
+## Where results go
+
+```
+results/
+├── README.md
+├── linux/linux/20260904-120000/
+├── linux/windows/20260904-130000/
+└── local/linux/windows/20260904-140000/
+```
+
+One directory per corpus, then per platform, then per run, named by its UTC timestamp.
+Nothing is ever overwritten. `results/README.md` is the page, rewritten after every run and
+on demand with `report`: the latest run per corpus and platform with its machine, its two
+tables and its trust checks, every run once there is more than one, the local builds apart,
+and the methodology and the terms.
+
+Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
+`summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`,
+hyperfine's own output; `transcript.txt`, everything the run printed; `notes.md`, the
+checklist to fill in by hand. `out/` holds what every counter printed and is deleted once the
+counts are read, unless `--keep-raw` says otherwise.
+
+## Reading the numbers
+
+Each run measures two tables. **Same work** pins every instance to the corpus's languages and
+its own same-work flags, and the file and line counts beside the times, checked against the
+corpus, prove the work was the same. **Out of the box** runs every instance bare, so the ratio
+mixes speed with how much each one chose to do.
+
+Every table is measured twice, once in each command order, and the numbers pool the two; how
+far the orders disagreed is a trust check on the page. The control, the same binary timed at
+the start and the end, gives the drift, and `drift` is the first thing to read.
+
+At the end of a run, and on the page, "since the last run" compares every instance with its
+own latest earlier measurement on the same machine at the same corpus commit, whatever else
+that run held. The control's shift is printed as the machine's own movement, so a change is
+read against it, and the settings that differed between the two runs are listed. A given
+instance whose build changed is compared all the same, with the build change on its line.
+
+On Windows the record also carries the Defender state: real-time protection, whether the
+corpus sits under an exclusion path, and per instance whether its process and its binary are
+excluded. **Unequal exclusions refuse the run**, because files opened by an excluded process
+are never scanned and the comparison would measure who escaped the antivirus.
+`--allow-unequal-exclusions` measures anyway and marks the record, the notes and the page.
+Reading the lists needs an elevated shell; unelevated, the record says `needs admin`.
+
+## Tests
+
+```
+cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+```

@@ -1,0 +1,24 @@
+name         = "scc"
+repository   = "https://github.com/boyter/scc"
+version-flag = "--version"
+
+[acquisition]
+channel = "github-release-asset"
+name    = "boyter/scc"
+version = "4.0.0"
+
+[run]
+args           = ["{target}"]
+json           = ["--format", "json"]
+languages      = ["-i", "{extensions}"]
+same-work      = ["-c", "--no-cocomo", "--no-config"]
+same-work-note = "complexity and cost estimates off, no config file read"
+scrub-env      = ["SCC_CONFIG_PATH"]
+
+[read]
+each     = "[]"
+files    = "Count"
+lines    = "Lines"
+code     = "Code"
+comments = "Comment"
+blanks   = "Blank"

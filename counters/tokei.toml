@@ -1,0 +1,27 @@
+name         = "tokei"
+repository   = "https://github.com/XAMPPRocky/tokei"
+version-flag = "--version"
+output       = "tokei-json"
+
+[acquisition]
+channel = "crates-io"
+name    = "tokei"
+version = "14.0.0"
+
+[run]
+args           = ["{target}"]
+json           = ["--output", "json"]
+languages      = ["-t", "{names}"]
+same-work      = []
+same-work-note = "nothing beyond the counting to turn off"
+scrub-env      = ["RAYON_NUM_THREADS"]
+
+[language-names]
+c    = "C"
+h    = "C Header"
+s    = "GNU Style Assembly"
+py   = "Python"
+pl   = "Perl"
+rs   = "Rust"
+sh   = "Shell"
+toml = "TOML"

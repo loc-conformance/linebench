@@ -1,0 +1,7 @@
+# This repository itself, measured as it stands. Small and unpinned, so its numbers mean nothing
+# and its job is to prove that every counter runs and its counts read back, which is what CI
+# needs on every system. Only Rust, since a counter without a TOML language would count fewer
+# files and fail the equal-work check for nothing.
+
+name       = "linebench"
+extensions = ["rs"]

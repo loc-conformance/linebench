@@ -1,0 +1,25 @@
+name         = "mezura"
+repository   = "https://github.com/subamanis/mezura"
+version-flag = "--version"
+
+[acquisition]
+channel = "github-release-asset"
+name    = "subamanis/mezura"
+version = "3.0.0"
+
+[run]
+args           = ["{target}"]
+json           = ["--output", "json"]
+languages      = ["--languages", "{extensions}"]
+same-work      = ["--hide", "keywords", "--count-minified", "--count-generated",
+                  "--counting", "region", "--no-heuristics"]
+same-work-note = "keyword counting off, minified and generated files counted, region counting model, content identification off"
+scrub-env      = ["MEZURA_PHASE_TIMING", "CLICOLOR_FORCE"]
+
+[read]
+files    = "total.files"
+lines    = "total.lines"
+code     = "total.code"
+comments = "total.comments"
+blanks   = "total.blanks"
+extra    = "total.extra"

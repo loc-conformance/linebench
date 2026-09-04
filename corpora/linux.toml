@@ -1,0 +1,13 @@
+# What gets counted. Only what differs between one tree and another lives here. How each counter
+# spells these extensions and what it turns off for equal work is in its own counters/<name>.toml.
+#
+# commit      blank means whatever the checkout is on, and the run is marked unpinned
+# remote      only needed to fetch, a tree already at the commit needs none
+# tolerance   how far a counter's file and line counts may sit from the others before the run
+#             is marked as unequal work
+
+name       = "linux"
+remote     = "https://github.com/torvalds/linux.git"
+commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
+extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
+tolerance  = "1%"

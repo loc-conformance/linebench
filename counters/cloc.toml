@@ -1,0 +1,27 @@
+name         = "cloc"
+repository   = "https://github.com/AlDanial/cloc"
+version-flag = "--version"
+
+[acquisition]
+channel = "github-release-file"
+name    = "AlDanial/cloc"
+version = "2.10"
+
+[acquisition.file]
+windows = "cloc-{version}.exe"
+other   = "cloc-{version}.pl"
+
+[run]
+args           = ["{target}"]
+json           = ["--json"]
+languages      = ["--include-ext={extensions}"]
+same-work      = ["--vcs", "git", "--skip-uniqueness"]
+same-work-note = "gitignore obeyed through git ls-files, duplicate file detection off"
+scrub-env      = []
+
+[read]
+files    = "header.n_files"
+lines    = "header.n_lines"
+code     = "SUM.code"
+comments = "SUM.comment"
+blanks   = "SUM.blank"
