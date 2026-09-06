@@ -1,5 +1,8 @@
 # linebench
 
+[![CI](https://github.com/loc-conformance/linebench/actions/workflows/ci.yml/badge.svg)](https://github.com/loc-conformance/linebench/actions/workflows/ci.yml)
+[![licence](https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-blue.svg)](#licence)
+
 A benchmark harness for line counters. It measures every counter on the same tree, on equal
 work, and puts beside every number what the machine was doing while it was measured: the
 background load, the power scheme, the antivirus state, whether the corpus was on the pinned
@@ -11,9 +14,10 @@ Today it knows cloc, mezura, scc and tokei. Adding one is a definition file.
 
 ## Prerequisites
 
-git and [hyperfine](https://github.com/sharkdp/hyperfine) on PATH. cargo only for a counter
-that publishes no binaries and has to be built (tokei), and perl for one that ships as a
-script (cloc on Linux and macOS).
+git, [hyperfine](https://github.com/sharkdp/hyperfine), curl or wget, and tar on PATH; every
+system but a bare Windows ships the last two, and Windows 10 and 11 have both. cargo only for a
+counter that publishes no binaries and has to be built (tokei), and perl for one that ships as
+a script (cloc on Linux and macOS).
 
 | system | command |
 |---|---|
@@ -48,7 +52,9 @@ linebench setup
 `setup` fetches every counter at the version its definition declares, into the counters
 directory, and the corpus at the commit its definition pins. What it fetched, and its sha256,
 goes into `linebench-fetched.toml` beside the binaries. A second `setup` answers "already
-here" for what matches and fetches again what does not.
+here" for what matches and fetches again what does not. It runs from an ordinary terminal and
+refuses an elevated one, so that the files it writes belong to you; only `run` is elevated.
+Where there is no ordinary user, as on a CI runner, `--allow-elevated` lifts that refusal.
 
 Then, on Linux and macOS:
 
@@ -64,12 +70,10 @@ linebench run
 
 Elevated, it sets the cpu governor to `performance` (Linux) or the power scheme to High
 performance (Windows) and puts it back when the run ends, whether it finishes, fails or is
-interrupted with Ctrl-C. Before it changes anything it writes what it changed into
-`linebench-prep.toml` beside the binaries, so a run that dies outright leaves a file the next
-command finds and puts back, and prints the command to put it back by hand. Unelevated it
-prints what it would have changed and asks before doing any work. `--yes` answers that
-question, `--no-prep` skips the whole thing even when elevated, and with no terminal attached
-it carries on.
+interrupted with Ctrl-C. Before it changes anything it prints the command that puts it back by
+hand, which is what a run that is killed outright leaves you with. Unelevated it prints what it
+would have changed and asks before doing any work. `--yes` answers that question, `--no-prep`
+skips the whole thing even when elevated, and with no terminal attached it carries on.
 
 The commands are `setup`, `check`, `noise`, `run` and `report`. `linebench help` lists every
 flag.
@@ -83,10 +87,11 @@ flag.
 | its checkout | `--corpus-path` | | the `[corpora]` entry |
 | where results go | `--out` | `LINEBENCH_OUT` | `results/` in the current directory |
 | the definitions | `--definitions <checkout>` | | the ones built into the binary |
+| the control | `--control <instance>` | | `control =` in the file, else the first instance |
 
-A flag beats an environment variable, which beats the file. With nothing set, every command
-refuses with the recipe. Keep the corpus and the counters on a local disk: measuring across
-`/mnt` from WSL, or over a network share, measures the mount.
+A flag beats an environment variable, which beats the file. With nothing set, every command but
+`report` refuses with the recipe. Keep the corpus and the counters on a local disk: measuring
+across `/mnt` from WSL, or over a network share, measures the mount.
 
 The counters directory belongs to `setup`. A binary in it whose hash is not the one setup
 wrote is refused, with the two ways out: run setup again, or measure your own build as an
@@ -95,16 +100,22 @@ instance, below.
 ## What a run measures
 
 An instance is a definition, a binary and a name in the table. By default every counter
-definition is one instance, named after itself, with the binary setup fetched. `--counters`
-picks a subset and fixes the order:
+definition is one instance, named after itself, with the binary setup fetched, and so is every
+`[given]` entry in `linebench.conf`. `--counters` picks a subset and fixes the order:
 
 ```
 linebench run --counters mezura,scc,tokei
 ```
 
-The first instance named is the control, the one timed alone at the start and at the end of
-the run; `--control` names another. With no `--counters` the order is alphabetical, so name
-them when the control matters, and in a dev loop name your own counter first.
+The control is the instance timed alone at the start and at the end of the run, and the
+workload `noise` times. `control = "mezura"` in `linebench.conf` names it for every run on
+the machine, `--control` for one run, and with neither it is the first instance named, which
+with no `--counters` is the first definition alphabetically, today cloc, the slowest of the
+four. A run that does not hold the conf's control says so and times its first instance as the
+control; a `--control` that is not in the run is refused. Keep the control the same across the
+runs you want compared: "since the last run" reads every change against the control's own
+shift, and that shift is only known when an earlier run timed the same control build. After
+the control's version changes, the block says so until a later run shares the new build.
 
 A build of your own is an instance too, named `<counter>@<tag>`:
 
@@ -134,7 +145,9 @@ definition = "D:/dev/mezura/.linebench/mezura.toml"
 The tag is a column name. The bytes are identified afresh on every run by the hash and the
 version line in the record, so a stale entry cannot describe the wrong binary. A run holding
 any given instance is written under `results/local/`, which is gitignored, and the results page
-lists such runs in their own table under the release runs.
+lists such runs in their own table under the release runs. An entry in the conf joins every run
+that names no `--counters`, so for a run meant for the release tables comment it out or name
+the release instances with `--counters`.
 
 ## check
 
@@ -143,8 +156,8 @@ linebench check
 ```
 
 Answers "is this machine ready to measure". It runs every instance once per table against the
-real corpus, reads the counts back, proves hyperfine works, and compares the counts with the
-corpus:
+real corpus, reads the counts back, proves hyperfine and git work, and compares the counts with
+the corpus:
 
 ```
 == check: linux at D:/corpora/linux
@@ -152,23 +165,34 @@ corpus:
    scc            t1  ok       63,724 files      36,013,098 lines
    tokei          t1  ok       63,782 files      36,022,156 lines
    ...
+
+>> check
    hyperfine   ok
-   files   git 63,765   mezura 63,864   scc 63,724   tokei 63,782
+   git         ok   2.51.0.windows.1
+   MS Defender ok, every counter excluded
+   corpus      under a Defender exclusion path
+
+   files   corpus 63,765   mezura 63,864   scc 63,724   tokei 63,782
    lines   mezura 36,036,878   scc 36,013,098   tokei 36,022,156
-   within 1.0%
+   within 1.0% of the corpus
 
 all good.
 ```
 
-The `git` number is the reference: the tracked files of the corpus carrying its extensions,
-counted by `git ls-files` with no counter involved, so "who is off" has an answer with two
-instances or with one. Lines have no such reference and are compared between instances. The
-tolerance belongs to the corpus, `tolerance = "1%"` in its definition, since how many odd files
-a tree holds is a property of the tree. Outside it a run still goes on, and the record and the
+The `corpus` number is the reference: the file count the corpus definition declares for its
+commit, `files = 63765`, so "who is off" has an answer with two instances or with one. Lines
+have no such reference and are compared between instances, and so are the files of a corpus
+that declares no count. The tolerance belongs to the corpus, `tolerance = "1%"` in its
+definition, since how many odd files a tree holds is a property of the tree. Outside it a run
+still goes on, and the record and the
 page say what was found, because the times remain information, only no longer a comparison of
-equal work. This is what catches a definition that turns off less than it should.
+equal work. This is what catches a definition that turns off less than it should, or selects
+less: cloc on Linux matches an extension by its exact case, so `--include-ext=s` skipped the
+1,350 `.S` files of the kernel and came out 2.2% under the corpus, which is where
+`extension-case` below comes from.
 
-A count of zero fails the check: the definition names a language the tree does not have. On
+A count of zero fails the check, and so does a count outside the tolerance: the definition
+names a language the tree does not have, or does not select what the others select. On
 Windows the check also reports the MS Defender state, and unequal exclusions fail it exactly as
 they refuse a run.
 
@@ -178,12 +202,13 @@ they refuse a run.
 linebench noise
 ```
 
-Answers "is this machine steady enough to benchmark right now", in about fifteen seconds. It
-samples the system-wide cpu with nothing of ours running, which is how many cores other
-processes are using, then runs the control five times, the first one cold on purpose. It
-reports the spread across the warm runs, the parallelism the workload reached, and whether the
-first run shows the tree was cold. `steady` and `relatively steady` exit 0, `somewhat
-unsteady` and `not steady` exit 1, so a script can gate on it.
+Answers "is this machine steady enough to benchmark right now". It samples the system-wide cpu
+for seven seconds with nothing of ours running, which is how many cores other processes are
+using, then runs the control five times, the first one cold on purpose: about fifteen seconds
+in all with mezura on the kernel, minutes with cloc. It reports the spread across the warm
+runs, the parallelism the workload reached, and whether the first run shows the tree was cold.
+`steady` and `relatively steady` exit 0, `somewhat unsteady` and `not steady` exit 1, so a
+script can gate on it.
 
 | | steady | relatively steady | somewhat unsteady | not steady |
 |---|---|---|---|---|
@@ -227,20 +252,24 @@ blanks   = "Blank"
 
 `args` is what gets timed and `json` is appended only for the capture that reads the counts.
 `languages` carries `{extensions}` or `{names}`; a counter that spells languages by name adds a
-`[language-names]` table from extension to its own name. `same-work` is what the same-work
-table adds, and `same-work-note` is what the results page prints for it. `scrub-env` names
-variables removed from the counter's environment. `[read]` says where the counts sit in the
-counter's own JSON, and every bucket beyond code and comments is read by name, so one block
-covers a counter that prints `blanks` in one mode and `extra` in another. A counter whose JSON
-the paths cannot reach declares `output = "tokei-json"` and a reader written here does it.
+`[language-names]` table from extension to its own name, matched whatever the case. A counter
+that matches an extension by its exact case says `extension-case = "exact"`, and `{extensions}`
+is then spelled as written, in lower case and in upper case, `s,S`; the default is `any`, for a
+counter that ignores case. `same-work` is what the same-work table adds, and `same-work-note`
+is what the results page prints for it. `scrub-env` names variables removed from the counter's
+environment. `[read]` says where the counts sit in the counter's own JSON, and every bucket
+beyond code and comments is read by name, so one block covers a counter that prints `blanks`
+in one mode and `extra` in another. A counter whose JSON the paths cannot reach declares
+`output = "tokei-json"` and a reader written here does it.
 
 The channels are `github-release-asset` (the file for this system and architecture is picked by
 the words in its name, and the published checksums are checked), `github-release-file` (a file
-named outright per system, `[acquisition.file]`), and `crates-io` (built with cargo, and the
-rustc that built it goes into the record). A counter that ships as a script runs through its
-own first line once the fetch has marked it runnable, and needs its interpreter on the
-machine, or `check` says so. A counter that is a script on Windows is the one case this format
-does not cover yet.
+named outright per system, `[acquisition.file]`, and stored under the counter's own name plus
+the release file's extension when it has one, so the process the antivirus sees stays
+`cloc.exe` across versions), and `crates-io` (built with cargo, and the rustc that built it
+goes into the record). A counter that ships as a script runs through its own first line once
+the fetch has marked it runnable, and needs its interpreter on the machine, or `check` says so.
+A counter that is a script on Windows is the one case this format does not cover yet.
 
 A corpus is `corpora/<name>.toml`:
 
@@ -248,15 +277,18 @@ A corpus is `corpora/<name>.toml`:
 name       = "linux"
 remote     = "https://github.com/torvalds/linux.git"
 commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
+files      = 63765
 extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
 tolerance  = "1%"
 ```
 
 Only what differs between one tree and another lives here. How each counter spells these
 extensions and what it turns off is in its own definition. A definition with a `commit` is
-checked before every run and every `check`: a checkout on anything else is refused. Leave
-`commit` blank to measure a tree as it stands, and the run is recorded as unpinned. `remote`
-is only needed to fetch.
+checked before every run and every `check`: a checkout on anything else is refused. `files` is
+the number of files carrying those extensions at that commit, written once by hand from what
+`check` prints, and required beside a `commit`. Leave `commit` blank to measure a tree as it
+stands: the run is recorded as unpinned, there is no count to declare, and the counters' file
+counts are compared with each other. `remote` is only needed to fetch.
 
 Both directories are built into the binary. To measure with a definition you are editing,
 point `--definitions` (or `definitions =` in the conf) at a checkout, and `counters/` and
@@ -281,8 +313,9 @@ and the methodology and the terms.
 Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
 `summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`,
 hyperfine's own output; `transcript.txt`, everything the run printed; `notes.md`, the
-checklist to fill in by hand. `out/` holds what every counter printed and is deleted once the
-counts are read, unless `--keep-raw` says otherwise.
+checklist to fill in by hand, with the "since the last run" block under it. `out/` holds every
+counter's JSON and is deleted once the counts are read; `--keep-raw` keeps it, and then also
+captures each counter's plain output beside the JSON.
 
 ## Reading the numbers
 
@@ -295,11 +328,14 @@ Every table is measured twice, once in each command order, and the numbers pool 
 far the orders disagreed is a trust check on the page. The control, the same binary timed at
 the start and the end, gives the drift, and `drift` is the first thing to read.
 
-At the end of a run, and on the page, "since the last run" compares every instance with its
-own latest earlier measurement on the same machine at the same corpus commit, whatever else
-that run held. The control's shift is printed as the machine's own movement, so a change is
-read against it, and the settings that differed between the two runs are listed. A given
-instance whose build changed is compared all the same, with the build change on its line.
+At the end of a run, and on the page, "since the last run" compares every instance's same-work
+time with its own latest earlier measurement on the same machine, at the same corpus commit and
+with the corpus on the same disk, whatever else that run held; earlier runs set aside for
+another cpu, commit or disk are listed with the reason. The control's shift is printed as the
+machine's own movement, so a change is read against it, and everything else that differed
+between the two runs is listed, from the power scheme to the drift and the equal-work verdict,
+per earlier run when the instances anchor on different ones. A given instance whose build
+changed is compared all the same, with the build change on its line.
 
 On Windows the record also carries the Defender state: real-time protection, whether the
 corpus sits under an exclusion path, and per instance whether its process and its binary are
@@ -311,6 +347,15 @@ Reading the lists needs an elevated shell; unelevated, the record says `needs ad
 ## Tests
 
 ```
-cargo test
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --check
 ```
+
+CI runs the three on Linux, Windows and macOS, then fetches the four counters and runs `check`
+over this repository as an unpinned corpus, so a definition that cannot be fetched, run or read
+on one of the three systems fails the build. No timing is read there.
+
+## Licence
+
+MIT or Apache-2.0, at your option.
