@@ -1,13 +1,16 @@
 use std::collections::BTreeSet;
+use std::io::Write;
 
 use linebench::counters::{Definition, read_definition_for};
-use linebench::fetch::{identify_counter, read_manifest, stage_given};
+use linebench::fetch::{INSTANCE_SEPARATOR, identify_counter, read_manifest, stage_given};
 use linebench::machine::Platform;
 use linebench::measure::Instance;
 
 use crate::config::{Locations, Options};
+use crate::output::print_warning;
 
 pub fn build_instances(
+    out: &mut dyn Write,
     definitions: &[Definition],
     locations: &Locations,
     options: &Options,
@@ -32,7 +35,9 @@ pub fn build_instances(
             return Err(format!("{name} is named twice"));
         }
         let instance = if let Some(entry) = locations.given.get(name) {
-            let (counter, tag) = name.split_once('@').expect("checked when resolved");
+            let (counter, tag) = name
+                .split_once(INSTANCE_SEPARATOR)
+                .expect("checked when resolved");
             let definition = match &entry.definition {
                 Some(path) => read_definition_for(path, counter)?,
                 None => find_definition(definitions, counter)?,
@@ -78,12 +83,29 @@ pub fn build_instances(
         };
         instances.push(instance);
     }
-    let control = match &options.control {
-        Some(named) => instances
-            .iter()
-            .position(|instance| instance.name() == named)
-            .ok_or_else(|| format!("--control {named} is not among the instances of this run"))?,
-        None => 0,
+    let find_control = |named: &str| instances.iter().position(|i| i.get_name() == named);
+    let control = match (&options.control, &locations.control) {
+        (Some(named), _) => find_control(named).ok_or_else(|| {
+            format!(
+                "--control {named} is not among the instances of this run ({})",
+                selected.join(", ")
+            )
+        })?,
+        (None, Some(named)) => match find_control(named) {
+            Some(found) => found,
+            None => {
+                print_warning(
+                    out,
+                    &format!(
+                        "the control {named} from linebench.conf is not in this run, so {} stands \
+                         in as the control",
+                        instances[0].get_name()
+                    ),
+                )?;
+                0
+            }
+        },
+        (None, None) => 0,
     };
     Ok((instances, control))
 }

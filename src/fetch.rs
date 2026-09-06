@@ -10,9 +10,12 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::corpus::shorten_hash;
 use crate::counters::{Acquisition, Channel, Definition};
+use crate::files::read_toml;
 use crate::machine::Platform;
-use crate::os::capture_with_status;
+use crate::measure::print_line;
+use crate::os::{Unfinished, capture_with_status};
 
 pub const MANIFEST_FILE: &str = "linebench-fetched.toml";
 pub const GIVEN_DIR: &str = "given";
@@ -70,14 +73,28 @@ pub struct Identity {
     pub origin: Origin,
 }
 
+impl Identity {
+    pub fn is_a_local_build(&self) -> bool {
+        matches!(self.origin, Origin::Given { .. })
+    }
+
+    pub fn describe_origin(&self) -> String {
+        match &self.origin {
+            Origin::Fetched { source, .. } => format!("fetched, {source}"),
+            Origin::Built { built_with, .. } => format!("built with {built_with}"),
+            Origin::Given { label } => {
+                format!("LOCAL BUILD {label}, sha256 {}", shorten_hash(&self.sha256))
+            }
+        }
+    }
+}
+
 pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
     let path = dir.join(MANIFEST_FILE);
     if !path.is_file() {
         return Ok(Manifest::default());
     }
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-    toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+    read_toml(&path)
 }
 
 pub fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<(), String> {
@@ -114,7 +131,7 @@ pub fn fetch_counter(
     {
         print_line(
             out,
-            &format!("{} {} is already here", definition.name, how.version),
+            &format!("  {} {} is already here", definition.name, how.version),
         )?;
         return Ok(target);
     }
@@ -127,7 +144,12 @@ pub fn fetch_counter(
         Channel::GithubReleaseAsset => {
             download_release_asset(out, how, &partial, system, arch, &named)
         }
-        Channel::GithubReleaseFile => download_release_file(out, how, &partial, &named),
+        Channel::GithubReleaseFile => download_release_file(
+            out,
+            how,
+            &partial,
+            &definition.get_release_file_name(system)?,
+        ),
     };
     let (binary, source, built_with) = assembled.inspect_err(|_| {
         let _ = fs::remove_dir_all(&partial);
@@ -165,7 +187,7 @@ pub fn fetch_counter(
     write_manifest(dir, manifest)?;
     print_line(
         out,
-        &format!("{} {} is ready", definition.name, how.version),
+        &format!("  {} {} is ready", definition.name, how.version),
     )?;
     Ok(target)
 }
@@ -299,8 +321,15 @@ pub fn decide_origin(
 
 pub fn read_version(definition: &Definition, binary: &Path) -> Result<String, String> {
     let program = binary.to_string_lossy();
-    let (ok, out) = capture_with_status(&program, &[definition.version_flag.as_str()])
-        .ok_or_else(|| format!("{} cannot be run on this machine", binary.display()))?;
+    let (ok, out) = capture_with_status(&program, &[definition.version_flag.as_str()]).map_err(
+        |unfinished| match unfinished {
+            Unfinished::NotFound if binary.is_file() => format!(
+                "{program} is there but cannot be started: the interpreter named on its first \
+                 line, or the loader its build was linked against, is not on this machine"
+            ),
+            other => other.describe(&format!("{program} {}", definition.version_flag)),
+        },
+    )?;
     let printed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     if !ok || printed.is_empty() {
         return Err(format!(
@@ -370,7 +399,7 @@ fn build_from_crates_io(
     print_line(
         out,
         &format!(
-            "building {} {} from crates.io, which takes a while",
+            "  building {} {} from crates.io, which takes a while",
             how.name, how.version
         ),
     )?;
@@ -405,7 +434,9 @@ fn build_from_crates_io(
     let binary = into.join(named);
     fs::rename(&built, &binary)
         .map_err(|error| format!("{} could not be moved into place: {error}", built.display()))?;
-    let built_with = capture_with_status("rustc", &["--version"]).map(|(_, out)| out);
+    let built_with = capture_with_status("rustc", &["--version"])
+        .ok()
+        .map(|(_, out)| out);
     Ok((
         binary,
         format!("crates.io {} {}", how.name, how.version),
@@ -424,7 +455,7 @@ fn download_release_asset(
     let release = find_release(&how.name, &how.version)?;
     let asset = find_asset_for(&release.assets, system, arch)?;
     let downloaded = check_file_name(asset)?;
-    print_line(out, &format!("downloading {downloaded}"))?;
+    print_line(out, &format!("  downloading {downloaded}"))?;
     let archive = into.join(&downloaded);
     download_to(&asset.browser_download_url, &archive)?;
     check_arrived_whole(&release.assets, &downloaded, &archive)?;
@@ -465,7 +496,7 @@ fn download_release_file(
                     .join(", ")
             )
         })?;
-    print_line(out, &format!("downloading {named}"))?;
+    print_line(out, &format!("  downloading {named}"))?;
     let binary = into.join(named);
     download_to(&asset.browser_download_url, &binary)?;
     check_arrived_whole(&release.assets, named, &binary)?;
@@ -666,13 +697,6 @@ fn run_program(program: &str, args: &[&str]) -> Result<String, Refusal> {
         }));
     }
     Ok(String::from_utf8_lossy(&finished.stdout).into_owned())
-}
-
-fn print_line(out: &mut dyn Write, message: &str) -> Result<(), String> {
-    writeln!(out, "  {message}")
-        .map_err(|error| format!("this report could not be written: {error}"))?;
-    out.flush()
-        .map_err(|error| format!("this report could not be written: {error}"))
 }
 
 #[cfg(test)]
@@ -909,6 +933,31 @@ blanks   = \"Blank\"
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(found.unwrap(), inner.join("scc"));
         assert!(missing.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_whose_interpreter_is_missing_is_told_apart_from_a_missing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = env::temp_dir().join("linebench-a_script_whose_interpreter_is_missing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("cloc.pl");
+        fs::write(&script, "#!/no-such-interpreter-linebench\nprint 1;\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let definition = parse_definition(SCC, Path::new("scc.toml")).unwrap();
+        let refused = read_version(&definition, &script).unwrap_err();
+        assert!(
+            refused.contains("the interpreter named on its first line"),
+            "{refused}"
+        );
+        let gone = read_version(&definition, &dir.join("absent")).unwrap_err();
+        assert!(
+            gone.ends_with("could not be run: no such program"),
+            "{gone}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn build_a_release() -> Vec<Asset> {

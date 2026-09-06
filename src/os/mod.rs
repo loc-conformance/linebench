@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::process::{Command, Stdio};
@@ -23,8 +23,28 @@ const IOWAIT_COLUMN: usize = 4;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unfinished {
+    NotFound,
+    CouldNotRun(String),
+    TimedOut,
+}
+
+impl Unfinished {
+    pub fn describe(&self, what: &str) -> String {
+        match self {
+            Unfinished::NotFound => format!("{what} could not be run: no such program"),
+            Unfinished::CouldNotRun(error) => format!("{what} could not be run: {error}"),
+            Unfinished::TimedOut => format!(
+                "{what} gave no answer in {} s and was stopped",
+                COMMAND_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
 pub fn capture_output(program: &str, args: &[&str]) -> Option<String> {
-    let (ok, out) = capture_with_status(program, args)?;
+    let (ok, out) = capture_with_status(program, args).ok()?;
     if ok && !out.is_empty() {
         Some(out)
     } else {
@@ -32,15 +52,25 @@ pub fn capture_output(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-pub fn capture_with_status(program: &str, args: &[&str]) -> Option<(bool, String)> {
+pub fn capture_with_status(program: &str, args: &[&str]) -> Result<(bool, String), Unfinished> {
+    let could_not_run = |error: &dyn std::fmt::Display| Unfinished::CouldNotRun(error.to_string());
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                Unfinished::NotFound
+            } else {
+                could_not_run(&error)
+            }
+        })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| could_not_run(&"its output could not be read"))?;
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = stdout.read_to_end(&mut bytes);
@@ -54,14 +84,16 @@ pub fn capture_with_status(program: &str, args: &[&str]) -> Option<(bool, String
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(Unfinished::TimedOut);
             }
-            Err(_) => return None,
+            Err(error) => return Err(could_not_run(&error)),
         }
     };
-    let bytes = reader.join().ok()?;
+    let bytes = reader
+        .join()
+        .map_err(|_| could_not_run(&"its output could not be read"))?;
     let out = String::from_utf8_lossy(&bytes).trim().to_string();
-    Some((status.success(), out))
+    Ok((status.success(), out))
 }
 
 pub fn run_quietly(program: &str, args: &[&str]) -> bool {
@@ -79,7 +111,7 @@ pub fn run_powershell(script: &str) -> Option<String> {
 }
 
 pub fn run_powershell_with_status(script: &str) -> Option<(bool, String)> {
-    capture_with_status(POWERSHELL, &["-NoProfile", "-Command", script])
+    capture_with_status(POWERSHELL, &["-NoProfile", "-Command", script]).ok()
 }
 
 #[cfg(windows)]
@@ -169,10 +201,19 @@ mod tests {
     }
 
     #[test]
-    fn a_command_s_output_comes_back_whole_and_a_missing_program_is_none() {
+    fn a_command_s_output_comes_back_whole_and_a_missing_program_says_so() {
         let (ok, out) = capture_with_status("git", &["--version"]).expect("git runs");
         assert!(ok && out.starts_with("git version"), "{out}");
-        assert_eq!(capture_with_status("no-such-program-linebench", &[]), None);
+        let missing = capture_with_status("no-such-program-linebench", &[]).unwrap_err();
+        assert_eq!(missing, Unfinished::NotFound);
+        assert_eq!(
+            missing.describe("no-such-program-linebench"),
+            "no-such-program-linebench could not be run: no such program"
+        );
+        assert_eq!(
+            Unfinished::TimedOut.describe("git ls-files"),
+            "git ls-files gave no answer in 30 s and was stopped"
+        );
         assert_eq!(capture_output("git", &["--no-such-flag-linebench"]), None);
     }
 

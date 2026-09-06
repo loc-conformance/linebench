@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::files::{parse_toml, read_text};
 use crate::machine::WINDOWS;
 
 pub const COUNTS: [&str; 4] = ["files", "lines", "code", "comments"];
@@ -32,6 +33,14 @@ pub enum Output {
     TokeiJson,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExtensionCase {
+    #[default]
+    Any,
+    Exact,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Acquisition {
@@ -50,6 +59,8 @@ pub struct Run {
     pub json: Vec<String>,
     pub languages: Vec<String>,
     #[serde(default)]
+    pub extension_case: ExtensionCase,
+    #[serde(default)]
     pub same_work: Vec<String>,
     #[serde(default)]
     pub same_work_note: String,
@@ -60,6 +71,25 @@ pub struct Run {
 impl Run {
     pub fn spells_by_name(&self) -> bool {
         self.languages.iter().any(|part| part.contains(NAMES))
+    }
+
+    pub fn spell_extensions(&self, extensions: &[String]) -> String {
+        if self.extension_case == ExtensionCase::Any {
+            return extensions.join(",");
+        }
+        let mut spelled: Vec<String> = Vec::new();
+        for extension in extensions {
+            for spelling in [
+                extension.clone(),
+                extension.to_lowercase(),
+                extension.to_uppercase(),
+            ] {
+                if !spelled.contains(&spelling) {
+                    spelled.push(spelling);
+                }
+            }
+        }
+        spelled.join(",")
     }
 }
 
@@ -107,11 +137,14 @@ impl Definition {
 
     pub fn spell_languages(&self, extensions: &[String]) -> Result<Vec<String>, String> {
         let (placeholder, spelled) = if self.run.spells_by_name() {
-            let missing: Vec<String> = extensions
-                .iter()
-                .filter(|ext| !self.language_names.contains_key(*ext))
-                .map(|ext| format!(".{ext}"))
-                .collect();
+            let mut names = Vec::new();
+            let mut missing = Vec::new();
+            for extension in extensions {
+                match self.find_language_name(extension) {
+                    Some(name) => names.push(name),
+                    None => missing.push(format!(".{extension}")),
+                }
+            }
             if !missing.is_empty() {
                 return Err(format!(
                     "{} does not say how it names {}: add them to [language-names] in {}",
@@ -120,13 +153,9 @@ impl Definition {
                     self.path.display()
                 ));
             }
-            let names: Vec<&str> = extensions
-                .iter()
-                .map(|ext| self.language_names[ext].as_str())
-                .collect();
             (NAMES, names.join(","))
         } else {
-            (EXTENSIONS, extensions.join(","))
+            (EXTENSIONS, self.run.spell_extensions(extensions))
         };
         Ok(self
             .run
@@ -137,29 +166,59 @@ impl Definition {
     }
 
     pub fn get_binary_name(&self, system: &str) -> Result<String, String> {
-        if let Some(acquisition) = &self.acquisition
-            && !acquisition.file.is_empty()
+        let released = if self
+            .acquisition
+            .as_ref()
+            .is_some_and(|how| !how.file.is_empty())
         {
-            let named = acquisition
-                .file
-                .get(system)
-                .or_else(|| acquisition.file.get(OTHER_SYSTEM))
-                .ok_or_else(|| {
-                    let keys: Vec<&str> = acquisition.file.keys().map(String::as_str).collect();
-                    format!(
-                        "{}: [acquisition.file] names no release file for {system}, only for {}; \
-                         add {system} or other",
-                        self.path.display(),
-                        keys.join(", ")
-                    )
-                })?;
-            return Ok(named.replace(VERSION, &acquisition.version));
-        }
-        if system == WINDOWS {
-            Ok(format!("{}{EXE_SUFFIX}", self.name))
+            Some(self.get_release_file_name(system)?)
         } else {
-            Ok(self.name.clone())
-        }
+            None
+        };
+        let extension = released
+            .as_deref()
+            .and_then(|released| Path::new(released).extension())
+            .and_then(|extension| extension.to_str())
+            .filter(|extension| extension.chars().all(|c| c.is_ascii_alphabetic()))
+            .map(|extension| format!(".{extension}"))
+            .unwrap_or_else(|| {
+                if system == WINDOWS {
+                    EXE_SUFFIX.to_string()
+                } else {
+                    String::new()
+                }
+            });
+        Ok(format!("{}{extension}", self.name))
+    }
+
+    pub fn find_language_name(&self, extension: &str) -> Option<&str> {
+        self.language_names
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(extension))
+            .map(|(_, name)| name.as_str())
+    }
+
+    pub fn get_release_file_name(&self, system: &str) -> Result<String, String> {
+        let Some(acquisition) = self.acquisition.as_ref().filter(|how| !how.file.is_empty()) else {
+            return Err(format!(
+                "{}: has no [acquisition.file] table, so no release file is named",
+                self.path.display()
+            ));
+        };
+        let named = acquisition
+            .file
+            .get(system)
+            .or_else(|| acquisition.file.get(OTHER_SYSTEM))
+            .ok_or_else(|| {
+                let keys: Vec<&str> = acquisition.file.keys().map(String::as_str).collect();
+                format!(
+                    "{}: [acquisition.file] names no release file for {system}, only for {}; \
+                     add {system} or other",
+                    self.path.display(),
+                    keys.join(", ")
+                )
+            })?;
+        Ok(named.replace(VERSION, &acquisition.version))
     }
 
     pub fn get_process_name(&self, system: &str) -> Result<String, String> {
@@ -184,15 +243,11 @@ pub fn read_definitions(dir: &Path) -> Result<Vec<Definition>, String> {
 }
 
 pub fn read_definition(path: &Path) -> Result<Definition, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{}: could not be read: {error}", path.display()))?;
-    parse_definition(&text, path)
+    parse_definition(&read_text(path)?, path)
 }
 
 pub fn read_definition_for(path: &Path, counter: &str) -> Result<Definition, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{}: could not be read: {error}", path.display()))?;
-    parse_definition_for(&text, path, counter)
+    parse_definition_for(&read_text(path)?, path, counter)
 }
 
 pub fn parse_definition(text: &str, path: &Path) -> Result<Definition, String> {
@@ -204,8 +259,7 @@ pub fn parse_definition(text: &str, path: &Path) -> Result<Definition, String> {
 }
 
 pub fn parse_definition_for(text: &str, path: &Path, counter: &str) -> Result<Definition, String> {
-    let mut definition: Definition =
-        toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut definition: Definition = parse_toml(text, path)?;
     definition.path = path.to_path_buf();
     check_definition(&definition, counter)?;
     Ok(definition)
@@ -295,6 +349,12 @@ fn check_run_block(at: &str, definition: &Definition) -> Result<(), String> {
         return Err(format!(
             "{at}has a [language-names] table and [run] languages never says {NAMES}, so it \
              would never be read"
+        ));
+    }
+    if run.spells_by_name() && run.extension_case == ExtensionCase::Exact {
+        return Err(format!(
+            "{at}[run] says extension-case = \"exact\" and languages says {NAMES}, so no \
+             extension is ever spelled and the setting would never be read"
         ));
     }
     Ok(())
@@ -531,7 +591,7 @@ h = "C Header"
         );
         let namer = parse(BY_NAME, "namer").unwrap();
         assert_eq!(
-            namer.spell_languages(&build_strings(&["c", "h"])).unwrap(),
+            namer.spell_languages(&build_strings(&["c", "H"])).unwrap(),
             ["-t", "C,C Header"]
         );
         let refusal = namer
@@ -553,6 +613,27 @@ h = "C Header"
             inline.spell_languages(&build_strings(&["c", "h"])).unwrap(),
             ["--include-ext=c,h"]
         );
+        let exact = parse(
+            &SCC.replace(
+                r#"["-i", "{extensions}"]"#,
+                r#"["-i", "{extensions}"]
+extension-case = "exact""#,
+            ),
+            "scc",
+        )
+        .unwrap();
+        assert_eq!(
+            exact
+                .spell_languages(&build_strings(&["S", "py", "Rmd", "7z"]))
+                .unwrap(),
+            ["-i", "S,s,py,PY,Rmd,rmd,RMD,7z,7Z"]
+        );
+        let unread = parse(
+            &BY_NAME.replace("[run]", "[run]\nextension-case = \"exact\""),
+            "namer",
+        )
+        .unwrap_err();
+        assert!(unread.contains("would never be read"), "{unread}");
     }
 
     #[test]
@@ -596,10 +677,29 @@ h = "C Header"
             );
         let cloc_like = parse(&release_file, "scc").unwrap();
         assert_eq!(
-            cloc_like.get_binary_name("windows").unwrap(),
+            cloc_like.get_release_file_name("windows").unwrap(),
             "scc-4.0.0.exe"
         );
-        assert_eq!(cloc_like.get_binary_name("macos").unwrap(), "scc-4.0.0.pl");
+        assert_eq!(cloc_like.get_binary_name("windows").unwrap(), "scc.exe");
+        assert_eq!(cloc_like.get_binary_name("macos").unwrap(), "scc.pl");
+        assert!(scc.get_release_file_name("windows").is_err());
+        for bare in ["scc-{version}", "scc-{version}-linux"] {
+            let unsuffixed = parse(
+                &release_file
+                    .replace(
+                        "other = \"scc-{version}.pl\"",
+                        &format!("other = \"{bare}\""),
+                    )
+                    .replace(
+                        "windows = \"scc-{version}.exe\"",
+                        &format!("windows = \"{bare}\""),
+                    ),
+                "scc",
+            )
+            .unwrap();
+            assert_eq!(unsuffixed.get_binary_name("linux").unwrap(), "scc");
+            assert_eq!(unsuffixed.get_binary_name("windows").unwrap(), "scc.exe");
+        }
 
         let windows_only = parse(&release_file.replace("other = ", "windows2 = "), "scc");
         assert!(windows_only.is_err());
@@ -613,7 +713,7 @@ h = "C Header"
             refusal.contains("names no release file for linux, only for windows"),
             "{refusal}"
         );
-        assert_eq!(cloc_like.get_process_name("macos").unwrap(), "scc-4.0.0.pl");
+        assert_eq!(cloc_like.get_process_name("macos").unwrap(), "scc.pl");
     }
 
     fn parse(text: &str, name: &str) -> Result<Definition, String> {

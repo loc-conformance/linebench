@@ -1,18 +1,18 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use linebench::corpus::Corpus;
+use linebench::fetch::INSTANCE_SEPARATOR;
+use linebench::files::read_toml;
 
 pub const CONFIG_FILE: &str = "linebench.conf";
 pub const COUNTERS_ENV: &str = "LINEBENCH_COUNTERS";
 pub const CORPUS_ENV: &str = "LINEBENCH_CORPUS";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
-const INSTANCE_SEPARATOR: char = '@';
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,7 @@ pub struct Config {
     pub corpora: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub given: BTreeMap<String, GivenEntry>,
+    pub control: Option<String>,
     pub out: Option<PathBuf>,
     pub definitions: Option<PathBuf>,
 }
@@ -62,6 +63,7 @@ pub struct Options {
     pub no_prep: bool,
     pub yes: bool,
     pub allow_unequal: bool,
+    pub allow_elevated: bool,
     pub keep_raw: bool,
 }
 
@@ -72,6 +74,7 @@ pub struct Locations {
     pub checkout: PathBuf,
     pub out: PathBuf,
     pub given: BTreeMap<String, GivenEntry>,
+    pub control: Option<String>,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -83,10 +86,14 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             _ => (arg.as_str(), None),
         };
         let mut value = || -> Result<String, String> {
-            attached
-                .clone()
-                .or_else(|| rest.next().cloned())
-                .ok_or_else(|| format!("{flag} needs a value"))
+            match &attached {
+                Some(text) if !text.is_empty() => Ok(text.clone()),
+                Some(_) => Err(format!("{flag} needs a value")),
+                None => rest
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| format!("{flag} needs a value")),
+            }
         };
         match flag {
             "run" | "setup" | "check" | "noise" | "report" | "help" | "version"
@@ -133,6 +140,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--no-prep" => options.no_prep = true,
             "--yes" | "-y" => options.yes = true,
             "--allow-unequal-exclusions" => options.allow_unequal = true,
+            "--allow-elevated" => options.allow_elevated = true,
             "--keep-raw" => options.keep_raw = true,
             other => {
                 return Err(format!(
@@ -160,9 +168,16 @@ pub fn read_config(path: &Path) -> Result<Config, String> {
     if !path.is_file() {
         return Ok(Config::default());
     }
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-    toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+    read_toml(path)
+}
+
+pub fn resolve_out(options: &Options, config: &Config) -> PathBuf {
+    options
+        .out
+        .clone()
+        .or_else(|| read_env(OUT_ENV).map(PathBuf::from))
+        .or_else(|| config.out.clone())
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT))
 }
 
 pub fn resolve_locations(
@@ -174,12 +189,12 @@ pub fn resolve_locations(
     let counters_dir = options
         .counters_dir
         .clone()
-        .or_else(|| env::var_os(COUNTERS_ENV).map(PathBuf::from))
+        .or_else(|| read_env(COUNTERS_ENV).map(PathBuf::from))
         .or_else(|| config.counters.clone());
     let corpus_name = options
         .corpus
         .clone()
-        .or_else(|| env::var(CORPUS_ENV).ok())
+        .or_else(|| read_env(CORPUS_ENV))
         .or_else(
             || match config.corpora.keys().collect::<Vec<_>>().as_slice() {
                 [only] => Some((*only).clone()),
@@ -214,12 +229,7 @@ pub fn resolve_locations(
                 config_path.display()
             )
         })?;
-    let out = options
-        .out
-        .clone()
-        .or_else(|| env::var_os(OUT_ENV).map(PathBuf::from))
-        .or_else(|| config.out.clone())
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT));
+    let out = resolve_out(options, config);
     let mut given = config.given.clone();
     for (instance, binary) in &options.given {
         let definition = options.definition_of.get(instance).cloned().or_else(|| {
@@ -259,7 +269,12 @@ pub fn resolve_locations(
         checkout,
         out,
         given,
+        control: config.control.clone(),
     })
+}
+
+pub fn read_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
 
 fn explain_the_missing_locations(config_path: &Path, corpora: &[Corpus]) -> String {
@@ -299,14 +314,6 @@ fn parse_number(flag: &str, text: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
 
-    fn parse(line: &str) -> Result<Options, String> {
-        let args: Vec<String> = std::iter::once("linebench")
-            .chain(line.split_whitespace())
-            .map(String::from)
-            .collect();
-        parse_args(&args)
-    }
-
     #[test]
     fn flags_are_read_with_and_without_the_equals_sign_and_the_command_anywhere() {
         let options = parse(
@@ -328,7 +335,8 @@ mod tests {
             Some(&PathBuf::from("D:/m/.linebench/mezura.toml"))
         );
         assert_eq!(options.runs, Some(5));
-        assert!(options.yes);
+        assert!(options.yes && !options.allow_elevated);
+        assert!(parse("setup --allow-elevated").unwrap().allow_elevated);
         assert!(
             parse("run --runs five")
                 .unwrap_err()
@@ -340,6 +348,11 @@ mod tests {
                 .contains("<counter>@<tag>=<path>")
         );
         assert!(parse("run --nonsense").unwrap_err().contains("--nonsense"));
+        assert!(
+            parse("run --out=")
+                .unwrap_err()
+                .contains("--out needs a value")
+        );
     }
 
     #[test]
@@ -374,5 +387,13 @@ mod tests {
         let refusal =
             resolve_locations(&orphan, &config, Path::new("linebench.conf"), &corpora).unwrap_err();
         assert!(refusal.contains("no --given or [given] entry"), "{refusal}");
+    }
+
+    fn parse(line: &str) -> Result<Options, String> {
+        let args: Vec<String> = std::iter::once("linebench")
+            .chain(line.split_whitespace())
+            .map(String::from)
+            .collect();
+        parse_args(&args)
     }
 }

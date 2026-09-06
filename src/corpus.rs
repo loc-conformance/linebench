@@ -5,12 +5,19 @@ use std::process::Command;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::files::{parse_toml, read_text};
+use crate::measure::print_line;
 use crate::os::{capture_output, capture_with_status};
 
 pub const DEFAULT_TOLERANCE: f64 = 0.01;
+pub const NOTHING_COMPARED_NO_COUNTS: &str =
+    "nothing compared: no instance counted both files and lines";
+pub const NOTHING_COMPARED_ALONE: &str =
+    "nothing compared: one instance with counts and no declared file count to hold it against";
 const CORPUS_SUFFIX: &str = "toml";
 const GIT_DIR: &str = ".git";
-const SHORT_COMMIT: usize = 9;
+const FULL_COMMIT: usize = 40;
+const SHORT_HASH: usize = 9;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +29,8 @@ pub struct Corpus {
     pub remote: String,
     #[serde(default)]
     pub commit: String,
+    #[serde(default)]
+    pub files: Option<u64>,
     pub extensions: Vec<String>,
     #[serde(
         default = "get_default_tolerance",
@@ -40,7 +49,6 @@ impl Corpus {
 pub struct GitState {
     pub head: Option<String>,
     pub clean: Option<bool>,
-    pub dirty: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +56,96 @@ pub struct Parity {
     pub reference_files: Option<u64>,
     pub tolerance: f64,
     pub problems: Vec<String>,
+    #[serde(default)]
+    pub missing: Vec<String>,
+    #[serde(default)]
+    pub counted: usize,
+    #[serde(default = "get_compared_default")]
+    pub compared: bool,
+}
+
+impl Parity {
+    pub fn judge(&self) -> Verdict<'_> {
+        let nothing_compared = (!self.compared).then(|| self.explain_nothing_compared());
+        if !self.problems.is_empty() {
+            Verdict::NotEqual {
+                problems: &self.problems,
+                nothing_compared,
+            }
+        } else if let Some(why) = nothing_compared {
+            Verdict::NotCompared(why)
+        } else {
+            Verdict::Equal {
+                reference: self.reference_files.filter(|files| *files > 0),
+                instances: self.counted,
+            }
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        let verdict = self.judge();
+        match verdict {
+            Verdict::NotEqual {
+                problems,
+                nothing_compared,
+            } => {
+                parts.push(format!("not equal: {}", problems.join("; ")));
+                parts.extend(nothing_compared.map(str::to_string));
+            }
+            Verdict::NotCompared(why) => parts.push(why.to_string()),
+            Verdict::Equal { .. } => parts.extend(verdict.describe_equality(self.tolerance)),
+        }
+        if !self.missing.is_empty() {
+            parts.push(format!(
+                "{} gave no readable counts",
+                self.missing.join(", ")
+            ));
+        }
+        parts.join("; ")
+    }
+
+    fn explain_nothing_compared(&self) -> &'static str {
+        if self.counted == 0 {
+            NOTHING_COMPARED_NO_COUNTS
+        } else {
+            NOTHING_COMPARED_ALONE
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict<'a> {
+    NotEqual {
+        problems: &'a [String],
+        nothing_compared: Option<&'static str>,
+    },
+    NotCompared(&'static str),
+    Equal {
+        reference: Option<u64>,
+        instances: usize,
+    },
+}
+
+impl Verdict<'_> {
+    pub fn describe_equality(self, tolerance: f64) -> Option<String> {
+        let tolerance = format_percent(tolerance);
+        match self {
+            Verdict::Equal {
+                reference: Some(_),
+                instances: 1,
+            } => Some(format!(
+                "within {tolerance} of the corpus, one instance so no line comparison"
+            )),
+            Verdict::Equal {
+                reference: Some(_), ..
+            } => Some(format!("within {tolerance} of the corpus")),
+            Verdict::Equal {
+                reference: None, ..
+            } => Some(format!("within {tolerance} of each other")),
+            Verdict::NotEqual { .. } | Verdict::NotCompared(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,14 +168,11 @@ pub fn read_corpora(dir: &Path) -> Result<Vec<Corpus>, String> {
 }
 
 pub fn read_corpus(path: &Path) -> Result<Corpus, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{}: could not be read: {error}", path.display()))?;
-    parse_corpus(&text, path)
+    parse_corpus(&read_text(path)?, path)
 }
 
 pub fn parse_corpus(text: &str, path: &Path) -> Result<Corpus, String> {
-    let mut corpus: Corpus =
-        toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut corpus: Corpus = parse_toml(text, path)?;
     corpus.path = path.to_path_buf();
     let stem = path
         .file_stem()
@@ -96,40 +191,43 @@ pub fn parse_corpus(text: &str, path: &Path) -> Result<Corpus, String> {
             path.display()
         ));
     }
-    let looks_like_a_hash = (7..=40).contains(&corpus.commit.len())
-        && corpus.commit.chars().all(|c| c.is_ascii_hexdigit());
-    if corpus.is_pinned() && !looks_like_a_hash {
+    let is_a_full_hash = corpus.commit.len() == FULL_COMMIT
+        && corpus
+            .commit
+            .chars()
+            .all(|c| c.is_ascii_digit() || (c.is_ascii_lowercase() && c.is_ascii_hexdigit()));
+    if corpus.is_pinned() && !is_a_full_hash {
         return Err(format!(
-            "{}: commit = \"{}\" is not a commit hash",
+            "{}: commit = \"{}\" has to be the full {FULL_COMMIT}-character hash in lower case, \
+             as git rev-parse prints it",
             path.display(),
             corpus.commit
+        ));
+    }
+    if corpus.is_pinned() && corpus.files.is_none() {
+        return Err(format!(
+            "{}: commit is set and files is not: run check over the checkout at that commit and \
+             write the file count the counters agree on",
+            path.display()
+        ));
+    }
+    if corpus.files == Some(0) {
+        return Err(format!(
+            "{}: files = 0 would hold every count against nothing",
+            path.display()
         ));
     }
     Ok(corpus)
 }
 
-pub fn read_git_state(checkout: &Path, with_untracked: bool) -> GitState {
+pub fn read_git_state(checkout: &Path) -> GitState {
     let shown = checkout.to_string_lossy();
-    let head = capture_output("git", &["-C", &shown, "rev-parse", "HEAD"]);
-    let mut args = vec!["-C", &shown, "status", "--porcelain"];
-    if !with_untracked {
-        args.push("-uno");
-    }
-    match capture_with_status("git", &args) {
-        Some((true, out)) => {
-            let dirty = parse_porcelain(&out);
-            GitState {
-                head,
-                clean: Some(dirty.is_empty()),
-                dirty,
-            }
-        }
-        _ => GitState {
-            head,
-            clean: None,
-            dirty: Vec::new(),
-        },
-    }
+    let head = read_head(checkout);
+    let clean = match capture_with_status("git", &["-C", &shown, "status", "--porcelain"]) {
+        Ok((true, out)) => Some(is_clean(&out)),
+        _ => None,
+    };
+    GitState { head, clean }
 }
 
 pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
@@ -143,21 +241,20 @@ pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
     if !corpus.is_pinned() {
         return Ok(());
     }
-    let state = read_git_state(checkout, false);
-    match state.head.as_deref() {
+    match read_head(checkout).as_deref() {
         Some(head) if head == corpus.commit => Ok(()),
         Some(head) => Err(format!(
             "{} is at {} and {} pins {}: run setup, or check that commit out",
             checkout.display(),
-            shorten_commit(head),
+            shorten_hash(head),
             corpus.name,
-            shorten_commit(&corpus.commit)
+            shorten_hash(&corpus.commit)
         )),
         None => Err(format!(
             "{} is not a git checkout and {} pins {}: run setup",
             checkout.display(),
             corpus.name,
-            shorten_commit(&corpus.commit)
+            shorten_hash(&corpus.commit)
         )),
     }
 }
@@ -165,7 +262,7 @@ pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
 pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Result<(), String> {
     let shown = checkout.to_string_lossy().into_owned();
     let head = if checkout.is_dir() {
-        capture_output("git", &["-C", &shown, "rev-parse", "HEAD"])
+        read_head(checkout)
     } else {
         None
     };
@@ -173,8 +270,8 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
         return print_line(
             out,
             &format!(
-                "corpus already pinned at {}",
-                shorten_commit(&corpus.commit)
+                "  corpus already pinned at {}",
+                shorten_hash(&corpus.commit)
             ),
         );
     }
@@ -182,7 +279,7 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     if !corpus.is_pinned() && (is_checkout || (checkout.is_dir() && corpus.remote.is_empty())) {
         return print_line(
             out,
-            &format!("{} is taken as it stands at {shown}", corpus.name),
+            &format!("  {} is taken as it stands at {shown}", corpus.name),
         );
     }
     if corpus.remote.is_empty() {
@@ -196,9 +293,9 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
             "{shown}\nis at {}, and {} pins {}.\nThere is no remote to fetch it from, so put \
              the checkout on that commit yourself, or clear the commit from the definition.",
             head.as_deref()
-                .map_or("no commit at all".to_string(), shorten_commit),
+                .map_or("no commit at all".to_string(), shorten_hash),
             corpus.name,
-            shorten_commit(&corpus.commit)
+            shorten_hash(&corpus.commit)
         ));
     }
     if !corpus.is_pinned() && !is_checkout && holds_anything_but_git(checkout) {
@@ -218,15 +315,15 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
         print_line(
             out,
             &format!(
-                "fetching {} from {}",
-                shorten_commit(&corpus.commit),
+                "  fetching {} from {}",
+                shorten_hash(&corpus.commit),
                 corpus.remote
             ),
         )?;
     } else {
         print_line(
             out,
-            &format!("cloning the default branch of {}", corpus.remote),
+            &format!("  cloning the default branch of {}", corpus.remote),
         )?;
     }
     let wanted = if corpus.is_pinned() {
@@ -238,67 +335,83 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     run_git(&["-C", &shown, "checkout", "-q", "FETCH_HEAD"])
 }
 
-pub fn count_reference_files(checkout: &Path, extensions: &[String]) -> Option<u64> {
-    let shown = checkout.to_string_lossy();
-    let (ok, listing) = capture_with_status("git", &["-C", &shown, "ls-files", "-z"])?;
-    if !ok {
-        return None;
-    }
-    Some(count_files_with(&listing, extensions)).filter(|files| *files > 0)
-}
-
-pub fn count_files_with(nul_separated_listing: &str, extensions: &[String]) -> u64 {
-    nul_separated_listing
-        .split('\0')
-        .filter(|entry| !entry.is_empty())
-        .filter(|entry| {
-            Path::new(entry)
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| {
-                    extensions
-                        .iter()
-                        .any(|wanted| wanted.eq_ignore_ascii_case(ext))
-                })
+pub fn judge_parity(
+    reference_files: Option<u64>,
+    counted: &[Counted],
+    expected: &[String],
+    tolerance: f64,
+) -> Parity {
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|name| !counted.iter().any(|count| count.instance == **name))
+        .cloned()
+        .collect();
+    let mut problems: Vec<String> = counted
+        .iter()
+        .filter_map(|count| {
+            describe_empty_count(count.files, count.lines)
+                .map(|what| format!("{} {what}", count.instance))
         })
-        .count() as u64
-}
-
-pub fn judge_parity(reference_files: Option<u64>, counted: &[Counted], tolerance: f64) -> Parity {
-    let mut problems = Vec::new();
-    match reference_files {
-        Some(reference) if reference > 0 => {
-            for count in counted {
+        .collect();
+    let with_counts: Vec<Counted> = counted
+        .iter()
+        .filter(|count| count.files > 0 && count.lines > 0)
+        .cloned()
+        .collect();
+    let compared = match reference_files {
+        Some(reference) => {
+            for count in &with_counts {
                 let deviation = count.files as f64 / reference as f64 - 1.0;
                 if deviation.abs() > tolerance {
                     let direction = if deviation < 0.0 { "under" } else { "over" };
                     problems.push(format!(
-                        "{} files {} {direction} the corpus ({} against {reference})",
+                        "{} files {} {direction} the corpus ({} against {reference} declared)",
                         count.instance,
                         format_percent(deviation.abs()),
                         count.files
                     ));
                 }
             }
+            !with_counts.is_empty()
         }
-        _ => {
-            if let Some(problem) = describe_spread("files", counted, |c| c.files, tolerance) {
+        None if with_counts.len() < 2 => false,
+        None => {
+            if let Some(problem) = describe_spread("files", &with_counts, |c| c.files, tolerance) {
                 problems.push(problem);
             }
+            true
         }
-    }
-    if let Some(problem) = describe_spread("lines", counted, |c| c.lines, tolerance) {
+    };
+    if with_counts.len() >= 2
+        && let Some(problem) = describe_spread("lines", &with_counts, |c| c.lines, tolerance)
+    {
         problems.push(problem);
     }
     Parity {
         reference_files,
         tolerance,
         problems,
+        missing,
+        counted: with_counts.len(),
+        compared,
+    }
+}
+
+pub fn describe_empty_count(files: u64, lines: u64) -> Option<String> {
+    match (files, lines) {
+        (0, 0) => Some("counted nothing".to_string()),
+        (0, _) => Some(format!("counted no files and {lines} lines")),
+        (_, 0) => Some(format!("counted {files} files and no lines")),
+        _ => None,
     }
 }
 
 pub fn format_percent(fraction: f64) -> String {
     format!("{:.1}%", fraction * 100.0)
+}
+
+pub fn shorten_hash(hash: &str) -> String {
+    hash.chars().take(SHORT_HASH).collect()
 }
 
 fn describe_spread(
@@ -310,9 +423,6 @@ fn describe_spread(
     let least = counted.iter().min_by_key(|c| pick(c))?;
     let most = counted.iter().max_by_key(|c| pick(c))?;
     let (low, high) = (pick(least), pick(most));
-    if low == 0 {
-        return None;
-    }
     let spread = high as f64 / low as f64 - 1.0;
     (spread > tolerance).then(|| {
         format!(
@@ -324,22 +434,19 @@ fn describe_spread(
     })
 }
 
-fn parse_porcelain(out: &str) -> Vec<String> {
-    out.lines()
-        .filter_map(|line| {
-            line.trim_start()
-                .split_once(' ')
-                .map(|(_, rest)| rest.trim())
-        })
-        .filter(|rest| !rest.is_empty())
-        .map(|rest| {
-            rest.rsplit(" -> ")
-                .next()
-                .unwrap_or(rest)
-                .trim_matches('"')
-                .to_string()
-        })
-        .collect()
+fn read_head(checkout: &Path) -> Option<String> {
+    capture_output(
+        "git",
+        &["-C", &checkout.to_string_lossy(), "rev-parse", "HEAD"],
+    )
+}
+
+fn is_clean(porcelain: &str) -> bool {
+    porcelain.lines().all(|line| line.trim().is_empty())
+}
+
+fn get_compared_default() -> bool {
+    true
 }
 
 fn holds_anything_but_git(dir: &Path) -> bool {
@@ -359,15 +466,6 @@ fn run_git(args: &[&str]) -> Result<(), String> {
         "this failed, and the corpus cannot be set up without it:\n  git {}",
         args.join(" ")
     ))
-}
-
-fn shorten_commit(commit: &str) -> String {
-    commit.chars().take(SHORT_COMMIT).collect()
-}
-
-fn print_line(out: &mut dyn Write, message: &str) -> Result<(), String> {
-    writeln!(out, "  {message}")
-        .map_err(|error| format!("this report could not be written: {error}"))
 }
 
 fn get_default_tolerance() -> f64 {
@@ -407,6 +505,22 @@ mod tests {
         let linux = corpora.iter().find(|c| c.name == "linux").unwrap();
         assert!(linux.is_pinned() && !corpora[0].is_pinned());
         assert_eq!(linux.tolerance, 0.01);
+        assert_eq!(linux.files, Some(63765));
+        assert_eq!(corpora[0].files, None);
+        let pinned = "name = \"t\"\nextensions = [\"c\"]\ncommit = \"0000000000000000000000000000000000000000\"\n";
+        assert!(
+            parse_corpus(pinned, Path::new("t.toml"))
+                .unwrap_err()
+                .contains("commit is set and files is not")
+        );
+        assert!(
+            parse_corpus(
+                "name = \"t\"\nextensions = [\"c\"]\nfiles = 0\n",
+                Path::new("t.toml")
+            )
+            .unwrap_err()
+            .contains("files = 0")
+        );
 
         let bare = "name = \"t\"\nextensions = [\"c\"]\n";
         assert_eq!(
@@ -437,14 +551,6 @@ mod tests {
     }
 
     #[test]
-    fn the_reference_counts_tracked_files_by_extension_whatever_its_case() {
-        let listing = "a/b.c\0d.S\0e.h\0f.txt\0dir.c/g.rs\0\0";
-        let wanted = ["c", "h", "s"].map(String::from);
-        assert_eq!(count_files_with(listing, &wanted), 3);
-        assert_eq!(count_files_with("", &wanted), 0);
-    }
-
-    #[test]
     fn parity_names_who_is_off_and_by_how_much() {
         let counted = [
             count("mezura", 61234, 36_100_000),
@@ -452,41 +558,101 @@ mod tests {
             count("tokei", 61234, 36_120_000),
             count("cloc", 57900, 34_000_000),
         ];
-        let parity = judge_parity(Some(61234), &counted, 0.01);
+        let expected = ["cloc", "mezura", "scc", "tokei"].map(String::from);
+        let parity = judge_parity(Some(61234), &counted, &expected, 0.01);
         assert_eq!(
             parity.problems,
             [
-                "cloc files 5.4% under the corpus (57900 against 61234)",
+                "cloc files 5.4% under the corpus (57900 against 61234 declared)",
                 "lines spread 6.2% (cloc 34000000 to tokei 36120000)"
             ]
         );
-        assert!(
-            judge_parity(Some(61234), &counted[..3], 0.01)
-                .problems
-                .is_empty()
+        assert!(parity.compared && parity.missing.is_empty());
+        assert_eq!(parity.counted, 4);
+        let unread = judge_parity(Some(61234), &counted[..3], &expected, 0.01);
+        assert!(unread.problems.is_empty() && unread.compared);
+        assert_eq!(unread.missing, ["cloc"]);
+        assert_eq!(
+            unread.describe(),
+            "within 1.0% of the corpus; cloc gave no readable counts"
+        );
+        let unreadable = judge_parity(Some(61234), &[], &expected, 0.01);
+        assert!(unreadable.problems.is_empty() && !unreadable.compared);
+        assert_eq!(
+            unreadable.judge(),
+            Verdict::NotCompared(NOTHING_COMPARED_NO_COUNTS)
         );
 
         let two = [
             count("mezura", 61234, 30_000_000),
             count("scc", 61234, 40_000_000),
         ];
-        let parity = judge_parity(None, &two, 0.01);
+        let parity = judge_parity(None, &two, &expected[1..3], 0.01);
         assert_eq!(
             parity.problems,
             ["lines spread 33.3% (mezura 30000000 to scc 40000000)"]
         );
-        assert!(judge_parity(None, &two[..1], 0.01).problems.is_empty());
-        assert!(judge_parity(Some(0), &two[..1], 0.01).problems.is_empty());
+        assert!(parity.compared);
+        let alone = judge_parity(None, &two[..1], &expected[1..2], 0.01);
+        assert!(alone.problems.is_empty() && alone.missing.is_empty() && !alone.compared);
+        assert_eq!(alone.describe(), NOTHING_COMPARED_ALONE);
+        let against_git = judge_parity(Some(61234), &two[..1], &expected[1..2], 0.01);
+        assert!(against_git.compared);
+        assert_eq!(
+            against_git.describe(),
+            "within 1.0% of the corpus, one instance so no line comparison"
+        );
+
+        let nothing = [count("mezura", 0, 0), count("scc", 61234, 30_000_000)];
+        let one_empty = judge_parity(None, &nothing, &expected[1..3], 0.01);
+        assert_eq!(one_empty.problems, ["mezura counted nothing"]);
+        assert!(!one_empty.compared);
+        assert_eq!(
+            one_empty.describe(),
+            format!("not equal: mezura counted nothing; {NOTHING_COMPARED_ALONE}")
+        );
+        let hollow = [count("mezura", 812, 0)];
+        assert_eq!(
+            judge_parity(Some(812), &hollow, &expected[1..2], 0.01).problems,
+            ["mezura counted 812 files and no lines"]
+        );
+        let alike = [
+            count("mezura", 61234, 30_000_000),
+            count("scc", 61234, 30_000_000),
+        ];
+        let two_against_the_corpus = judge_parity(Some(61234), &alike, &expected[1..3], 0.01);
+        assert_eq!(
+            two_against_the_corpus.describe(),
+            "within 1.0% of the corpus"
+        );
+        assert_eq!(
+            judge_parity(None, &alike, &expected[1..3], 0.01).describe(),
+            "within 1.0% of each other"
+        );
     }
 
     #[test]
-    fn porcelain_lines_give_the_path_after_the_status_and_after_a_rename() {
-        let out = " M src/a.rs\n?? new.txt\nR  old.txt -> \"new name.txt\"\n";
+    fn an_empty_count_is_described_by_which_half_is_missing() {
         assert_eq!(
-            parse_porcelain(out),
-            ["src/a.rs", "new.txt", "new name.txt"]
+            describe_empty_count(0, 0).as_deref(),
+            Some("counted nothing")
         );
-        assert!(parse_porcelain("").is_empty());
+        assert_eq!(
+            describe_empty_count(0, 8635).as_deref(),
+            Some("counted no files and 8635 lines")
+        );
+        assert_eq!(
+            describe_empty_count(812, 0).as_deref(),
+            Some("counted 812 files and no lines")
+        );
+        assert_eq!(describe_empty_count(812, 8635), None);
+    }
+
+    #[test]
+    fn a_porcelain_status_is_clean_only_when_it_says_nothing() {
+        assert!(is_clean("") && is_clean("\n  \n"));
+        assert!(!is_clean(" M src/a.rs\n"));
+        assert!(!is_clean("?? new.txt\n"));
     }
 
     fn count(instance: &str, files: u64, lines: u64) -> Counted {

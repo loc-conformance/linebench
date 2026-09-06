@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::machine::{Platform, UNKNOWN};
+use crate::machine::Platform;
+use crate::machine::UNKNOWN;
 use crate::os::run_powershell_with_status;
 
 const PLACEHOLDER: &str = "N/A";
@@ -66,6 +67,28 @@ pub struct CounterBinary {
     pub name: String,
     pub path: PathBuf,
     pub process: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessExclusions {
+    NoCounters,
+    AllExcluded,
+    NoneExcluded,
+    Unknown(Answer),
+    Unequal,
+}
+
+pub fn judge_process_exclusions(state: &DefenderState) -> ProcessExclusions {
+    let answers: Vec<Answer> = state.counters.values().map(|e| e.process).collect();
+    match answers.as_slice() {
+        [] => ProcessExclusions::NoCounters,
+        [first, rest @ ..] if rest.iter().all(|a| a == first) => match first {
+            Answer::Yes => ProcessExclusions::AllExcluded,
+            Answer::No => ProcessExclusions::NoneExcluded,
+            other => ProcessExclusions::Unknown(*other),
+        },
+        _ => ProcessExclusions::Unequal,
+    }
 }
 
 pub fn read_defender_state(
@@ -193,7 +216,8 @@ fn read_exclusion_lists() -> Option<ExclusionLists> {
     if !ok {
         return None;
     }
-    let mut blocks = out.split(BLOCK_SEPARATOR).map(str::trim);
+    let blocks = split_blocks(&out);
+    let mut blocks = blocks.iter().map(|block| block.trim());
     let processes = parse_exclusion_list(blocks.next()?);
     let paths = parse_exclusion_list(blocks.next()?);
     let realtime = blocks
@@ -206,6 +230,19 @@ fn read_exclusion_lists() -> Option<ExclusionLists> {
         paths,
         realtime,
     })
+}
+
+fn split_blocks(out: &str) -> Vec<String> {
+    let mut blocks = vec![String::new()];
+    for line in out.lines() {
+        if line.trim() == BLOCK_SEPARATOR {
+            blocks.push(String::new());
+        } else if let Some(block) = blocks.last_mut() {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    blocks
 }
 
 fn split_by_answer(
@@ -310,6 +347,15 @@ mod tests {
             state.counters.insert(name.to_string(), known(true, true));
         }
         assert_eq!(find_unequal_exclusions(&state), None);
+    }
+
+    #[test]
+    fn the_blocks_are_split_on_a_separator_line_and_never_inside_a_path() {
+        let out = "mezura.exe|scc.exe\n---\nC:\\build---cache|D:\\corpora\n---\nTrue\n";
+        let blocks = split_blocks(out);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[1].trim(), "C:\\build---cache|D:\\corpora");
+        assert_eq!(blocks[2].trim(), "True");
     }
 
     #[test]

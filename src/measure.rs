@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -24,6 +24,7 @@ const HYPERFINE: &str = "hyperfine";
 const WARNING_PREFIX: &str = "Warning:";
 const ERROR_PREFIX: &str = "Error";
 const ESCAPE: char = '\x1b';
+const PLAIN_IN_A_COMMAND: &str = "_-./:@=+,";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Table {
@@ -64,7 +65,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn name(&self) -> &str {
+    pub fn get_name(&self) -> &str {
         &self.identity.instance
     }
 }
@@ -86,26 +87,33 @@ impl Default for Settings {
     }
 }
 
+pub struct Capture {
+    pub path: PathBuf,
+    pub stderr: String,
+}
+
 pub struct Runner {
+    pub failures: Vec<String>,
+    pub warnings: Vec<String>,
+    pub capture_failures: Vec<String>,
+    pub commands: BTreeMap<String, String>,
     res: PathBuf,
     settings: Settings,
     platform: Platform,
     scrub: Vec<String>,
-    pub failures: Vec<String>,
-    pub warnings: Vec<String>,
-    pub commands: BTreeMap<String, String>,
 }
 
 impl Runner {
     pub fn new(res: &Path, settings: Settings, platform: Platform, scrub: Vec<String>) -> Runner {
         Runner {
+            failures: Vec::new(),
+            warnings: Vec::new(),
+            capture_failures: Vec::new(),
+            commands: BTreeMap::new(),
             res: res.to_path_buf(),
             settings,
             platform,
             scrub,
-            failures: Vec::new(),
-            warnings: Vec::new(),
-            commands: BTreeMap::new(),
         }
     }
 
@@ -169,43 +177,66 @@ impl Runner {
         program: &Path,
         args: &[String],
         as_json: bool,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<Capture, String> {
         let suffix = if as_json { "json" } else { "txt" };
         let path = self.res.join(OUT_DIR).join(format!("{name}.{suffix}"));
         let file = File::create(&path)
             .map_err(|error| format!("{} could not be created: {error}", path.display()))?;
-        let stderr = if as_json {
-            Stdio::null()
-        } else {
-            Stdio::from(file.try_clone().map_err(|error| error.to_string())?)
-        };
         let mut command = Command::new(program);
         command
             .args(args)
             .stdin(Stdio::null())
             .stdout(file)
-            .stderr(stderr);
+            .stderr(Stdio::piped());
         for name in &self.scrub {
             command.env_remove(name);
         }
-        let status = command
-            .status()
+        let finished = command
+            .output()
             .map_err(|error| format!("{} could not be run: {error}", program.display()))?;
-        if !status.success() {
-            let label = format!("{name}.{suffix}");
+        let stderr = String::from_utf8_lossy(&finished.stderr).into_owned();
+        if !as_json
+            && !finished.stderr.is_empty()
+            && let Err(error) = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&finished.stderr))
+        {
             print_line(
                 out,
                 &format!(
-                    "WARNING: {} exited {} while writing {label}",
-                    program.display(),
-                    status
-                        .code()
-                        .map_or("by a signal".to_string(), |c| c.to_string())
+                    "WARNING: what {name} printed on stderr could not be kept in {}: {error}",
+                    path.display()
                 ),
             )?;
-            self.failures.push(label);
         }
-        Ok(path)
+        if !finished.status.success() {
+            let label = format!("{name}.{suffix}");
+            let exit = finished
+                .status
+                .code()
+                .map_or("by a signal".to_string(), |c| c.to_string());
+            print_line(
+                out,
+                &format!(
+                    "WARNING: {} exited {exit} while writing {label}",
+                    program.display()
+                ),
+            )?;
+            print_line(out, &format!("         {}", join_command(program, args)))?;
+            for line in stderr.lines().filter(|line| !line.trim().is_empty()) {
+                print_line(out, &format!("         {line}"))?;
+            }
+            if as_json {
+                let program = program.file_name().map_or_else(
+                    || program.display().to_string(),
+                    |f| f.to_string_lossy().into_owned(),
+                );
+                self.capture_failures
+                    .push(format!("{program} exited {exit} while writing {label}"));
+            }
+        }
+        Ok(Capture { path, stderr })
     }
 }
 
@@ -217,19 +248,8 @@ pub fn run_phases(
     corpus: &Path,
     extensions: &[String],
 ) -> Result<(), String> {
-    print_line(
-        out,
-        "\n== output and JSON captures (also the settling runs)",
-    )?;
-    for as_json in [false, true] {
-        for table in TABLES {
-            for instance in instances {
-                let name = format!("{}-{}", table.as_str(), instance.name());
-                let args = build_args(instance, corpus, extensions, table, as_json)?;
-                runner.capture_output(out, &name, &instance.identity.binary, &args, as_json)?;
-            }
-        }
-    }
+    print_line(out, "\n== JSON captures (also the settling runs)")?;
+    capture_every_instance(out, runner, instances, corpus, extensions, true)?;
     let bare = build_command(&instances[control], corpus, extensions, Table::OutOfTheBox)?;
     print_line(out, "\n== opening control run")?;
     runner.run_hyperfine(out, CONTROL_START, std::slice::from_ref(&bare))?;
@@ -239,12 +259,38 @@ pub fn run_phases(
             .iter()
             .map(|instance| build_command(instance, corpus, extensions, table))
             .collect::<Result<_, _>>()?;
-        runner.run_hyperfine(out, &format!("{}-{FORWARD}", table.as_str()), &commands)?;
+        runner.run_hyperfine(out, &get_set_name(table, FORWARD), &commands)?;
         let reversed: Vec<(String, String)> = commands.into_iter().rev().collect();
-        runner.run_hyperfine(out, &format!("{}-{REVERSE}", table.as_str()), &reversed)?;
+        runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed)?;
     }
     print_line(out, "\n== closing control run")?;
     runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare))
+}
+
+pub fn capture_plain_output(
+    out: &mut dyn Write,
+    runner: &mut Runner,
+    instances: &[Instance],
+    corpus: &Path,
+    extensions: &[String],
+) -> Result<(), String> {
+    print_line(out, "\n== plain output captures, kept beside the record")?;
+    if let Err(refused) = capture_every_instance(out, runner, instances, corpus, extensions, false)
+    {
+        print_line(
+            out,
+            &format!("WARNING: the plain output captures stopped: {refused}"),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn get_capture_name(table: Table, instance: &str) -> String {
+    format!("{}-{instance}", table.as_str())
+}
+
+pub fn get_set_name(table: Table, order: &str) -> String {
+    format!("{}-{order}", table.as_str())
 }
 
 pub fn build_args(
@@ -267,7 +313,7 @@ pub fn build_command(
 ) -> Result<(String, String), String> {
     let args = build_args(instance, corpus, extensions, table, false)?;
     Ok((
-        instance.name().to_string(),
+        instance.get_name().to_string(),
         join_command(&instance.identity.binary, &args),
     ))
 }
@@ -279,12 +325,16 @@ pub fn join_command(binary: &Path, args: &[String]) -> String {
 }
 
 pub fn quote(part: &str) -> String {
-    let part = part.replace('\\', "/");
-    if part.contains(' ') && !part.starts_with('"') {
-        format!("\"{part}\"")
+    let part = if cfg!(windows) {
+        part.replace('\\', "/")
     } else {
-        part
+        part.to_string()
+    };
+    let is_plain = |c: char| c.is_ascii_alphanumeric() || PLAIN_IN_A_COMMAND.contains(c);
+    if part.starts_with('"') || part.chars().all(is_plain) {
+        return part;
     }
+    format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 pub fn find_warnings(stderr: &str) -> Vec<String> {
@@ -314,6 +364,13 @@ pub fn strip_ansi(text: &str) -> String {
         plain.push(c);
     }
     plain
+}
+
+pub fn print_line(out: &mut dyn Write, message: &str) -> Result<(), String> {
+    writeln!(out, "{message}")
+        .map_err(|error| format!("this report could not be written: {error}"))?;
+    out.flush()
+        .map_err(|error| format!("this report could not be written: {error}"))
 }
 
 fn find_error(stderr: &str) -> String {
@@ -349,11 +406,22 @@ fn shrink_json(path: &Path) {
     }
 }
 
-fn print_line(out: &mut dyn Write, message: &str) -> Result<(), String> {
-    writeln!(out, "{message}")
-        .map_err(|error| format!("this report could not be written: {error}"))?;
-    out.flush()
-        .map_err(|error| format!("this report could not be written: {error}"))
+fn capture_every_instance(
+    out: &mut dyn Write,
+    runner: &mut Runner,
+    instances: &[Instance],
+    corpus: &Path,
+    extensions: &[String],
+    as_json: bool,
+) -> Result<(), String> {
+    for table in TABLES {
+        for instance in instances {
+            let name = get_capture_name(table, instance.get_name());
+            let args = build_args(instance, corpus, extensions, table, as_json)?;
+            runner.capture_output(out, &name, &instance.identity.binary, &args, as_json)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -362,13 +430,25 @@ mod tests {
 
     #[test]
     fn a_command_is_joined_the_way_hyperfine_reads_it_without_a_shell() {
-        let binary = Path::new("D:\\counters\\mezura.exe");
-        let args = ["D:\\bench corpora\\linux", "--languages", "c,h"].map(String::from);
+        let binary = Path::new("D:/counters/mezura.exe");
+        let args = [
+            "D:/bench corpora/linux",
+            "--languages",
+            "c,h",
+            "/home/x/o'brien",
+        ]
+        .map(String::from);
         assert_eq!(
             join_command(binary, &args),
-            "D:/counters/mezura.exe \"D:/bench corpora/linux\" --languages c,h"
+            "D:/counters/mezura.exe \"D:/bench corpora/linux\" --languages c,h \"/home/x/o'brien\""
         );
         assert_eq!(quote("\"already quoted\""), "\"already quoted\"");
+        assert_eq!(quote("say \"hi\""), "\"say \\\"hi\\\"\"");
+        if cfg!(windows) {
+            assert_eq!(quote("D:\\counters\\mezura.exe"), "D:/counters/mezura.exe");
+        } else {
+            assert_eq!(quote("/home/x/my\\dir"), "\"/home/x/my\\\\dir\"");
+        }
     }
 
     #[test]
@@ -395,5 +475,43 @@ mod tests {
         assert_eq!(Table::of_set("t1-fwd"), Some(Table::SameWork));
         assert_eq!(Table::of_set("t2-rev"), Some(Table::OutOfTheBox));
         assert_eq!(Table::of_set(CONTROL_START), None);
+    }
+
+    #[test]
+    fn a_counter_that_exits_non_zero_has_its_command_line_and_its_stderr_repeated() {
+        let dir = std::env::temp_dir().join("linebench-a_counter_that_exits_non_zero");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(OUT_DIR)).unwrap();
+        let mut runner = Runner::new(&dir, Settings::default(), Platform::Linux, Vec::new());
+        let mut printed = Vec::new();
+        let args = ["--no-such-flag-linebench".to_string()];
+        let written = runner
+            .capture_output(&mut printed, "t1-git", Path::new("git"), &args, false)
+            .unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        assert!(printed.starts_with("WARNING: git exited 129 while writing t1-git.txt\n"));
+        assert!(printed.contains("\n         git --no-such-flag-linebench\n"));
+        assert!(printed.contains("no-such-flag-linebench\n"));
+        assert!(
+            fs::read_to_string(&written.path)
+                .unwrap()
+                .contains("no-such-flag-linebench")
+        );
+        assert!(runner.capture_failures.is_empty());
+        let as_json = runner
+            .capture_output(&mut Vec::new(), "t1-git", Path::new("git"), &args, true)
+            .unwrap();
+        assert!(as_json.stderr.contains("no-such-flag-linebench"));
+        assert!(
+            !fs::read_to_string(&as_json.path)
+                .unwrap()
+                .contains("no-such-flag-linebench")
+        );
+        assert_eq!(
+            runner.capture_failures,
+            ["git exited 129 while writing t1-git.json"]
+        );
+        assert!(runner.failures.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

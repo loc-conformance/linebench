@@ -1,15 +1,20 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::corpus::Parity;
-use crate::defender::DefenderState;
+use crate::corpus::{Parity, describe_empty_count, shorten_hash};
+use crate::defender::{DefenderState, ProcessExclusions, judge_process_exclusions};
 use crate::fetch::Identity;
+use crate::files::read_text;
 use crate::machine::Machine;
-use crate::measure::{CONTROL_END, CONTROL_START, FORWARD, Instance, REVERSE, Table};
+use crate::measure::{CONTROL_END, CONTROL_START, FORWARD, REVERSE};
+use crate::measure::{Instance, Table, get_set_name};
 use crate::read::Counts;
 
 pub const RECORD_FORMAT: u32 = 2;
@@ -57,6 +62,8 @@ pub struct Record {
     pub parity: Option<Parity>,
     pub hyperfine_failures: Vec<String>,
     pub hyperfine_warnings: Vec<String>,
+    #[serde(default)]
+    pub capture_failures: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,27 +166,6 @@ pub struct Pooled {
     pub relative: f64,
 }
 
-#[derive(Deserialize)]
-struct HyperfineExport {
-    results: Vec<HyperfineResult>,
-}
-
-#[derive(Deserialize)]
-struct HyperfineResult {
-    command: String,
-    mean: f64,
-    #[serde(default)]
-    stddev: Option<f64>,
-    median: f64,
-    min: f64,
-    max: f64,
-    #[serde(default)]
-    user: Option<f64>,
-    #[serde(default)]
-    system: Option<f64>,
-    times: Vec<f64>,
-}
-
 pub fn collect_measurements(
     res: &Path,
     commands: &BTreeMap<String, String>,
@@ -277,8 +263,8 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
 }
 
 pub fn collect_table_rows(measurements: &[Measurement], table: Table) -> (Vec<Pooled>, Vec<f64>) {
-    let forward = format!("{}-{FORWARD}", table.as_str());
-    let reverse = format!("{}-{REVERSE}", table.as_str());
+    let forward = get_set_name(table, FORWARD);
+    let reverse = get_set_name(table, REVERSE);
     let mut rows = Vec::new();
     let mut order_moves = Vec::new();
     for one in measurements.iter().filter(|m| m.set == forward) {
@@ -401,6 +387,21 @@ pub fn format_thousands(number: u64) -> String {
     grouped
 }
 
+pub fn format_busy(busy: Option<f64>) -> String {
+    busy.map_or("not sampled".to_string(), |b| format!("{b}% busy"))
+}
+
+pub fn describe_empty_bare_counts(counts: &[CountRecord]) -> Vec<String> {
+    counts
+        .iter()
+        .filter(|count| count.set == Table::OutOfTheBox.as_str())
+        .filter_map(|count| {
+            describe_empty_count(count.files, count.lines)
+                .map(|what| format!("{} {what}", count.instance))
+        })
+        .collect()
+}
+
 pub fn write_record(res: &Path, record: &Record) -> Result<(), String> {
     let path = res.join(RECORD_FILE);
     let text = serde_json::to_string(record)
@@ -410,9 +411,20 @@ pub fn write_record(res: &Path, record: &Record) -> Result<(), String> {
 }
 
 pub fn read_record(path: &Path) -> Result<Record, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-    serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+    let text = read_text(path)?;
+    serde_json::from_str(&text).map_err(|error| {
+        let written_by = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| value.get("format").and_then(Value::as_u64));
+        match written_by {
+            Some(format) if format != u64::from(RECORD_FORMAT) => format!(
+                "{}: written as record format {format}, and this build reads format \
+                 {RECORD_FORMAT}: {error}",
+                path.display()
+            ),
+            _ => format!("{}: {error}", path.display()),
+        }
+    })
 }
 
 pub fn write_csvs(res: &Path, record: &Record) -> Result<(), String> {
@@ -488,7 +500,7 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
         .corpus
         .head
         .as_deref()
-        .map(shorten_commit)
+        .map(shorten_hash)
         .unwrap_or_else(|| "no commit".to_string());
     let mut lines = vec![
         format!("# Benchmark session notes {}", record.stamp),
@@ -503,9 +515,7 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
         format!("          control drift start to end: {drift}"),
         format!(
             "          background before the run: {}",
-            record
-                .background_busy_percent
-                .map_or("not sampled".to_string(), |b| format!("{b}% busy"))
+            format_busy(record.background_busy_percent)
         ),
         format!(
             "MS Defender: realtime {}, {}",
@@ -518,13 +528,14 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
             "{:<10}{} {}",
             format!("{}:", instance.identity.instance),
             instance.identity.version,
-            describe_origin(&instance.identity)
+            instance.identity.describe_origin()
         ));
     }
-    if let Some(parity) = &record.parity
-        && !parity.problems.is_empty()
-    {
-        lines.push(format!("parity:   {}", parity.problems.join("; ")));
+    if let Some(parity) = &record.parity {
+        lines.push(format!("parity:   {}", parity.describe()));
+    }
+    if !record.capture_failures.is_empty() {
+        lines.push(format!("counters: {}", record.capture_failures.join("; ")));
     }
     lines.extend([
         String::new(),
@@ -534,6 +545,18 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
         "-".to_string(),
     ]);
     write_lines(&res.join(NOTES_FILE), &lines)
+}
+
+pub fn append_to_notes(res: &Path, lines: &[String]) -> Result<(), String> {
+    let path = res.join(NOTES_FILE);
+    let mut text = String::from("\n");
+    text.push_str(&lines.join("\n"));
+    text.push('\n');
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
 }
 
 pub fn format_utc_stamp(seconds_since_epoch: u64) -> String {
@@ -586,36 +609,39 @@ fn build_measurement(
     }
 }
 
+#[derive(Deserialize)]
+struct HyperfineExport {
+    results: Vec<HyperfineResult>,
+}
+
+#[derive(Deserialize)]
+struct HyperfineResult {
+    command: String,
+    mean: f64,
+    #[serde(default)]
+    stddev: Option<f64>,
+    median: f64,
+    min: f64,
+    max: f64,
+    #[serde(default)]
+    user: Option<f64>,
+    #[serde(default)]
+    system: Option<f64>,
+    times: Vec<f64>,
+}
+
 fn describe_exclusions(record: &Record) -> String {
     if let Some(unequal) = &record.settings.unequal_exclusions {
         return format!(
             "process exclusions UNEQUAL, measured with --allow-unequal-exclusions: {unequal}"
         );
     }
-    let answers: Vec<&str> = record
-        .defender
-        .counters
-        .values()
-        .map(|e| e.process.as_str())
-        .collect();
-    match answers.as_slice() {
-        [] => "no counters".to_string(),
-        [first, rest @ ..] if rest.iter().all(|a| a == first) => match *first {
-            "yes" => "every process excluded".to_string(),
-            "no" => "no process excluded".to_string(),
-            other => format!("process exclusions {other}"),
-        },
-        _ => "process exclusions UNEQUAL".to_string(),
-    }
-}
-
-fn describe_origin(identity: &Identity) -> String {
-    match &identity.origin {
-        crate::fetch::Origin::Fetched { source, .. } => format!("fetched, {source}"),
-        crate::fetch::Origin::Built { built_with, .. } => format!("built with {built_with}"),
-        crate::fetch::Origin::Given { label } => {
-            format!("LOCAL BUILD {label}, sha256 {}", &identity.sha256[..12])
-        }
+    match judge_process_exclusions(&record.defender) {
+        ProcessExclusions::NoCounters => "no counters".to_string(),
+        ProcessExclusions::AllExcluded => "every process excluded".to_string(),
+        ProcessExclusions::NoneExcluded => "no process excluded".to_string(),
+        ProcessExclusions::Unknown(answer) => format!("process exclusions {}", answer.as_str()),
+        ProcessExclusions::Unequal => "process exclusions UNEQUAL".to_string(),
     }
 }
 
@@ -639,10 +665,6 @@ fn split_utc(seconds_since_epoch: u64) -> (String, String) {
             of_day % 60
         ),
     )
-}
-
-fn shorten_commit(commit: &str) -> String {
-    commit.chars().take(9).collect()
 }
 
 fn round_to(value: f64, decimals: i32) -> f64 {

@@ -11,9 +11,13 @@ mod shipped;
 use std::env;
 use std::process;
 
-use linebench::machine::detect_platform;
+use linebench::counters::Definition;
+use linebench::machine::{Platform, detect_platform};
 
-use crate::config::{Command, find_config, parse_args, read_config, resolve_locations};
+use crate::config::{
+    Command, Locations, Options, find_config, parse_args, read_config, resolve_locations,
+    resolve_out,
+};
 use crate::output::{Color, Output, enable_colors, paint, print_line};
 use crate::shipped::{read_shipped_corpora, read_shipped_definitions};
 
@@ -43,7 +47,10 @@ what a run measures
   --counters a,b,c            the instances, in the order they are timed; default every definition and every given
   --given <c>@<tag>=<path>    a build of counter <c> measured as the instance <c>@<tag>, copied before it is timed
   --definition <c>@<tag>=<f>  the definition that instance runs under, when its flags differ from the release's
-  --control <instance>        the instance timed alone at both ends of the run; default the first
+  --control <instance>        the instance timed alone at both ends of the run; default control = in the conf, else the first
+
+setup
+  --allow-elevated            fetch as administrator or root all the same, where there is no ordinary user, as on a CI runner
 
 run
   --warmup <n> --runs <n> --settle <s>   hyperfine's warmups, timed runs and pause; default 3, 15, 3
@@ -69,14 +76,63 @@ fn dispatch() -> Result<i32, String> {
     let args: Vec<String> = env::args().collect();
     let options = parse_args(&args)?;
     let mut out = Output::new();
-    let command = options.command.unwrap_or(Command::Help);
-    match command {
-        Command::Help => return print_line(&mut out, HELP.trim_end()).map(|_| 0),
-        Command::Version => {
-            return print_line(&mut out, &format!("linebench {VERSION}")).map(|_| 0);
+    match options.command.unwrap_or(Command::Help) {
+        Command::Help => print_line(&mut out, HELP.trim_end()).map(|_| 0),
+        Command::Version => print_line(&mut out, &format!("linebench {VERSION}")).map(|_| 0),
+        Command::Report => {
+            let config = read_config(&find_config())?;
+            commands::run_report(&mut out, &resolve_out(&options, &config))
         }
-        _ => {}
+        Command::Setup => {
+            let resolved = resolve_everything(&options)?;
+            commands::run_setup(
+                &mut out,
+                &options,
+                &resolved.locations,
+                &resolved.definitions,
+                resolved.platform,
+            )
+        }
+        Command::Check => {
+            let resolved = resolve_everything(&options)?;
+            commands::run_check(
+                &mut out,
+                &options,
+                &resolved.locations,
+                &resolved.definitions,
+                resolved.platform,
+            )
+        }
+        Command::Noise => {
+            let resolved = resolve_everything(&options)?;
+            commands::run_noise(
+                &mut out,
+                &options,
+                &resolved.locations,
+                &resolved.definitions,
+                resolved.platform,
+            )
+        }
+        Command::Run => {
+            let resolved = resolve_everything(&options)?;
+            commands::run_benchmark(
+                &mut out,
+                &options,
+                &resolved.locations,
+                &resolved.definitions,
+                resolved.platform,
+            )
+        }
     }
+}
+
+struct Resolved {
+    platform: Platform,
+    locations: Locations,
+    definitions: Vec<Definition>,
+}
+
+fn resolve_everything(options: &Options) -> Result<Resolved, String> {
     let platform = detect_platform()?;
     let config_path = find_config();
     let config = read_config(&config_path)?;
@@ -86,21 +142,10 @@ fn dispatch() -> Result<i32, String> {
         .or_else(|| config.definitions.clone());
     let definitions = read_shipped_definitions(definitions_dir.as_deref())?;
     let corpora = read_shipped_corpora(definitions_dir.as_deref())?;
-    let locations = resolve_locations(&options, &config, &config_path, &corpora)?;
-    match command {
-        Command::Setup => {
-            commands::run_setup(&mut out, &options, &locations, &definitions, platform)
-        }
-        Command::Check => {
-            commands::run_check(&mut out, &options, &locations, &definitions, platform)
-        }
-        Command::Noise => {
-            commands::run_noise(&mut out, &options, &locations, &definitions, platform)
-        }
-        Command::Run => {
-            commands::run_benchmark(&mut out, &options, &locations, &definitions, platform)
-        }
-        Command::Report => commands::run_report(&mut out, &locations),
-        Command::Help | Command::Version => Ok(0),
-    }
+    let locations = resolve_locations(options, &config, &config_path, &corpora)?;
+    Ok(Resolved {
+        platform,
+        locations,
+        definitions,
+    })
 }

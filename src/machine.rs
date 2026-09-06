@@ -16,6 +16,7 @@ pub const MACOS: &str = "macos";
 pub const WSL: &str = "wsl";
 pub const UNKNOWN: &str = "unknown";
 const BACKGROUND_SAMPLE_SECONDS: u64 = 6;
+const SETTLE_BEFORE_SAMPLE_SECONDS: u64 = 1;
 const WINDOWS_HIGH_PERFORMANCE: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 const PERFORMANCE: &str = "performance";
 const CPU_DIR: &str = "/sys/devices/system/cpu";
@@ -82,6 +83,7 @@ pub enum PrepStep {
     },
     PowerScheme {
         was: String,
+        was_named: String,
     },
 }
 
@@ -97,7 +99,16 @@ impl PrepStep {
                     was.join("/")
                 )
             }
-            PrepStep::PowerScheme { was } => format!("power scheme: {was} -> high performance"),
+            PrepStep::PowerScheme { was_named, .. } => {
+                format!("power scheme: {was_named} -> high performance")
+            }
+        }
+    }
+
+    pub fn count_parts(&self) -> usize {
+        match self {
+            PrepStep::CpuGovernor { governors } => governors.len(),
+            PrepStep::PowerScheme { .. } => 1,
         }
     }
 
@@ -128,7 +139,7 @@ impl PrepStep {
                     let _ = fs::write(path, value);
                 }
             }
-            PrepStep::PowerScheme { was } => {
+            PrepStep::PowerScheme { was, .. } => {
                 run_quietly("powercfg", &["/setactive", was]);
             }
         }
@@ -201,6 +212,9 @@ pub fn explain_how_to_elevate(platform: Platform) -> (&'static str, String) {
 }
 
 pub fn sample_background_busy(platform: Platform) -> Option<f64> {
+    // a platform with no system times answers here, before the settle
+    read_system_times(platform)?;
+    thread::sleep(Duration::from_secs(SETTLE_BEFORE_SAMPLE_SECONDS));
     let before = read_system_times(platform)?;
     thread::sleep(Duration::from_secs(BACKGROUND_SAMPLE_SECONDS));
     let after = read_system_times(platform)?;
@@ -223,6 +237,13 @@ pub fn find_active_power_scheme(powercfg_output: &str) -> Option<String> {
         .split_whitespace()
         .find(|token| token.matches('-').count() == 4)
         .map(str::to_lowercase)
+}
+
+pub fn find_power_scheme_name(powercfg_output: &str) -> Option<String> {
+    let (_, after_paren) = powercfg_output.rsplit_once('(')?;
+    let (name, _) = after_paren.split_once(')')?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn plan_cpu_governor() -> Option<PrepStep> {
@@ -255,7 +276,8 @@ fn plan_cpu_governor() -> Option<PrepStep> {
 }
 
 fn plan_power_scheme() -> Option<PrepStep> {
-    let active = find_active_power_scheme(&capture_output("powercfg", &["/getactivescheme"])?)?;
+    let printed = capture_output("powercfg", &["/getactivescheme"])?;
+    let active = find_active_power_scheme(&printed)?;
     if active == WINDOWS_HIGH_PERFORMANCE {
         return None;
     }
@@ -263,7 +285,10 @@ fn plan_power_scheme() -> Option<PrepStep> {
     if !schemes.contains(WINDOWS_HIGH_PERFORMANCE) {
         return None;
     }
-    Some(PrepStep::PowerScheme { was: active })
+    Some(PrepStep::PowerScheme {
+        was_named: find_power_scheme_name(&printed).unwrap_or_else(|| active.clone()),
+        was: active,
+    })
 }
 
 fn is_a_numbered_cpu(path: &Path) -> bool {
@@ -329,9 +354,9 @@ fn read_ram_bytes(platform: Platform) -> Option<u64> {
 
 fn read_cpu_scaling(platform: Platform) -> String {
     match platform {
-        Platform::Windows => {
-            capture_output("powercfg", &["/getactivescheme"]).unwrap_or_else(|| UNKNOWN.to_string())
-        }
+        Platform::Windows => capture_output("powercfg", &["/getactivescheme"])
+            .map(|printed| find_power_scheme_name(&printed).unwrap_or(printed))
+            .unwrap_or_else(|| UNKNOWN.to_string()),
         Platform::Macos => "n/a".to_string(),
         Platform::Linux | Platform::Wsl => {
             read_trimmed_file(&Path::new(CPU_DIR).join("cpu0").join(GOVERNOR_FILE))
@@ -478,6 +503,25 @@ mod tests {
             Some("381b4222-f694-41f0-9685-ff5bb260df2e")
         );
         assert_eq!(find_active_power_scheme("powercfg is not recognized"), None);
+        assert_eq!(find_power_scheme_name(printed).as_deref(), Some("Balanced"));
+        assert_eq!(find_power_scheme_name("powercfg is not recognized"), None);
+        assert_eq!(
+            find_power_scheme_name("GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  ()"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_power_scheme_step_is_described_by_the_scheme_s_name_and_restored_by_its_guid() {
+        let step = PrepStep::PowerScheme {
+            was: "381b4222-f694-41f0-9685-ff5bb260df2e".to_string(),
+            was_named: "Balanced".to_string(),
+        };
+        assert_eq!(
+            step.describe(),
+            "power scheme: Balanced -> high performance"
+        );
+        assert_eq!(step.count_parts(), 1);
     }
 
     #[test]
@@ -492,6 +536,7 @@ mod tests {
             step.describe(),
             "cpu governor on 3 cpus: powersave/schedutil -> performance"
         );
+        assert_eq!(step.count_parts(), 3);
     }
 
     #[test]

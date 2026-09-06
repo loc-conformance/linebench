@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::counters::{COUNTS, Definition, EACH, Output};
+use crate::counters::{COUNTS, EACH};
+use crate::counters::{Definition, Output};
 
 const ELEMENTS: &str = "[]";
 const STEP: char = '.';
@@ -10,6 +11,7 @@ const TOKEI_TOTAL: &str = "Total";
 const TOKEI_REPORTS: &str = "reports";
 const TOKEI_CHILDREN: &str = "children";
 const TOKEI_STATS: &str = "stats";
+const TOKEI_BLOBS: &str = "blobs";
 const TOKEI_FIELDS: [&str; 3] = ["code", "comments", "blanks"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,9 +177,7 @@ fn read_tokei_document(definition: &Definition, document: &Value) -> Result<Coun
                         definition.name
                     )
                 })?;
-            for (slot, field) in TOKEI_FIELDS.iter().enumerate() {
-                added_up[slot] += number(&format!("{name} child"), stats, field)?;
-            }
+            add_tokei_stats(definition, &format!("{name} child"), stats, &mut added_up)?;
         }
     }
     let mut totals = [0u64; 3];
@@ -199,6 +199,32 @@ fn read_tokei_document(definition: &Definition, document: &Value) -> Result<Coun
         comments,
         buckets: BTreeMap::from([("blanks".to_string(), blanks)]),
     })
+}
+
+fn add_tokei_stats(
+    definition: &Definition,
+    at: &str,
+    stats: &serde_json::Map<String, Value>,
+    added_up: &mut [u64; 3],
+) -> Result<(), String> {
+    for (slot, field) in TOKEI_FIELDS.iter().enumerate() {
+        added_up[slot] += read_whole_number(
+            definition,
+            &format!("{at}.{field}"),
+            stats.get(*field).unwrap_or(&Value::Null),
+        )?;
+    }
+    let blobs = stats.get(TOKEI_BLOBS).and_then(Value::as_object);
+    for (language, blob) in blobs.into_iter().flatten() {
+        let blob = blob.as_object().ok_or_else(|| {
+            format!(
+                "{} printed {blob} as the {language} inside {at}, which is not a stats object",
+                definition.name
+            )
+        })?;
+        add_tokei_stats(definition, &format!("{at}.{language}"), blob, added_up)?;
+    }
+    Ok(())
 }
 
 fn walk_to_elements<'a>(
@@ -333,7 +359,7 @@ mod tests {
     const MEZURA_REGION: &str = r#"{"scope":{"counting":"region"},"total":{"files":2,"lines":1925,"code":1638,"comments":4,"blanks":283}}"#;
     const SCC: &str = r#"[{"Name":"JSON","Lines":47,"Code":47,"Comment":0,"Blank":0,"Count":48,"Files":[]},{"Name":"Python","Lines":1878,"Code":1591,"Comment":4,"Blank":283,"Count":2,"Files":[]}]"#;
     const CLOC: &str = r#"{"header":{"cloc_version":"2.10","n_files":112,"n_lines":3439,"elapsed_seconds":0.67},"Python":{"nFiles":2,"blank":283,"comment":4,"code":1591},"SUM":{"blank":454,"comment":4,"code":2981,"nFiles":112}}"#;
-    const TOKEI: &str = r#"{"HTML":{"blanks":1,"code":46,"comments":0,"reports":[{"name":"index.html"}],"children":{"CSS":[{"name":"index.html","stats":{"blanks":5,"code":72,"comments":8,"blobs":{}}}]},"inaccurate":false},"Python":{"blanks":283,"code":1591,"comments":4,"reports":[{"name":"x.py"},{"name":"y.py"}],"children":{},"inaccurate":false},"Total":{"blanks":289,"code":1709,"comments":12,"reports":[],"children":{"HTML":[]},"inaccurate":false}}"#;
+    const TOKEI: &str = r#"{"HTML":{"blanks":1,"code":46,"comments":0,"reports":[{"name":"index.html"}],"children":{"CSS":[{"name":"index.html","stats":{"blanks":5,"code":72,"comments":8,"blobs":{"JavaScript":{"blanks":1,"code":3,"comments":0,"blobs":{}}}}}]},"inaccurate":false},"Python":{"blanks":283,"code":1591,"comments":4,"reports":[{"name":"x.py"},{"name":"y.py"}],"children":{},"inaccurate":false},"Total":{"blanks":290,"code":1712,"comments":12,"reports":[],"children":{"HTML":[]},"inaccurate":false}}"#;
 
     #[test]
     fn the_shipped_read_blocks_read_what_the_four_counters_print() {
@@ -352,8 +378,8 @@ mod tests {
         assert_eq!(cloc.buckets, build_bucket("blanks", 454));
 
         let tokei = read_counts(&read_shipped("tokei"), TOKEI).unwrap();
-        assert_eq!(get_four_counts(&tokei), (3, 2010, 1709, 12));
-        assert_eq!(tokei.buckets, build_bucket("blanks", 289));
+        assert_eq!(get_four_counts(&tokei), (3, 2014, 1712, 12));
+        assert_eq!(tokei.buckets, build_bucket("blanks", 290));
     }
 
     #[test]
@@ -435,8 +461,8 @@ mod tests {
         );
         assert_refused(
             &read_shipped("tokei"),
-            &TOKEI.replace(r#""blanks":289,"code":1709"#, r#""blanks":289,"code":1700"#),
-            "tokei printed a Total of 1700 code, 12 comments, 289 blanks and its languages with their children add up to 1709, 12, 289",
+            &TOKEI.replace(r#""blanks":290,"code":1712"#, r#""blanks":290,"code":1700"#),
+            "tokei printed a Total of 1700 code, 12 comments, 290 blanks and its languages with their children add up to 1712, 12, 290",
         );
     }
 

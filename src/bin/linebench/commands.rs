@@ -1,42 +1,47 @@
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use linebench::corpus::{
-    Counted, check_commit, count_reference_files, format_percent, judge_parity, read_git_state,
+    Counted, Parity, Verdict, check_commit, describe_empty_count, judge_parity, read_git_state,
     setup_corpus,
 };
 use linebench::counters::Definition;
 use linebench::defender::{
-    CounterBinary, DefenderState, explain_unequal_exclusions, find_unequal_exclusions,
-    read_defender_state,
+    CounterBinary, DefenderState, ProcessExclusions, explain_unequal_exclusions,
+    find_unequal_exclusions, judge_process_exclusions, read_defender_state,
 };
 use linebench::fetch::{fetch_counter, read_manifest};
 use linebench::machine::{
     Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
 };
 use linebench::measure::{
-    Instance, OUT_DIR, Runner, Settings, TABLES, Table, build_command, run_phases,
+    Instance, Runner, Settings, Table, build_args, build_command, capture_plain_output,
+    get_capture_name, run_phases,
 };
-use linebench::os::is_privileged;
+use linebench::measure::{OUT_DIR, TABLES};
+use linebench::os::{capture_with_status, is_privileged};
 use linebench::read::read_counts;
+use linebench::record::RECORD_FORMAT;
 use linebench::record::{
-    CorpusRecord, CountRecord, InstanceRecord, RECORD_FORMAT, Record, RunSettings, calculate_drift,
-    collect_measurements, format_summary_tables, format_thousands, format_utc_date,
-    format_utc_stamp, read_seconds_since_epoch, write_csvs, write_notes, write_record,
+    CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
+    calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
+    format_summary_tables, format_thousands, format_utc_date, format_utc_stamp,
+    read_seconds_since_epoch, shorten_version, write_csvs, write_notes, write_record,
 };
 
 use crate::config::{Locations, Options};
 use crate::instances::build_instances;
 use crate::output::{Color, Output, paint, print_header, print_line, print_warning};
-use crate::page::{LOCAL_DIR, collect_records, format_since, write_results_page};
-use crate::prep;
+use crate::page::{LOCAL_DIR, PAGE_FILE, collect_records, format_since, write_results_page};
+use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const NOISE_RUNS: u32 = 5;
+const UNREADABLE_OUTPUT_LINES: usize = 10;
 const BACKGROUND_CORE_STEPS: [f64; 3] = [0.75, 1.5, 3.0];
 const SPREAD_STEPS: [f64; 3] = [5.0, 10.0, 15.0];
 const VERDICTS: [&str; 4] = [
@@ -54,9 +59,11 @@ pub fn run_setup(
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
-    if is_privileged(platform) {
+    if is_privileged(platform) && !options.allow_elevated {
         return Err(format!(
-            "setup writes files as you, so it does not run as {}; run it from an ordinary terminal",
+            "setup writes files as you, so it does not run as {}; run it from an ordinary \
+             terminal, or pass --allow-elevated where there is no ordinary user, as on a CI \
+             runner",
             if platform == Platform::Windows {
                 "administrator"
             } else {
@@ -119,10 +126,8 @@ pub fn run_check(
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
-    let privileged = is_privileged(platform);
-    prep::restore_after_interrupted_run(out, &locations.counters_dir, privileged, platform)?;
     check_commit(&locations.corpus, &locations.checkout)?;
-    let (instances, control) = build_instances(definitions, locations, options, platform)?;
+    let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
     print_header(
         out,
         &format!(
@@ -131,212 +136,24 @@ pub fn run_check(
             locations.checkout.display()
         ),
     )?;
-    let scratch = env::temp_dir().join(format!(
-        "linebench-check-{}",
-        format_utc_stamp(read_seconds_since_epoch())
-    ));
-    fs::create_dir_all(scratch.join(OUT_DIR))
-        .map_err(|error| format!("{} could not be created: {error}", scratch.display()))?;
-    let mut runner = Runner::new(
-        &scratch,
-        Settings {
-            warmup: 0,
-            runs: 2,
-            settle: 0,
-        },
-        platform,
-        collect_scrub(&instances),
-    );
-    let mut bad = Vec::new();
-    let mut counted = Vec::new();
-    let extensions = &locations.corpus.extensions;
-    for table in TABLES {
-        for instance in &instances {
-            let label = format!("   {:<14} {}  ", instance.name(), table.as_str());
-            let args = instance.definition.build_args(
-                &locations.checkout,
-                extensions,
-                table.uses_same_work(),
-                true,
-            )?;
-            let failures_before = runner.failures.len();
-            let path = runner.capture_output(
-                out,
-                &format!("{}-{}", table.as_str(), instance.name()),
-                &instance.identity.binary,
-                &args,
-                true,
-            )?;
-            if runner.failures.len() > failures_before {
-                print_line(out, &format!("{label}{}", paint(Color::Red, "FAILED")))?;
-                bad.push(format!("{} {}", instance.name(), table.as_str()));
-                continue;
-            }
-            let text = fs::read_to_string(&path).unwrap_or_default();
-            match read_counts(&instance.definition, &text) {
-                Ok(counts) if counts.files == 0 => {
-                    print_line(
-                        out,
-                        &format!(
-                            "{label}{}",
-                            paint(
-                                Color::Red,
-                                &format!(
-                                    "counted nothing at all, so its share of the {} definition names no language this tree has",
-                                    locations.corpus.name
-                                )
-                            )
-                        ),
-                    )?;
-                    bad.push(format!("{} {}", instance.name(), table.as_str()));
-                }
-                Ok(counts) => {
-                    print_line(
-                        out,
-                        &format!(
-                            "{label}{}   {:>10} files  {:>14} lines",
-                            paint(Color::Green, "ok"),
-                            format_thousands(counts.files),
-                            format_thousands(counts.lines)
-                        ),
-                    )?;
-                    if table == Table::SameWork {
-                        counted.push(Counted {
-                            instance: instance.name().to_string(),
-                            files: counts.files,
-                            lines: counts.lines,
-                        });
-                    }
-                }
-                Err(refused) => {
-                    print_line(
-                        out,
-                        &format!(
-                            "{label}{}",
-                            paint(
-                                Color::Red,
-                                &format!("ran, but no counts could be read: {refused}")
-                            )
-                        ),
-                    )?;
-                    bad.push(format!("{} {}", instance.name(), table.as_str()));
-                }
-            }
-        }
-    }
-    print_line(out, "")?;
-    let bare = build_command(
-        &instances[control],
-        &locations.checkout,
-        extensions,
-        Table::OutOfTheBox,
-    )?;
-    let failures_before = runner.failures.len();
-    runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
-    if runner.failures.len() > failures_before {
-        print_line(
-            out,
-            &format!("   hyperfine   {}", paint(Color::Red, "FAILED")),
-        )?;
-        bad.push("hyperfine".to_string());
-    } else {
-        print_line(
-            out,
-            &format!("   hyperfine   {}", paint(Color::Green, "ok")),
-        )?;
-    }
-    let state = read_defender_state(
-        platform,
-        privileged,
-        &locations.checkout,
-        &collect_binaries(&instances, platform)?,
-    );
-    if platform == Platform::Windows {
-        match find_unequal_exclusions(&state) {
-            Some(unequal) if options.allow_unequal => print_line(
-                out,
-                &format!(
-                    "   MS Defender {}",
-                    paint(Color::Yellow, &format!("unequal: {unequal}"))
-                ),
-            )?,
-            Some(unequal) => {
-                print_line(
-                    out,
-                    &format!(
-                        "   MS Defender {}",
-                        paint(Color::Red, &format!("unequal: {unequal}"))
-                    ),
-                )?;
-                bad.push("defender".to_string());
-            }
-            None => print_line(
-                out,
-                &format!(
-                    "   MS Defender {}, {}",
-                    paint(Color::Green, "ok"),
-                    describe_exclusions(&state)
-                ),
-            )?,
-        }
-        print_line(
-            out,
-            &format!(
-                "   corpus      {}",
-                match state.corpus_excluded.as_str() {
-                    "yes" => "under a Defender exclusion path".to_string(),
-                    other => paint(
-                        Color::Yellow,
-                        &format!("not under any Defender exclusion path ({other})")
-                    )
-                    .to_string(),
-                }
-            ),
-        )?;
-    }
-    let reference = count_reference_files(&locations.checkout, extensions);
-    let parity = judge_parity(reference, &counted, locations.corpus.tolerance);
-    print_line(out, "")?;
-    let files: Vec<String> = counted
-        .iter()
-        .map(|c| format!("{} {}", c.instance, format_thousands(c.files)))
-        .collect();
-    print_line(
+    let scratch = Scratch::create("check")?;
+    let (bad, nothing_compared) = check_everything(
         out,
-        &format!(
-            "   files   {}{}",
-            reference.map_or("git none   ".to_string(), |r| format!(
-                "git {}   ",
-                format_thousands(r)
-            )),
-            files.join("   ")
-        ),
+        options,
+        locations,
+        &instances,
+        control,
+        platform,
+        scratch.get_path(),
     )?;
-    let lines: Vec<String> = counted
-        .iter()
-        .map(|c| format!("{} {}", c.instance, format_thousands(c.lines)))
-        .collect();
-    print_line(out, &format!("   lines   {}", lines.join("   ")))?;
-    if parity.problems.is_empty() {
-        print_line(
-            out,
-            &format!(
-                "   {}",
-                paint(
-                    Color::Green,
-                    &format!("within {}", format_percent(parity.tolerance))
-                )
-            ),
-        )?;
-    } else {
-        for problem in &parity.problems {
-            print_line(out, &format!("   {}", paint(Color::Yellow, problem)))?;
-        }
-    }
-    let _ = fs::remove_dir_all(&scratch);
     print_line(out, "")?;
     if bad.is_empty() {
-        print_line(out, &paint(Color::Green, "all good.").to_string())?;
+        let verdict = if nothing_compared {
+            "all good, though equal work was not compared."
+        } else {
+            "all good."
+        };
+        print_line(out, &paint(Color::Green, verdict).to_string())?;
         return Ok(0);
     }
     print_line(
@@ -357,10 +174,8 @@ pub fn run_noise(
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
-    let privileged = is_privileged(platform);
-    prep::restore_after_interrupted_run(out, &locations.counters_dir, privileged, platform)?;
     check_commit(&locations.corpus, &locations.checkout)?;
-    let (instances, control) = build_instances(definitions, locations, options, platform)?;
+    let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
     let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
     print_header(out, "== noise")?;
     let busy = sample_background_busy(platform);
@@ -379,33 +194,15 @@ pub fn run_noise(
         )?,
         _ => print_line(out, "   background    not sampled on this platform")?,
     }
-    let scratch = env::temp_dir().join(format!(
-        "linebench-noise-{}",
-        format_utc_stamp(read_seconds_since_epoch())
-    ));
-    fs::create_dir_all(scratch.join(OUT_DIR))
-        .map_err(|error| format!("{} could not be created: {error}", scratch.display()))?;
-    let mut runner = Runner::new(
-        &scratch,
-        Settings {
-            warmup: 0,
-            runs: NOISE_RUNS,
-            settle: 0,
-        },
+    let scratch = Scratch::create("noise")?;
+    let export = time_the_control(
+        out,
+        locations,
+        &instances,
+        control,
         platform,
-        collect_scrub(&instances),
-    );
-    let bare = build_command(
-        &instances[control],
-        &locations.checkout,
-        &locations.corpus.extensions,
-        Table::OutOfTheBox,
+        scratch.get_path(),
     )?;
-    runner.run_hyperfine(out, "noise", std::slice::from_ref(&bare))?;
-    let export = fs::read_to_string(scratch.join("noise.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    let _ = fs::remove_dir_all(&scratch);
     let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
         print_line(out, "   workload      hyperfine failed")?;
         return Ok(1);
@@ -444,7 +241,7 @@ pub fn run_noise(
         out,
         &format!(
             "   workload      {} on {}, {NOISE_RUNS} runs",
-            instances[control].name(),
+            instances[control].get_name(),
             locations.corpus.name
         ),
     )?;
@@ -503,9 +300,8 @@ pub fn run_benchmark(
     platform: Platform,
 ) -> Result<i32, String> {
     let privileged = is_privileged(platform);
-    prep::restore_after_interrupted_run(out, &locations.counters_dir, privileged, platform)?;
     check_commit(&locations.corpus, &locations.checkout)?;
-    let (instances, control) = build_instances(definitions, locations, options, platform)?;
+    let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
     let binaries = collect_binaries(&instances, platform)?;
     let defender = read_defender_state(platform, privileged, &locations.checkout, &binaries);
     let unequal = match find_unequal_exclusions(&defender) {
@@ -532,15 +328,13 @@ pub fn run_benchmark(
     };
     prep::announce_prep(out, &plan, privileged, options.yes, platform)?;
     let applied = if privileged {
-        prep::apply_prep(out, plan, &locations.counters_dir, platform)?
+        prep::apply_prep(out, plan, platform)?
     } else {
         None
     };
-    let prepared: Vec<String> = applied
+    let prepared = applied
         .as_ref()
-        .map(|_| describe_plan(platform, options.no_prep))
-        .unwrap_or_default();
-
+        .map_or_else(Vec::new, AppliedPrep::get_applied_steps);
     let settings = Settings {
         warmup: options.warmup.unwrap_or(Settings::default().warmup),
         runs: options.runs.unwrap_or(Settings::default().runs),
@@ -548,9 +342,7 @@ pub fn run_benchmark(
     };
     let now = read_seconds_since_epoch();
     let stamp = format_utc_stamp(now);
-    let is_local = instances
-        .iter()
-        .any(|i| matches!(i.identity.origin, linebench::fetch::Origin::Given { .. }));
+    let is_local = instances.iter().any(|i| i.identity.is_a_local_build());
     let mut res = locations.out.clone();
     if is_local {
         res = res.join(LOCAL_DIR);
@@ -574,7 +366,7 @@ pub fn run_benchmark(
         instances: &instances,
         control,
         platform,
-        defender: &defender,
+        defender,
         unequal,
         prepared,
         settings,
@@ -583,10 +375,32 @@ pub fn run_benchmark(
         res: &res,
         is_local,
     };
-    let outcome = measure_and_record(out, &context);
+    let outcome = measure_and_record(out, context);
+    if let Err(refused) = &outcome {
+        out.write_to_transcript(&format!("ERROR: {refused}"));
+    }
     out.stop_transcript();
     drop(applied);
     outcome
+}
+
+pub fn run_report(out: &mut dyn Write, results: &Path) -> Result<i32, String> {
+    let collected = collect_records(results);
+    for message in &collected.skipped {
+        print_warning(out, message)?;
+    }
+    if write_results_page(results, &collected.found)? {
+        print_line(out, &format!("wrote {}", results.join(PAGE_FILE).display()))?;
+        return Ok(0);
+    }
+    print_line(
+        out,
+        &format!(
+            "no run could be read under {}, so nothing was written",
+            results.display()
+        ),
+    )?;
+    Ok(1)
 }
 
 struct RunContext<'a> {
@@ -595,7 +409,7 @@ struct RunContext<'a> {
     instances: &'a [Instance],
     control: usize,
     platform: Platform,
-    defender: &'a DefenderState,
+    defender: DefenderState,
     unequal: Option<String>,
     prepared: Vec<String>,
     settings: Settings,
@@ -605,7 +419,31 @@ struct RunContext<'a> {
     is_local: bool,
 }
 
-fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, String> {
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn create(command: &str) -> Result<Scratch, String> {
+        let dir = env::temp_dir().join(format!(
+            "linebench-{command}-{}",
+            format_utc_stamp(read_seconds_since_epoch())
+        ));
+        fs::create_dir_all(dir.join(OUT_DIR))
+            .map_err(|error| format!("{} could not be created: {error}", dir.display()))?;
+        Ok(Scratch(dir))
+    }
+
+    fn get_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, String> {
     let RunContext {
         options,
         locations,
@@ -621,10 +459,9 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
         res,
         is_local,
     } = context;
-    let (control, platform, settings, now, is_local) =
-        (*control, *platform, *settings, *now, *is_local);
-    let instances: &[Instance] = instances;
     print_header(out, "== phase 0: machine state")?;
+    let background = sample_background_busy(platform);
+    print_line(out, &format!("   background: {}", format_busy(background)))?;
     let machine = collect_machine(platform, &locations.checkout);
     if let Ok(Value::Object(fields)) = serde_json::to_value(&machine) {
         for (key, value) in fields {
@@ -642,20 +479,12 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
             out,
             &format!(
                 "   {}: {} ({})",
-                instance.name(),
+                instance.get_name(),
                 instance.identity.version,
-                describe_origin(&instance.identity.origin)
+                instance.identity.describe_origin()
             ),
         )?;
     }
-    let background = sample_background_busy(platform);
-    print_line(
-        out,
-        &format!(
-            "   background: {}",
-            background.map_or("not sampled".to_string(), |b| format!("{b}% busy"))
-        ),
-    )?;
     let extensions = &locations.corpus.extensions;
     let mut runner = Runner::new(res, settings, platform, collect_scrub(instances));
     run_phases(
@@ -671,22 +500,29 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
     let mut counts = Vec::new();
     for table in TABLES {
         for instance in instances {
-            let path =
-                res.join(OUT_DIR)
-                    .join(format!("{}-{}.json", table.as_str(), instance.name()));
+            let path = res.join(OUT_DIR).join(format!(
+                "{}.json",
+                get_capture_name(table, instance.get_name())
+            ));
             let text = fs::read_to_string(&path).unwrap_or_default();
             match read_counts(&instance.definition, &text) {
-                Ok(c) => counts.push(CountRecord::of(table, instance.name(), &c)),
+                Ok(c) => counts.push(CountRecord::of(table, instance.get_name(), &c)),
                 Err(refused) => print_warning(
                     out,
                     &format!(
                         "no counts for {} {}: {refused}",
-                        instance.name(),
+                        instance.get_name(),
                         table.as_str()
                     ),
                 )?,
             }
         }
+    }
+    for what in describe_empty_bare_counts(&counts) {
+        print_warning(
+            out,
+            &format!("{what} out of the box, so that bare time is of a run that did no work"),
+        )?;
     }
     let (measurements, skipped) = collect_measurements(res, &runner.commands, &counts)?;
     for message in skipped {
@@ -701,20 +537,22 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
             lines: c.lines,
         })
         .collect();
+    let names: Vec<String> = instances.iter().map(|i| i.get_name().to_string()).collect();
     let parity = judge_parity(
-        count_reference_files(&locations.checkout, extensions),
+        locations.corpus.files,
         &counted,
+        &names,
         locations.corpus.tolerance,
     );
-    let git = read_git_state(&locations.checkout, true);
+    let git = read_git_state(&locations.checkout);
     let record = Record {
         format: RECORD_FORMAT,
         stamp: stamp.to_string(),
         date: format_utc_date(now),
         machine,
-        defender: (*defender).clone(),
+        defender,
         background_busy_percent: background,
-        prepared: prepared.clone(),
+        prepared,
         corpus: CorpusRecord {
             name: locations.corpus.name.clone(),
             checkout: locations.checkout.clone(),
@@ -728,9 +566,9 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
             warmup: settings.warmup,
             runs: settings.runs,
             settle: settings.settle,
-            instances: instances.iter().map(|i| i.name().to_string()).collect(),
-            control: instances[control].name().to_string(),
-            unequal_exclusions: unequal.clone(),
+            instances: names,
+            control: instances[control].get_name().to_string(),
+            unequal_exclusions: unequal,
         },
         instances: instances
             .iter()
@@ -741,11 +579,11 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
         parity: Some(parity),
         hyperfine_failures: runner.failures.clone(),
         hyperfine_warnings: runner.warnings.clone(),
+        capture_failures: runner.capture_failures.clone(),
     };
     let written = write_record(res, &record)
         .and_then(|_| write_notes(res, &record))
-        .and_then(|_| write_csvs(res, &record))
-        .and_then(|_| write_results_page(&locations.out));
+        .and_then(|_| write_csvs(res, &record));
     if let Err(refused) = written {
         print_warning(out, &format!("the summary could not be written: {refused}"))?;
         print_line(
@@ -769,35 +607,32 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
     }
     if let Some(parity) = &record.parity {
         print_line(out, "")?;
-        if parity.problems.is_empty() {
-            print_line(
-                out,
-                &format!(
-                    "   equal work    {}",
-                    paint(
-                        Color::Green,
-                        &format!("within {}", format_percent(parity.tolerance))
-                    )
-                ),
-            )?;
-        } else {
-            for problem in &parity.problems {
-                print_line(
-                    out,
-                    &format!("   equal work    {}", paint(Color::Yellow, problem)),
-                )?;
-            }
-        }
+        print_parity(out, parity, "equal work    ")?;
     }
-    let earlier: Vec<Record> = collect_records(&locations.out)
-        .into_iter()
-        .map(|f| f.record)
+    let collected = collect_records(&locations.out);
+    for message in &collected.skipped {
+        print_warning(out, message)?;
+    }
+    if let Err(refused) = write_results_page(&locations.out, &collected.found) {
+        print_warning(
+            out,
+            &format!("the results page could not be written: {refused}"),
+        )?;
+    }
+    let earlier: Vec<&Record> = collected
+        .found
+        .iter()
+        .filter(|f| is_local || !f.is_local())
+        .map(|f| &f.record)
         .filter(|r| r.stamp != record.stamp)
         .collect();
-    let earlier: Vec<&Record> = earlier.iter().collect();
+    let since = format_since(&record, &earlier);
     print_line(out, "")?;
-    for line in format_since(&record, &earlier) {
+    for line in &since {
         print_line(out, &format!("   {line}"))?;
+    }
+    if let Err(refused) = append_to_notes(res, &since) {
+        print_warning(out, &refused)?;
     }
     if !runner.warnings.is_empty() {
         print_line(out, "")?;
@@ -816,7 +651,9 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
             )?;
         }
     }
-    if !options.keep_raw {
+    if options.keep_raw {
+        capture_plain_output(out, &mut runner, instances, &locations.checkout, extensions)?;
+    } else {
         let _ = fs::remove_dir_all(res.join(OUT_DIR));
     }
     print_line(out, "")?;
@@ -838,29 +675,303 @@ fn measure_and_record(out: &mut dyn Write, context: &RunContext) -> Result<i32, 
             &format!("hyperfine had trouble with: {}", runner.failures.join(", ")),
         )?;
     }
+    if !runner.capture_failures.is_empty() {
+        print_warning(
+            out,
+            &format!(
+                "counts missing or partial: {}",
+                runner.capture_failures.join("; ")
+            ),
+        )?;
+    }
     Ok(0)
 }
 
-pub fn run_report(out: &mut dyn Write, locations: &Locations) -> Result<i32, String> {
-    write_results_page(&locations.out)?;
+fn check_everything(
+    out: &mut dyn Write,
+    options: &Options,
+    locations: &Locations,
+    instances: &[Instance],
+    control: usize,
+    platform: Platform,
+    scratch: &Path,
+) -> Result<(Vec<String>, bool), String> {
+    let mut runner = Runner::new(
+        scratch,
+        Settings {
+            warmup: 0,
+            runs: 2,
+            settle: 0,
+        },
+        platform,
+        collect_scrub(instances),
+    );
+    let mut bad = Vec::new();
+    let mut counted = Vec::new();
+    let extensions = &locations.corpus.extensions;
+    for table in TABLES {
+        for instance in instances {
+            let label = format!("   {:<14} {}  ", instance.get_name(), table.as_str());
+            let args = build_args(instance, &locations.checkout, extensions, table, true)?;
+            let failures_before = runner.capture_failures.len();
+            let capture = runner.capture_output(
+                out,
+                &get_capture_name(table, instance.get_name()),
+                &instance.identity.binary,
+                &args,
+                true,
+            )?;
+            if runner.capture_failures.len() > failures_before {
+                print_line(out, &format!("{label}{}", paint(Color::Red, "FAILED")))?;
+                bad.push(format!("{} {}", instance.get_name(), table.as_str()));
+                continue;
+            }
+            let text = fs::read_to_string(&capture.path).unwrap_or_default();
+            match read_counts(&instance.definition, &text) {
+                Ok(counts) => {
+                    let empty = describe_empty_count(counts.files, counts.lines);
+                    match &empty {
+                        Some(what) => {
+                            print_line(out, &format!("{label}{}", paint(Color::Red, what)))?;
+                        }
+                        None => print_line(
+                            out,
+                            &format!(
+                                "{label}{}   {:>10} files  {:>14} lines",
+                                paint(Color::Green, "ok"),
+                                format_thousands(counts.files),
+                                format_thousands(counts.lines)
+                            ),
+                        )?,
+                    }
+                    if table == Table::SameWork {
+                        counted.push(Counted {
+                            instance: instance.get_name().to_string(),
+                            files: counts.files,
+                            lines: counts.lines,
+                        });
+                    } else if empty.is_some() {
+                        bad.push(format!("{} {}", instance.get_name(), table.as_str()));
+                    }
+                }
+                Err(refused) => {
+                    print_line(
+                        out,
+                        &format!(
+                            "{label}{}",
+                            paint(
+                                Color::Red,
+                                &format!("ran, but no counts could be read: {refused}")
+                            )
+                        ),
+                    )?;
+                    let shown =
+                        print_first_lines(out, &text)? + print_first_lines(out, &capture.stderr)?;
+                    if shown == 0 {
+                        print_line(out, "         it printed nothing")?;
+                    }
+                    bad.push(format!("{} {}", instance.get_name(), table.as_str()));
+                }
+            }
+        }
+    }
+    print_line(out, "")?;
+    let bare = build_command(
+        &instances[control],
+        &locations.checkout,
+        extensions,
+        Table::OutOfTheBox,
+    )?;
+    let failures_before = runner.failures.len();
+    runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
+    if runner.failures.len() > failures_before {
+        print_line(
+            out,
+            &format!("   hyperfine   {}", paint(Color::Red, "FAILED")),
+        )?;
+        bad.push("hyperfine".to_string());
+    } else {
+        print_line(
+            out,
+            &format!("   hyperfine   {}", paint(Color::Green, "ok")),
+        )?;
+    }
+    match capture_with_status("git", &["--version"]) {
+        Ok((true, version)) => print_line(
+            out,
+            &format!(
+                "   git         {}   {}",
+                paint(Color::Green, "ok"),
+                shorten_version(&version)
+            ),
+        )?,
+        _ => {
+            print_line(
+                out,
+                &format!("   git         {}", paint(Color::Red, "FAILED")),
+            )?;
+            bad.push("git".to_string());
+        }
+    }
+    let state = read_defender_state(
+        platform,
+        is_privileged(platform),
+        &locations.checkout,
+        &collect_binaries(instances, platform)?,
+    );
+    if platform == Platform::Windows {
+        match find_unequal_exclusions(&state) {
+            Some(unequal) if options.allow_unequal => print_line(
+                out,
+                &format!(
+                    "   MS Defender {}",
+                    paint(Color::Yellow, &format!("unequal: {unequal}"))
+                ),
+            )?,
+            Some(unequal) => {
+                print_line(
+                    out,
+                    &format!(
+                        "   MS Defender {}",
+                        paint(Color::Red, &format!("unequal: {unequal}"))
+                    ),
+                )?;
+                bad.push("defender".to_string());
+            }
+            None => print_line(
+                out,
+                &format!(
+                    "   MS Defender {}, {}",
+                    paint(Color::Green, "ok"),
+                    describe_exclusions(&state)
+                ),
+            )?,
+        }
+        print_line(
+            out,
+            &format!(
+                "   corpus      {}",
+                match state.corpus_excluded.as_str() {
+                    "yes" => "under a Defender exclusion path".to_string(),
+                    other => paint(
+                        Color::Yellow,
+                        &format!("not under any Defender exclusion path ({other})")
+                    )
+                    .to_string(),
+                }
+            ),
+        )?;
+    }
+    let reference = locations.corpus.files;
+    let expected: Vec<String> = instances.iter().map(|i| i.get_name().to_string()).collect();
+    let parity = judge_parity(reference, &counted, &expected, locations.corpus.tolerance);
+    print_line(out, "")?;
+    let files: Vec<String> = counted
+        .iter()
+        .map(|c| format!("{} {}", c.instance, format_thousands(c.files)))
+        .collect();
     print_line(
         out,
         &format!(
-            "wrote {}",
-            locations.out.join(crate::page::PAGE_FILE).display()
+            "   files   {}{}",
+            reference.map_or("corpus none   ".to_string(), |r| format!(
+                "corpus {}   ",
+                format_thousands(r)
+            )),
+            files.join("   ")
         ),
     )?;
-    Ok(0)
+    let lines: Vec<String> = counted
+        .iter()
+        .map(|c| format!("{} {}", c.instance, format_thousands(c.lines)))
+        .collect();
+    print_line(out, &format!("   lines   {}", lines.join("   ")))?;
+    print_parity(out, &parity, "")?;
+    if !parity.problems.is_empty() {
+        bad.push("equal work".to_string());
+    }
+    Ok((bad, !parity.compared))
 }
 
-fn describe_plan(platform: Platform, no_prep: bool) -> Vec<String> {
-    if no_prep {
-        return Vec::new();
+fn time_the_control(
+    out: &mut dyn Write,
+    locations: &Locations,
+    instances: &[Instance],
+    control: usize,
+    platform: Platform,
+    scratch: &Path,
+) -> Result<Option<Value>, String> {
+    let mut runner = Runner::new(
+        scratch,
+        Settings {
+            warmup: 0,
+            runs: NOISE_RUNS,
+            settle: 0,
+        },
+        platform,
+        collect_scrub(instances),
+    );
+    let bare = build_command(
+        &instances[control],
+        &locations.checkout,
+        &locations.corpus.extensions,
+        Table::OutOfTheBox,
+    )?;
+    runner.run_hyperfine(out, "noise", std::slice::from_ref(&bare))?;
+    Ok(fs::read_to_string(scratch.join("noise.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
+}
+
+fn print_first_lines(out: &mut dyn Write, text: &str) -> Result<usize, String> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let mut shown = 0;
+    for line in lines.by_ref().take(UNREADABLE_OUTPUT_LINES) {
+        print_line(out, &format!("         {line}"))?;
+        shown += 1;
     }
-    plan_prep(platform)
-        .iter()
-        .map(|step| step.describe())
-        .collect()
+    if lines.next().is_some() {
+        print_line(out, "         ...")?;
+    }
+    Ok(shown)
+}
+
+fn print_parity(out: &mut dyn Write, parity: &Parity, lead: &str) -> Result<(), String> {
+    let verdict = parity.judge();
+    match verdict {
+        Verdict::NotEqual {
+            problems,
+            nothing_compared,
+        } => {
+            for problem in problems {
+                print_line(out, &format!("   {lead}{}", paint(Color::Yellow, problem)))?;
+            }
+            if let Some(why) = nothing_compared {
+                print_line(out, &format!("   {lead}{why}"))?;
+            }
+        }
+        Verdict::NotCompared(why) => print_line(out, &format!("   {lead}{why}"))?,
+        Verdict::Equal { .. } => {}
+    }
+    if let Some(equal) = verdict.describe_equality(parity.tolerance) {
+        print_line(out, &format!("   {lead}{}", paint(Color::Green, &equal)))?;
+    }
+    if !parity.missing.is_empty() {
+        print_line(
+            out,
+            &format!(
+                "   {lead}{}",
+                paint(
+                    Color::Yellow,
+                    &format!(
+                        "{} gave no readable counts and is not in this check",
+                        parity.missing.join(", ")
+                    )
+                )
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 fn collect_scrub(instances: &[Instance]) -> Vec<String> {
@@ -881,7 +992,7 @@ fn collect_binaries(
         .iter()
         .map(|i| {
             Ok(CounterBinary {
-                name: i.name().to_string(),
+                name: i.get_name().to_string(),
                 path: i.identity.binary.clone(),
                 process: i.definition.get_process_name(platform.as_system())?,
             })
@@ -890,26 +1001,14 @@ fn collect_binaries(
 }
 
 fn describe_exclusions(state: &DefenderState) -> String {
-    let answers: Vec<&str> = state
-        .counters
-        .values()
-        .map(|e| e.process.as_str())
-        .collect();
-    match answers.as_slice() {
-        [first, rest @ ..] if rest.iter().all(|a| a == first) => match *first {
-            "yes" => "every counter excluded".to_string(),
-            "no" => paint(Color::Yellow, "none excluded").to_string(),
-            other => paint(Color::Yellow, &format!("exclusions {other}")).to_string(),
-        },
-        _ => "mixed".to_string(),
-    }
-}
-
-fn describe_origin(origin: &linebench::fetch::Origin) -> String {
-    match origin {
-        linebench::fetch::Origin::Fetched { source, .. } => format!("fetched, {source}"),
-        linebench::fetch::Origin::Built { built_with, .. } => format!("built with {built_with}"),
-        linebench::fetch::Origin::Given { label } => format!("local build {label}"),
+    match judge_process_exclusions(state) {
+        ProcessExclusions::NoCounters => "no counters".to_string(),
+        ProcessExclusions::AllExcluded => "every counter excluded".to_string(),
+        ProcessExclusions::NoneExcluded => paint(Color::Yellow, "none excluded").to_string(),
+        ProcessExclusions::Unknown(answer) => {
+            paint(Color::Yellow, &format!("exclusions {}", answer.as_str())).to_string()
+        }
+        ProcessExclusions::Unequal => "mixed".to_string(),
     }
 }
 

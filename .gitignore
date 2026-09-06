@@ -17,4 +17,5 @@
 /temp/
 
 /results/**/out/
+/results/local/
 /linebench.conf
