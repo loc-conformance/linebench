@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the cargo registry and the build dir
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --verbose
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features --verbose
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: No file was checked out with CRLF
+        shell: bash
+        run: |
+          if git ls-files --eol | grep -E "w/(crlf|mixed)"; then
+            echo "the working copy holds a file with CRLF line endings"; exit 1
+          fi
+
+      - name: Install hyperfine
+        uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
+      # tokei is built with cargo and that takes minutes, and the key is the definitions because
+      # a raised version is exactly the change that has to fetch again
+      - name: Cache the counters that were fetched
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/counters
+          key: counters-${{ runner.os }}-${{ hashFiles('counters/**') }}
+
+      # No timing is read on a shared runner.
+      - name: Fetch every counter
+        shell: bash
+        run: |
+          ./target/release/linebench setup --allow-elevated \
+            --counters-dir "${{ runner.temp }}/counters" \
+            --corpus linebench --corpus-path "${{ github.workspace }}"
+
+      - name: Run every counter over this repository and read the counts back
+        shell: bash
+        run: |
+          ./target/release/linebench check \
+            --counters-dir "${{ runner.temp }}/counters" \
+            --corpus linebench --corpus-path "${{ github.workspace }}"
