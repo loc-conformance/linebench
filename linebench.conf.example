@@ -4,6 +4,11 @@
 
 counters = "<the directory where setup keeps the counter binaries>"
 
+# The instance timed alone at both ends of every run, and the workload of noise. Keep it the
+# same across the runs you want compared with each other. The --control flag overrides it for
+# one run.
+control = "mezura"
+
 [corpora]
 linux = "<the checkout that gets counted>"
 
