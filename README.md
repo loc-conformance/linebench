@@ -55,6 +55,10 @@ goes into `linebench-fetched.toml` beside the binaries. A second `setup` answers
 here" for what matches and fetches again what does not. It runs from an ordinary terminal and
 refuses an elevated one, so that the files it writes belong to you; only `run` is elevated.
 Where there is no ordinary user, as on a CI runner, `--allow-elevated` lifts that refusal.
+`setup` asks the GitHub API which files a release has, and anonymous calls are limited per
+address, a limit that shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it;
+the token goes to that one call and never to a download. The workflow sets the token Actions
+provides.
 
 Then, on Linux and macOS:
 
@@ -88,6 +92,7 @@ flag.
 | where results go | `--out` | `LINEBENCH_OUT` | `results/` in the current directory |
 | the definitions | `--definitions <checkout>` | | the ones built into the binary |
 | the control | `--control <instance>` | | `control =` in the file, else the first instance |
+| a GitHub API token for `setup` | | `GITHUB_TOKEN`, else `GH_TOKEN` | none, anonymous |
 
 A flag beats an environment variable, which beats the file. With nothing set, every command but
 `report` refuses with the recipe. Keep the corpus and the counters on a local disk: measuring
@@ -327,6 +332,14 @@ mixes speed with how much each one chose to do.
 Every table is measured twice, once in each command order, and the numbers pool the two; how
 far the orders disagreed is a trust check on the page. The control, the same binary timed at
 the start and the end, gives the drift, and `drift` is the first thing to read.
+
+The ± on **vs fastest** is the σ of the ratio, taken from the two walls' σ by the propagation
+of uncertainty for a quotient of independent quantities, σ_r = r · √((σ_a/μ_a)² + (σ_f/μ_f)²),
+the formula hyperfine prints its own "times faster" with (Wikipedia, "Propagation of
+uncertainty", the example formulas). Each wall's σ is the pooled one, both orders together, so
+the order effect is in the ratio's σ too. It is one σ, about two thirds of the probability: a
+ratio whose interval reaches 1.00 is within the noise of the fastest, and one whose interval
+stays clear of 1.00 is apart by at least that much. The fastest row prints a plain 1.00x.
 
 At the end of a run, and on the page, "since the last run" compares every instance's same-work
 time with its own latest earlier measurement on the same machine, at the same corpus commit and

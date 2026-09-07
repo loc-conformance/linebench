@@ -6,7 +6,7 @@ use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,7 +23,8 @@ pub const GIVEN_DIR: &str = "given";
 pub const INSTANCE_SEPARATOR: char = '@';
 const GITHUB_API: &str = "https://api.github.com/repos";
 const GITHUB_TOKEN_ENVS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
-const RATE_LIMIT_STATUSES: [&str; 2] = ["403", "429"];
+const RATE_LIMIT_MARKS: [&str; 4] = ["error: 403", "error 403", "error: 429", "error 429"];
+const BAD_TOKEN_MARKS: [&str; 2] = ["error: 401", "error 401"];
 const CHECKSUM_WORDS: [&str; 2] = ["checksum", "sha256"];
 const PARTIAL_PREFIX: &str = ".partial-";
 const USER_AGENT: &str = concat!(
@@ -415,7 +416,7 @@ fn build_from_crates_io(
         "--root",
         &root_shown,
     ];
-    run_program("cargo", &asked).map_err(|refused| match refused {
+    run_program("cargo", &asked, None).map_err(|refused| match refused {
         Refusal::Missing(_) => format!(
             "{} {} ships no binaries and cargo is not on this machine to build it. Install cargo, \
              or run `cargo install {} --version {}` where it exists and measure the binary with \
@@ -464,7 +465,7 @@ fn download_release_asset(
     check_arrived_whole(&release.assets, &downloaded, &archive)?;
     let archive_shown = archive.display().to_string();
     let into_shown = into.display().to_string();
-    run_program("tar", &["-xf", &archive_shown, "-C", &into_shown]).map_err(|refused| {
+    run_program("tar", &["-xf", &archive_shown, "-C", &into_shown], None).map_err(|refused| {
         format!(
             "{downloaded} could not be unpacked: {}",
             refused.into_words()
@@ -578,12 +579,20 @@ fn find_release(repository: &str, version: &str) -> Result<Release, String> {
 }
 
 fn explain_lookup_refusal(repository: &str, version: &str, refused: &[String]) -> String {
-    let limited = refused.iter().any(|message| {
-        RATE_LIMIT_STATUSES
-            .iter()
-            .any(|status| message.contains(status))
-    });
-    if limited {
+    let mentions = |marks: &[&str]| {
+        refused.iter().any(|message| {
+            let message = message.to_ascii_lowercase();
+            marks.iter().any(|mark| message.contains(mark))
+        })
+    };
+    if mentions(&BAD_TOKEN_MARKS) {
+        return format!(
+            "github refused the token in GITHUB_TOKEN or GH_TOKEN ({}): unset it, or set a valid \
+             one",
+            refused.join("; ")
+        );
+    }
+    if mentions(&RATE_LIMIT_MARKS) {
         return format!(
             "github refused to say what {repository} has released ({}): anonymous lookups are \
              limited per address, and a token in GITHUB_TOKEN or GH_TOKEN lifts that",
@@ -596,28 +605,36 @@ fn explain_lookup_refusal(repository: &str, version: &str, refused: &[String]) -
     )
 }
 
+struct ApiRequest {
+    curl: Vec<String>,
+    config: Option<String>,
+    wget: Vec<String>,
+}
+
 fn read_github_api(url: &str) -> Result<String, String> {
     let token = GITHUB_TOKEN_ENVS
         .iter()
         .find_map(|name| env::var(name).ok())
         .filter(|token| !token.trim().is_empty());
-    let (curl, wget) = build_api_args(url, token.as_deref());
-    let curl: Vec<&str> = curl.iter().map(String::as_str).collect();
-    let wget: Vec<&str> = wget.iter().map(String::as_str).collect();
-    download_with_curl_or_wget(&curl, &wget)
+    let request = build_api_args(url, token.as_deref());
+    let curl: Vec<&str> = request.curl.iter().map(String::as_str).collect();
+    let wget: Vec<&str> = request.wget.iter().map(String::as_str).collect();
+    download_with_curl_or_wget(&curl, request.config.as_deref(), &wget)
 }
 
-fn build_api_args(url: &str, token: Option<&str>) -> (Vec<String>, Vec<String>) {
+fn build_api_args(url: &str, token: Option<&str>) -> ApiRequest {
     let mut curl = vec!["-sSfL".to_string()];
-    let mut wget = vec!["-qO-".to_string()];
+    let mut config = None;
+    let mut wget = vec!["-nv".to_string(), "-O-".to_string()];
     if let Some(token) = token {
-        curl.push("-H".to_string());
-        curl.push(format!("Authorization: Bearer {token}"));
+        curl.push("-K".to_string());
+        curl.push("-".to_string());
+        config = Some(format!("header = \"Authorization: Bearer {token}\"\n"));
         wget.push(format!("--header=Authorization: Bearer {token}"));
     }
     curl.push(url.to_string());
     wget.push(url.to_string());
-    (curl, wget)
+    ApiRequest { curl, config, wget }
 }
 
 fn find_asset_for<'a>(assets: &'a [Asset], system: &str, arch: &str) -> Result<&'a Asset, String> {
@@ -696,26 +713,30 @@ fn find_file_named(named: &str, under: &Path) -> Option<PathBuf> {
 }
 
 fn read_url(url: &str) -> Result<String, String> {
-    download_with_curl_or_wget(&["-sSfL", url], &["-qO-", url])
+    download_with_curl_or_wget(&["-sSfL", url], None, &["-qO-", url])
 }
 
 fn download_to(url: &str, into: &Path) -> Result<(), String> {
     let named = into.display().to_string();
-    download_with_curl_or_wget(&["-sSfL", "-o", &named, url], &["-qO", &named, url])?;
+    download_with_curl_or_wget(&["-sSfL", "-o", &named, url], None, &["-qO", &named, url])?;
     Ok(())
 }
 
-fn download_with_curl_or_wget(curl: &[&str], wget: &[&str]) -> Result<String, String> {
+fn download_with_curl_or_wget(
+    curl: &[&str],
+    curl_config: Option<&str>,
+    wget: &[&str],
+) -> Result<String, String> {
     let mut for_curl = vec!["-A", USER_AGENT];
     for_curl.extend_from_slice(curl);
     let mut for_wget = vec!["-U", USER_AGENT];
     for_wget.extend_from_slice(wget);
-    let missing = match run_program("curl", &for_curl) {
+    let missing = match run_program("curl", &for_curl, curl_config) {
         Ok(printed) => return Ok(printed),
         Err(Refusal::Refused(message)) => return Err(message),
         Err(Refusal::Missing(message)) => message,
     };
-    match run_program("wget", &for_wget) {
+    match run_program("wget", &for_wget, None) {
         Ok(printed) => Ok(printed),
         Err(Refusal::Refused(message)) => Err(message),
         Err(Refusal::Missing(_)) => Err(format!(
@@ -724,13 +745,26 @@ fn download_with_curl_or_wget(curl: &[&str], wget: &[&str]) -> Result<String, St
     }
 }
 
-fn run_program(program: &str, args: &[&str]) -> Result<String, Refusal> {
-    let finished = Command::new(program).args(args).output().map_err(|error| {
-        match error.kind() == io::ErrorKind::NotFound {
+fn run_program(program: &str, args: &[&str], feed: Option<&str>) -> Result<String, Refusal> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(match feed {
+            Some(_) => Stdio::piped(),
+            None => Stdio::null(),
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| match error.kind() == io::ErrorKind::NotFound {
             true => Refusal::Missing(format!("{program} is not on this machine")),
             false => Refusal::Refused(format!("{program} could not be run: {error}")),
-        }
-    })?;
+        })?;
+    if let (Some(text), Some(mut stdin)) = (feed, child.stdin.take()) {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let finished = child
+        .wait_with_output()
+        .map_err(|error| Refusal::Refused(format!("{program} could not be run: {error}")))?;
     if !finished.status.success() {
         let said = String::from_utf8_lossy(&finished.stderr);
         let said = said.trim();
@@ -753,14 +787,30 @@ mod tests {
     #[test]
     fn the_github_api_is_asked_with_the_token_when_there_is_one_and_a_403_names_the_rate_limit() {
         let url = "https://api.github.com/repos/boyter/scc/releases/tags/v4.0.0";
-        let (curl, wget) = build_api_args(url, Some("t0k"));
-        assert_eq!(curl, ["-sSfL", "-H", "Authorization: Bearer t0k", url]);
-        assert_eq!(wget, ["-qO-", "--header=Authorization: Bearer t0k", url]);
-        let (curl, wget) = build_api_args(url, None);
-        assert_eq!(curl, ["-sSfL", url]);
-        assert_eq!(wget, ["-qO-", url]);
+        let request = build_api_args(url, Some("t0k"));
+        assert_eq!(request.curl, ["-sSfL", "-K", "-", url]);
+        assert_eq!(
+            request.config.as_deref(),
+            Some("header = \"Authorization: Bearer t0k\"\n")
+        );
+        assert_eq!(
+            request.wget,
+            ["-nv", "-O-", "--header=Authorization: Bearer t0k", url]
+        );
+        let request = build_api_args(url, None);
+        assert_eq!(request.curl, ["-sSfL", url]);
+        assert_eq!(request.config, None);
+        assert_eq!(request.wget, ["-nv", "-O-", url]);
         let limited = ["curl: (22) The requested URL returned error: 403".to_string()];
         assert!(explain_lookup_refusal("boyter/scc", "4.0.0", &limited).contains("GITHUB_TOKEN"));
+        let by_wget = ["https://api.github.com/x:\n ERROR 429: Too Many Requests.".to_string()];
+        assert!(explain_lookup_refusal("boyter/scc", "4.0.0", &by_wget).contains("GITHUB_TOKEN"));
+        let stalled = ["curl: (28) Connection timed out after 21403 milliseconds".to_string()];
+        assert!(!explain_lookup_refusal("boyter/scc", "4.0.0", &stalled).contains("GITHUB_TOKEN"));
+        let bad_token = ["curl: (22) The requested URL returned error: 401".to_string()];
+        assert!(
+            explain_lookup_refusal("boyter/scc", "4.0.0", &bad_token).contains("refused the token")
+        );
         let missing = ["curl: (22) The requested URL returned error: 404".to_string()];
         assert!(
             explain_lookup_refusal("boyter/scc", "4.0.0", &missing)

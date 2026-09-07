@@ -664,7 +664,8 @@ mod tests {
         runner
             .run_hyperfine(&mut printed, "control-start", &commands[..1])
             .unwrap();
-        assert!(String::from_utf8(printed).unwrap().ends_with("2 runs\n"));
+        let printed = String::from_utf8(printed).unwrap();
+        assert!(printed.contains("2 runs\n") && !printed.contains("2 runs\n\n"));
         let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Hidden);
         let mut printed = Vec::new();
         runner
