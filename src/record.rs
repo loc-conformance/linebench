@@ -288,54 +288,85 @@ pub fn collect_table_rows(measurements: &[Measurement], table: Table) -> (Vec<Po
     (rows, order_moves)
 }
 
+const SUMMARY_HEADINGS: [&str; 8] = [
+    "instance",
+    "wall",
+    "vs fastest",
+    "user cpu",
+    "system cpu",
+    "parallelism",
+    "files",
+    "lines",
+];
+const COLUMN_GAP: usize = 2;
+
 pub fn format_summary_tables(measurements: &[Measurement]) -> Vec<String> {
-    let columns: [(&str, usize); 8] = [
-        ("instance", 14),
-        ("wall", 30),
-        ("vs fastest", 12),
-        ("user cpu", 11),
-        ("system cpu", 13),
-        ("parallelism", 14),
-        ("files", 10),
-        ("lines", 0),
-    ];
-    let mut lines = Vec::new();
+    let mut tables = Vec::new();
     for table in crate::measure::TABLES {
         let (rows, _) = collect_table_rows(measurements, table);
         if rows.is_empty() {
             continue;
         }
+        let cells: Vec<[String; 8]> = rows.into_iter().map(build_summary_cells).collect();
+        tables.push((table.describe(), cells));
+    }
+    let widths = measure_columns(&tables);
+    let mut lines = Vec::new();
+    for (title, cells) in &tables {
         lines.push(String::new());
-        lines.push(format!("   {}", table.describe()));
-        let heading: String = columns
-            .iter()
-            .map(|(name, width)| format!("{name:<width$}"))
-            .collect();
-        lines.push(format!("   {}", heading.trim_end()));
-        for row in rows {
-            let mut wall = format_wall(row.mean_s, row.stddev_s);
-            if row.single_order {
-                wall.push_str(" (one order)");
-            }
-            let cells = [
-                row.instance.clone(),
-                wall,
-                format!("{:.2}x", row.relative),
-                format!("{:.2} s", row.user_s),
-                format!("{:.2} s", row.system_s),
-                format!("{:.2}", row.parallelism),
-                row.counted_files.map(format_thousands).unwrap_or_default(),
-                row.counted_lines.map(format_thousands).unwrap_or_default(),
-            ];
-            let line: String = cells
-                .iter()
-                .zip(columns.iter())
-                .map(|(cell, (_, width))| format!("{cell:<width$}"))
-                .collect();
-            lines.push(format!("   {}", line.trim_end()));
+        lines.push(format!("   {title}"));
+        lines.push(lay_out_row(&SUMMARY_HEADINGS.map(String::from), &widths));
+        for row in cells {
+            lines.push(lay_out_row(row, &widths));
         }
     }
     lines
+}
+
+fn build_summary_cells(row: Pooled) -> [String; 8] {
+    let mut wall = format_wall(row.mean_s, row.stddev_s);
+    if row.single_order {
+        wall.push_str(" (one order)");
+    }
+    [
+        row.instance,
+        wall,
+        format!("{:.2}x", row.relative),
+        format!("{:.2} s", row.user_s),
+        format!("{:.2} s", row.system_s),
+        format!("{:.2}", row.parallelism),
+        row.counted_files.map(format_thousands).unwrap_or_default(),
+        row.counted_lines.map(format_thousands).unwrap_or_default(),
+    ]
+}
+
+/// The widest cell in a column sets its width, over every table at once so the tables that are
+/// printed together line up with each other.
+fn measure_columns(tables: &[(&str, Vec<[String; 8]>)]) -> [usize; 8] {
+    let mut widths = SUMMARY_HEADINGS.map(|heading| heading.chars().count());
+    for (_, cells) in tables {
+        for row in cells {
+            for (width, cell) in widths.iter_mut().zip(row) {
+                *width = (*width).max(cell.chars().count());
+            }
+        }
+    }
+    widths
+}
+
+fn lay_out_row(cells: &[String; 8], widths: &[usize; 8]) -> String {
+    let mut line = String::from("   ");
+    for (index, (cell, width)) in cells.iter().zip(widths).enumerate() {
+        if index > 0 {
+            line.push_str(&" ".repeat(COLUMN_GAP));
+        }
+        line.push_str(cell);
+        if index + 1 < cells.len() {
+            line.push_str(&" ".repeat(width.saturating_sub(cell.chars().count())));
+        }
+    }
+    line.truncate(line.trim_end().len());
+    line
 }
 
 pub fn format_wall(mean_s: f64, stddev_s: f64) -> String {
@@ -806,6 +837,39 @@ mod tests {
         assert_eq!(format_csv_field("a, b"), "\"a, b\"");
         assert_eq!(format_csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(format_csv_field("plain"), "plain");
+    }
+
+    #[test]
+    fn every_summary_column_is_as_wide_as_its_widest_cell_and_two_spaces_apart() {
+        let measurements = [
+            measure("t1-fwd", "mezura", 0.5),
+            measure("t1-rev", "mezura", 0.5),
+            measure("t1-fwd", "mezura@v3.1.0-a-very-long-tag", 0.25),
+            measure("t2-fwd", "mezura", 0.75),
+            measure("t2-rev", "mezura", 0.75),
+            measure("t2-fwd", "mezura@v3.1.0-a-very-long-tag", 0.25),
+        ];
+        let heading = "   instance                       wall                     vs fastest  \
+                       user cpu  system cpu  parallelism  files  lines";
+        assert_eq!(
+            format_summary_tables(&measurements),
+            [
+                "",
+                "   Same work",
+                heading,
+                "   mezura@v3.1.0-a-very-long-tag  250 ms ± 10 (one order)  1.00x       1.00 s    \
+                 0.00 s      4.00",
+                "   mezura                         500 ms ± 10              2.00x       1.00 s    \
+                 1.00 s      4.00",
+                "",
+                "   Out of the box",
+                heading,
+                "   mezura@v3.1.0-a-very-long-tag  250 ms ± 10 (one order)  1.00x       1.00 s    \
+                 0.00 s      4.00",
+                "   mezura                         750 ms ± 10              3.00x       1.00 s    \
+                 2.00 s      4.00",
+            ]
+        );
     }
 
     fn measure(set: &str, instance: &str, mean_s: f64) -> Measurement {

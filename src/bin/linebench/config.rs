@@ -112,13 +112,15 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--help" | "-h" => options.command = Some(Command::Help),
             "--version" | "-V" => options.command = Some(Command::Version),
             "--counters" => {
-                options.counters = Some(
-                    value()?
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect(),
-                );
+                let mut text = value()?;
+                while let Some(next) = rest.clone().next() {
+                    if next.starts_with('-') || !(text.ends_with(',') || next.starts_with(',')) {
+                        break;
+                    }
+                    text.push_str(next);
+                    rest.next();
+                }
+                options.counters = Some(split_list(flag, &text)?);
             }
             "--corpus" => options.corpus = Some(value()?),
             "--corpus-path" => options.corpus_path = Some(PathBuf::from(value()?)),
@@ -142,11 +144,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--allow-unequal-exclusions" => options.allow_unequal = true,
             "--allow-elevated" => options.allow_elevated = true,
             "--keep-raw" => options.keep_raw = true,
-            other => {
-                return Err(format!(
-                    "{other} is not something linebench understands; linebench help lists what is"
-                ));
-            }
+            other => return Err(explain_the_unknown_argument(other)),
         }
     }
     Ok(options)
@@ -280,18 +278,34 @@ pub fn read_env(name: &str) -> Option<String> {
 fn explain_the_missing_locations(config_path: &Path, corpora: &[Corpus]) -> String {
     let sample_corpus = corpora.first().map_or("linux", |c| c.name.as_str());
     format!(
-        "the counters directory and the corpus are not set, and there is no default. Set them in \
-         one of three ways, strongest first:\n\n\
-         \x20 --counters-dir <dir> --corpus <name> --corpus-path <dir>   for this invocation only\n\
-         \x20 {COUNTERS_ENV} / {CORPUS_ENV}                               environment\n\
-         \x20 {}\n\
-         \x20     copied from {CONFIG_FILE}.example and edited, e.g.\n\n\
-         \x20     counters = \"D:/counters\"\n\n\
-         \x20     [corpora]\n\
-         \x20     {sample_corpus} = \"D:/corpora/{sample_corpus}\"\n\n\
-         {CONFIG_FILE} is gitignored and machine-local.",
+        "counters and corpus are not set. Set them in any of these:\n\n\
+         \x20 file    {}, copied from {CONFIG_FILE}.example\n\
+         \x20 env     {COUNTERS_ENV}=<dir>  {CORPUS_ENV}={sample_corpus}\n\
+         \x20 flags   --counters-dir <dir> --corpus {sample_corpus} --corpus-path <dir>",
         config_path.display()
     )
+}
+
+const COMMANDS: [&str; 7] = [
+    "run", "setup", "check", "noise", "report", "help", "version",
+];
+
+fn split_list(flag: &str, text: &str) -> Result<Vec<String>, String> {
+    let names: Vec<String> = text.split(',').map(|s| s.trim().to_string()).collect();
+    if names.iter().any(|name| name.is_empty()) {
+        return Err(format!("empty name in {flag} {text}"));
+    }
+    Ok(names)
+}
+
+fn explain_the_unknown_argument(other: &str) -> String {
+    if COMMANDS.contains(&other) {
+        return format!("second command: {other}");
+    }
+    if other.starts_with('-') {
+        return format!("unknown flag: {other}");
+    }
+    format!("unknown argument: {other}")
 }
 
 fn split_assignment(flag: &str, text: &str) -> Result<(String, String), String> {
@@ -347,7 +361,47 @@ mod tests {
                 .unwrap_err()
                 .contains("<counter>@<tag>=<path>")
         );
-        assert!(parse("run --nonsense").unwrap_err().contains("--nonsense"));
+        assert_eq!(
+            parse("run --nonsense").unwrap_err(),
+            "unknown flag: --nonsense"
+        );
+        assert_eq!(
+            parse("run mezura@dev").unwrap_err(),
+            "unknown argument: mezura@dev"
+        );
+        assert_eq!(parse("run check").unwrap_err(), "second command: check");
+        assert_eq!(
+            parse("run --counters mezura,,scc").unwrap_err(),
+            "empty name in --counters mezura,,scc"
+        );
+        assert_eq!(
+            parse("run --counters mezura,").unwrap_err(),
+            "empty name in --counters mezura,"
+        );
+    }
+
+    #[test]
+    fn a_counter_list_the_shell_split_on_its_spaces_is_put_back_together() {
+        let expected = ["mezura".to_string(), "mezura@dev".to_string()];
+        for line in [
+            "run --counters mezura,mezura@dev",
+            "run --counters mezura, mezura@dev",
+            "run --counters mezura ,mezura@dev",
+            "run --counters mezura , mezura@dev",
+            "run --counters=mezura, mezura@dev",
+        ] {
+            let options = parse(line).unwrap();
+            assert_eq!(options.counters.as_deref(), Some(&expected[..]), "{line}");
+            assert_eq!(options.command, Some(Command::Run), "{line}");
+        }
+        let stops_at_a_flag = parse("--counters mezura, --runs 5").unwrap_err();
+        assert_eq!(stops_at_a_flag, "empty name in --counters mezura,");
+        let stops_at_a_command = parse("--counters mezura run").unwrap();
+        assert_eq!(
+            stops_at_a_command.counters.as_deref(),
+            Some(&["mezura".to_string()][..])
+        );
+        assert_eq!(stops_at_a_command.command, Some(Command::Run));
         assert!(
             parse("run --out=")
                 .unwrap_err()
