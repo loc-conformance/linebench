@@ -19,7 +19,7 @@ use linebench::machine::{
     Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
 };
 use linebench::measure::{
-    Instance, Runner, Settings, Table, build_args, build_command, capture_plain_output,
+    Instance, Runner, Settings, Style, Table, build_args, build_command, capture_plain_output,
     get_capture_name, run_phases,
 };
 use linebench::measure::{OUT_DIR, TABLES};
@@ -35,7 +35,9 @@ use linebench::record::{
 
 use crate::config::{Locations, Options};
 use crate::instances::build_instances;
-use crate::output::{Color, Output, paint, print_header, print_line, print_warning};
+use crate::output::{
+    Color, Output, get_report_style, paint, print_header, print_line, print_warning,
+};
 use crate::page::{LOCAL_DIR, PAGE_FILE, collect_records, format_since, write_results_page};
 use crate::prep::{self, AppliedPrep};
 
@@ -486,7 +488,13 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         )?;
     }
     let extensions = &locations.corpus.extensions;
-    let mut runner = Runner::new(res, settings, platform, collect_scrub(instances));
+    let mut runner = Runner::new(
+        res,
+        settings,
+        platform,
+        collect_scrub(instances),
+        get_report_style(),
+    );
     run_phases(
         out,
         &mut runner,
@@ -705,6 +713,7 @@ fn check_everything(
         },
         platform,
         collect_scrub(instances),
+        Style::Hidden,
     );
     let mut bad = Vec::new();
     let mut counted = Vec::new();
@@ -910,6 +919,7 @@ fn time_the_control(
         },
         platform,
         collect_scrub(instances),
+        Style::Hidden,
     );
     let bare = build_command(
         &instances[control],

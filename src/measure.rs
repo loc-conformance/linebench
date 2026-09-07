@@ -1,8 +1,10 @@
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
+use std::thread;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +27,7 @@ const WARNING_PREFIX: &str = "Warning:";
 const ERROR_PREFIX: &str = "Error";
 const ESCAPE: char = '\x1b';
 const PLAIN_IN_A_COMMAND: &str = "_-./:@=+,";
+const REPORT_INDENT: &str = "   ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Table {
@@ -87,6 +90,26 @@ impl Default for Settings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    Hidden,
+    Plain,
+    Colored,
+}
+
+impl Style {
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            Style::Colored => "color",
+            Style::Plain | Style::Hidden => "basic",
+        }
+    }
+
+    pub fn is_shown(self) -> bool {
+        self != Style::Hidden
+    }
+}
+
 pub struct Capture {
     pub path: PathBuf,
     pub stderr: String,
@@ -101,10 +124,17 @@ pub struct Runner {
     settings: Settings,
     platform: Platform,
     scrub: Vec<String>,
+    style: Style,
 }
 
 impl Runner {
-    pub fn new(res: &Path, settings: Settings, platform: Platform, scrub: Vec<String>) -> Runner {
+    pub fn new(
+        res: &Path,
+        settings: Settings,
+        platform: Platform,
+        scrub: Vec<String>,
+        style: Style,
+    ) -> Runner {
         Runner {
             failures: Vec::new(),
             warnings: Vec::new(),
@@ -114,6 +144,7 @@ impl Runner {
             settings,
             platform,
             scrub,
+            style,
         }
     }
 
@@ -129,6 +160,8 @@ impl Runner {
         let mut hyperfine = Command::new(HYPERFINE);
         hyperfine.args([
             "-N",
+            "--style",
+            self.style.as_flag(),
             "--warmup",
             &self.settings.warmup.to_string(),
             "--runs",
@@ -146,17 +179,27 @@ impl Runner {
         for name in &self.scrub {
             hyperfine.env_remove(name);
         }
-        let finished = hyperfine
+        let report = if self.style.is_shown() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        let mut child = hyperfine
             .stdin(Stdio::null())
+            .stdout(report)
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .map_err(|error| format!("{HYPERFINE} could not be run: {error}"))?;
-        let stderr = String::from_utf8_lossy(&finished.stderr);
+        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), commands);
+        let status = child
+            .wait()
+            .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
+        let stderr = relayed?;
         for warning in find_warnings(&stderr) {
             print_line(out, &format!("WARNING: {HYPERFINE} on {name}: {warning}"))?;
             self.warnings.push(format!("{name}: {warning}"));
         }
-        if !finished.status.success() {
+        if !status.success() {
             let detail = find_error(&stderr);
             print_line(
                 out,
@@ -260,6 +303,7 @@ pub fn run_phases(
             .map(|instance| build_command(instance, corpus, extensions, table))
             .collect::<Result<_, _>>()?;
         runner.run_hyperfine(out, &get_set_name(table, FORWARD), &commands)?;
+        print_line(out, "")?;
         let reversed: Vec<(String, String)> = commands.into_iter().rev().collect();
         runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed)?;
     }
@@ -373,6 +417,54 @@ pub fn print_line(out: &mut dyn Write, message: &str) -> Result<(), String> {
         .map_err(|error| format!("this report could not be written: {error}"))
 }
 
+fn relay_report(
+    out: &mut dyn Write,
+    report: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    commands: &[(String, String)],
+) -> Result<String, String> {
+    thread::scope(|scope| {
+        let collected = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stderr) = stderr {
+                let _ = stderr.read_to_end(&mut bytes);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        });
+        if let Some(report) = report {
+            let mut blank_pending = false;
+            for line in BufReader::new(report).split(b'\n') {
+                let line = line
+                    .map_err(|error| format!("{HYPERFINE}'s report could not be read: {error}"))?;
+                let line = format_report_line(&String::from_utf8_lossy(&line), commands);
+                if line.is_empty() {
+                    blank_pending = true;
+                    continue;
+                }
+                if blank_pending {
+                    print_line(out, "")?;
+                    blank_pending = false;
+                }
+                print_line(out, &line)?;
+            }
+        }
+        Ok(collected.join().unwrap_or_default())
+    })
+}
+
+fn format_report_line(line: &str, commands: &[(String, String)]) -> String {
+    let mut line = line.trim_end().to_string();
+    let mut longest_first: Vec<&(String, String)> = commands.iter().collect();
+    longest_first.sort_by_key(|(_, command)| Reverse(command.len()));
+    for (instance, command) in longest_first {
+        line = line.replace(command.as_str(), instance);
+    }
+    if line.is_empty() {
+        return line;
+    }
+    format!("{REPORT_INDENT}{line}")
+}
+
 fn find_error(stderr: &str) -> String {
     let lines: Vec<String> = stderr
         .lines()
@@ -482,7 +574,13 @@ mod tests {
         let dir = std::env::temp_dir().join("linebench-a_counter_that_exits_non_zero");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(OUT_DIR)).unwrap();
-        let mut runner = Runner::new(&dir, Settings::default(), Platform::Linux, Vec::new());
+        let mut runner = Runner::new(
+            &dir,
+            Settings::default(),
+            Platform::Linux,
+            Vec::new(),
+            Style::Hidden,
+        );
         let mut printed = Vec::new();
         let args = ["--no-such-flag-linebench".to_string()];
         let written = runner
@@ -512,6 +610,82 @@ mod tests {
             ["git exited 129 while writing t1-git.json"]
         );
         assert!(runner.failures.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hyperfine_s_report_names_the_instance_where_hyperfine_named_the_command() {
+        let commands = [
+            ("mezura".to_string(), "/c/mezura /corpus".to_string()),
+            (
+                "mezura@next".to_string(),
+                "/c/mezura /corpus --languages c".to_string(),
+            ),
+        ];
+        assert_eq!(
+            format_report_line("Benchmark 1: /c/mezura /corpus --languages c\r", &commands),
+            "   Benchmark 1: mezura@next"
+        );
+        assert_eq!(
+            format_report_line("  \x1b[36m/c/mezura /corpus\x1b[0m ran", &commands),
+            "     \x1b[36mmezura\x1b[0m ran"
+        );
+        assert_eq!(format_report_line(" ", &commands), "");
+    }
+
+    #[test]
+    fn hyperfine_s_report_is_relayed_as_it_runs_unless_it_was_asked_to_stay_hidden() {
+        let dir = std::env::temp_dir().join("linebench-hyperfine_s_report_is_relayed");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let settings = Settings {
+            warmup: 0,
+            runs: 2,
+            settle: 0,
+        };
+        let commands = [
+            ("version".to_string(), "git --version".to_string()),
+            ("help".to_string(), "git --help".to_string()),
+        ];
+        let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Plain);
+        let mut printed = Vec::new();
+        runner
+            .run_hyperfine(&mut printed, "t1-fwd", &commands)
+            .unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        assert!(printed.starts_with(">> t1-fwd\n   Benchmark 1: version\n     Time (mean"));
+        assert!(printed.contains("\n   Benchmark 2: help\n"));
+        assert!(printed.contains("\n\n   Summary\n"));
+        assert!(!printed.contains("--version"));
+        assert!(!printed.ends_with("\n\n"));
+        assert!(runner.failures.is_empty());
+        assert!(dir.join("t1-fwd.json").is_file());
+        let mut printed = Vec::new();
+        runner
+            .run_hyperfine(&mut printed, "control-start", &commands[..1])
+            .unwrap();
+        assert!(String::from_utf8(printed).unwrap().ends_with("2 runs\n"));
+        let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Hidden);
+        let mut printed = Vec::new();
+        runner
+            .run_hyperfine(&mut printed, "check", &commands[..1])
+            .unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        assert!(printed.starts_with(">> check\n"));
+        assert!(!printed.contains("Benchmark"));
+        let failing = (
+            "git".to_string(),
+            "git --no-such-flag-linebench".to_string(),
+        );
+        let mut printed = Vec::new();
+        runner
+            .run_hyperfine(&mut printed, "t2-fwd", std::slice::from_ref(&failing))
+            .unwrap();
+        assert!(String::from_utf8(printed).unwrap().contains(
+            "WARNING: hyperfine reported a problem on t2-fwd: Error: Command terminated with \
+             non-zero exit code"
+        ));
+        assert_eq!(runner.failures, ["t2-fwd"]);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

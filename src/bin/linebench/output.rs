@@ -2,10 +2,10 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 
-use colored::{ColoredString, Colorize};
+use colored::{ColoredString, Colorize, control};
 
 pub use linebench::measure::print_line;
-use linebench::measure::strip_ansi;
+use linebench::measure::{Style, strip_ansi};
 
 pub struct Output {
     transcript: Option<File>,
@@ -75,6 +75,14 @@ pub enum Color {
 pub fn enable_colors() {
     #[cfg(windows)]
     let _ = colored::control::set_virtual_terminal(true);
+}
+
+pub fn get_report_style() -> Style {
+    if control::SHOULD_COLORIZE.should_colorize() {
+        Style::Colored
+    } else {
+        Style::Plain
+    }
 }
 
 pub fn print_header(out: &mut dyn Write, title: &str) -> Result<(), String> {
