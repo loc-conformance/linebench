@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use linebench::corpus::{Corpus, build_corpus_of};
+use linebench::counters::Definition;
 use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::files::read_toml;
 
@@ -28,6 +29,8 @@ pub struct Config {
     pub out: Option<PathBuf>,
     #[serde(default)]
     pub add: Vec<PathBuf>,
+    #[serde(default)]
+    pub skip: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -82,6 +85,7 @@ pub struct Locations {
     pub out: PathBuf,
     pub given: BTreeMap<String, GivenEntry>,
     pub control: Option<String>,
+    pub skip: Vec<String>,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -320,7 +324,25 @@ pub fn resolve_locations(
         out,
         given,
         control: config.control.clone(),
+        skip: config.skip.clone(),
     })
+}
+
+pub fn check_skip_names(
+    skip: &[String],
+    counters: &[Definition],
+    config_path: &Path,
+) -> Result<(), String> {
+    match skip
+        .iter()
+        .find(|name| !counters.iter().any(|d| &d.name == *name))
+    {
+        Some(name) => Err(format!(
+            "{}: skip names {name}, and no counter definition has that name",
+            config_path.display()
+        )),
+        None => Ok(()),
+    }
 }
 
 pub fn read_env(name: &str) -> Option<String> {
@@ -613,6 +635,32 @@ mod tests {
     }
 
     #[test]
+    fn the_conf_leaves_counters_out_by_name_and_a_name_no_definition_has_is_refused() {
+        let config: Config =
+            toml::from_str("skip = [\"cloc\"]\n[corpora]\nlinux = \"D:/linux\"\n").unwrap();
+        let corpora = vec![
+            linebench::corpus::parse_corpus(
+                "name = \"linux\"\nextensions = [\"c\"]\n",
+                Path::new("linux.toml"),
+            )
+            .unwrap(),
+        ];
+        let conf = Path::new("linebench.conf");
+        let data = Some(Path::new("D:/data/linebench"));
+        let locations =
+            resolve_locations(&parse("run").unwrap(), &config, conf, &corpora, data).unwrap();
+        assert_eq!(locations.skip, ["cloc"]);
+        let counters = linebench::counters::read_definitions(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/counters"
+        )))
+        .unwrap();
+        assert!(check_skip_names(&locations.skip, &counters, conf).is_ok());
+        let refused = check_skip_names(&["nope".to_string()], &counters, conf).unwrap_err();
+        assert!(refused.contains("skip names nope"), "{refused}");
+    }
+
+    #[test]
     fn the_example_conf_reads_back_with_every_key_where_it_was_meant() {
         let config: Config = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -622,7 +670,7 @@ mod tests {
         assert_eq!(config.control.as_deref(), Some("mezura"));
         assert_eq!(config.corpora.len(), 1);
         assert!(config.corpora.contains_key("linux"));
-        assert!(config.given.is_empty() && config.add.is_empty());
+        assert!(config.given.is_empty() && config.add.is_empty() && config.skip.is_empty());
         assert!(config.counters.is_none() && config.out.is_none());
     }
 

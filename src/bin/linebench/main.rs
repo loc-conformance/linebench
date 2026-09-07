@@ -18,8 +18,8 @@ use linebench::counters::Definition;
 use linebench::machine::{Platform, detect_platform};
 
 use crate::config::{
-    Command, Locations, Options, find_config, find_data_dir, parse_args, read_config,
-    resolve_locations, resolve_out,
+    Command, Locations, Options, check_skip_names, find_config, find_data_dir, parse_args,
+    read_config, resolve_locations, resolve_out,
 };
 use crate::output::{Color, Output, enable_colors, paint, print_line};
 use crate::shipped::collect_definitions;
@@ -147,6 +147,7 @@ fn resolve_everything(out: &mut dyn Write, options: &Options) -> Result<Resolved
     let config = read_config(&config_path)?;
     let added: Vec<PathBuf> = config.add.iter().chain(&options.add).cloned().collect();
     let definitions = collect_definitions(out, &added)?;
+    check_skip_names(&config.skip, &definitions.counters, &config_path)?;
     let locations = resolve_locations(
         options,
         &config,

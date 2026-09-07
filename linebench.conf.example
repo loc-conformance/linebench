@@ -16,6 +16,10 @@ control = "mezura"
 # a directory of them. One named like a built-in definition takes its place.
 # add = ["<path to a .toml>", "<a directory of them>"]
 
+# Counters left out of every default set on this machine, whatever the corpus. setup does not
+# fetch them, and check and run leave them out and say so. Named in --counters they run.
+# skip = ["cloc"]
+
 # out = "<where results go. The default is results/ in the current directory>"
 
 [corpora]

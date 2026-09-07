@@ -205,7 +205,10 @@ pub fn identify_counter(
     let binary = dir.join(definition.get_binary_name(platform.as_system())?);
     if !binary.is_file() {
         let how = match &definition.acquisition {
-            Some(how) => format!("run setup to fetch {} {}", definition.name, how.version),
+            Some(how) => format!(
+                "run setup --counters {0} to fetch {0} {1}",
+                definition.name, how.version
+            ),
             None => format!(
                 "a build of it is measured with --given {}=<path>",
                 definition.name

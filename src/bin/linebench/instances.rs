@@ -47,8 +47,13 @@ pub fn build_instances(
             named.clone()
         }
         None => {
-            let (set_up, reasons) =
-                choose_set_up(definitions, &locations.counters_dir, platform, corpus)?;
+            let (set_up, reasons) = choose_set_up(
+                definitions,
+                &locations.counters_dir,
+                platform,
+                corpus,
+                &locations.skip,
+            )?;
             for entry in &reasons {
                 print_line(out, entry)?;
             }
@@ -59,11 +64,13 @@ pub fn build_instances(
                 .chain(locations.given.keys().cloned())
                 .collect();
             if selected.is_empty() {
-                let any_skipped = definitions.iter().any(|d| corpus.skips(system, &d.name));
+                let any_skipped = definitions
+                    .iter()
+                    .any(|d| corpus.skips(system, &d.name) || locations.skip.contains(&d.name));
                 return Err(if any_skipped {
                     format!(
-                        "every counter that is set up is left out by the corpus definition on \
-                         {system}; name one with --counters"
+                        "every counter that is set up is left out, by linebench.conf or by the \
+                         corpus definition on {system}; name one with --counters"
                     )
                 } else {
                     "no counter is set up: run setup".to_string()
@@ -141,7 +148,9 @@ pub fn build_instances(
     let find_control = |named: &str| instances.iter().position(|i| i.get_name() == named);
     let control = match (&options.control, &locations.control) {
         (Some(named), _) => find_control(named).ok_or_else(|| {
-            let skipped = if corpus.skips(system, named) {
+            let skipped = if locations.skip.contains(named) {
+                format!(", and linebench.conf leaves {named} out")
+            } else if corpus.skips(system, named) {
                 format!(", and the corpus definition leaves {named} out on {system}")
             } else {
                 String::new()
@@ -190,6 +199,7 @@ fn choose_set_up(
     counters_dir: &Path,
     platform: Platform,
     corpus: &Corpus,
+    conf_skip: &[String],
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let system = platform.as_system();
     let mut set_up = Vec::new();
@@ -197,7 +207,9 @@ fn choose_set_up(
     for definition in definitions {
         let binary = counters_dir.join(definition.get_binary_name(system)?);
         let could_run = binary.is_file() || definition.acquisition.is_some();
-        if could_run && corpus.skips(system, &definition.name) {
+        if could_run && conf_skip.contains(&definition.name) {
+            left_out.push(format!("{}: linebench.conf leaves it out", definition.name));
+        } else if could_run && corpus.skips(system, &definition.name) {
             left_out.push(format!(
                 "{}: the corpus definition leaves it out on {system}",
                 definition.name
@@ -259,7 +271,7 @@ blanks   = \"blanks\"
         let plain =
             parse_corpus("name = \"t\"\nextensions = [\"c\"]\n", Path::new("t.toml")).unwrap();
         let (set_up, left_out) =
-            choose_set_up(&definitions, &dir, Platform::Windows, &plain).unwrap();
+            choose_set_up(&definitions, &dir, Platform::Windows, &plain, &[]).unwrap();
         assert_eq!(set_up, ["scc"]);
         assert_eq!(
             left_out,
@@ -275,7 +287,7 @@ blanks   = \"blanks\"
         )
         .unwrap();
         let (set_up, left_out) =
-            choose_set_up(&definitions, &dir, Platform::Windows, &skipping).unwrap();
+            choose_set_up(&definitions, &dir, Platform::Windows, &skipping, &[]).unwrap();
         assert!(set_up.is_empty());
         assert_eq!(
             left_out[0],
@@ -286,11 +298,16 @@ blanks   = \"blanks\"
             "scc: the corpus definition leaves it out on windows"
         );
         assert!(left_out.iter().all(|entry| !entry.starts_with("mine")));
-        let (_, on_wsl) = choose_set_up(&definitions, &dir, Platform::Wsl, &skipping).unwrap();
+        let (_, on_wsl) = choose_set_up(&definitions, &dir, Platform::Wsl, &skipping, &[]).unwrap();
         assert!(
             on_wsl.iter().all(|entry| !entry.contains("leaves it out")),
             "{on_wsl:?}"
         );
+        let by_conf = ["scc".to_string()];
+        let (set_up, left_out) =
+            choose_set_up(&definitions, &dir, Platform::Windows, &plain, &by_conf).unwrap();
+        assert!(set_up.is_empty());
+        assert_eq!(left_out[2], "scc: linebench.conf leaves it out");
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -95,6 +95,7 @@ A flag beats an environment variable, which beats `linebench.conf`.
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | none |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
+| counters left out on this machine | | | `skip = ["cloc"]` | none |
 | a GitHub API token for `setup` | | `GITHUB_TOKEN`, else `GH_TOKEN` | | none |
 
 The tree is the checkout of a corpus definition (the kernel as `linux`, this repository as
@@ -111,8 +112,10 @@ keeping them elsewhere, say under a Defender exclusion path. Results go one
 them. `--add` takes a counter or a corpus `.toml`, or a directory of them, read beside the
 built-in ones; one named like a built-in definition takes its place, and a line says so. The
 control is the instance timed alone at both ends of the run, whose shift is read as the
-machine's own movement. The token lifts the anonymous rate limit on the release lookup and goes
-to that one call only.
+machine's own movement. `skip` leaves counters out of every default set on this machine,
+whatever the corpus: `setup` does not fetch them, `check` and `run` leave them out and say so,
+and naming one in `--counters` runs it. The token lifts the anonymous rate limit on the release
+lookup and goes to that one call only.
 
 With nothing set at all, every command but `report` refuses and prints the recipe. Keep the
 corpus and the counters on a local disk: measuring across `/mnt` from WSL, or over a network
@@ -331,7 +334,9 @@ as an equal-work problem, which is the point of the reference. `[skip]` names, p
 counters left out of the default set over this corpus, with WSL counting as linux: cloc takes
 about 90 s per run over the kernel on Windows, so a plain `run` there would be two hours of
 cloc. `check` follows the same default, so a skipped counter is checked over that corpus by
-naming it. A counter named in `--counters` runs all the same, with a warning. The record and the page say which counters
+naming it. A counter named in `--counters` runs all the same, with a warning. For one machine
+over every corpus, `skip = ["cloc"]` in `linebench.conf` does the same, and `setup` then
+leaves the counter unfetched too. The record and the page say which counters
 were left out of a run and why, whether by the corpus or because they were not set up on the
 machine. Leave `commit` blank to measure a tree as it
 stands: the run is recorded as unpinned, there is no count to declare, and the counters' file

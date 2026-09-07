@@ -92,6 +92,10 @@ pub fn run_setup(
     print_header(out, "== counters")?;
     for definition in wanted {
         print_line(out, &paint(Color::Bold, &definition.name).to_string())?;
+        if options.counters.is_none() && locations.skip.contains(&definition.name) {
+            print_line(out, "  linebench.conf leaves it out")?;
+            continue;
+        }
         if definition.acquisition.is_none() && options.counters.is_none() {
             print_line(
                 out,
