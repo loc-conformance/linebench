@@ -1,21 +1,30 @@
-# Copy to linebench.conf (that exact name, beside this file) and point these at wherever you keep
-# them on THIS machine. There are no defaults on purpose.
-# A flag beats an environment variable, which beats this file.
-
-counters = "<the directory where setup keeps the counter binaries>"
+# Copy to linebench.conf in linebench's own directory on THIS machine (%APPDATA%\linebench on
+# Windows, ~/Library/Application Support/linebench on macOS, ~/.local/share/linebench on Linux),
+# or into the directory you run from, which wins. A flag beats an environment variable, which
+# beats this file. The plain keys come first: everything under a [table] belongs to that table.
 
 # The instance timed alone at both ends of every run, and the workload of noise. Keep it the
 # same across the runs you want compared with each other. The --control flag overrides it for
 # one run.
 control = "mezura"
 
+# Where setup keeps the counter binaries. The default is counters/ in linebench's own directory,
+# so this is only for keeping them elsewhere, say under a Defender exclusion path.
+# counters = "<dir>"
+
+# Definitions of your own, counters or corpora, beside the built-in ones: a .toml file each, or
+# a directory of them. One named like a built-in definition takes its place.
+# add = ["<path to a .toml>", "<a directory of them>"]
+
+# out = "<where results go. The default is results/ in the current directory>"
+
 [corpora]
 linux = "<the checkout that gets counted>"
 
 # A build of your own, measured beside the release as the instance mezura@dev. The definition
-# is only needed when its flags differ from the release's.
+# is only needed when its flags differ from the release's, and args are the instance's own
+# arguments, placed right after the target. An entry with args and no binary runs the release.
 # [given."mezura@dev"]
 # binary     = "<path to the build>"
 # definition = "<its own definition file>"
-
-# out = "<where results go. The default is results/ in this checkout>"
+# args       = ["--threads", "4", "16"]

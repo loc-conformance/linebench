@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use linebench::corpus::{
-    Counted, Parity, Verdict, check_commit, describe_empty_count, judge_parity, read_git_state,
-    setup_corpus,
+    Counted, Parity, Verdict, check_commit, check_declares_files, count_tracked_files,
+    describe_empty_count, judge_parity, read_git_state, setup_corpus,
 };
 use linebench::counters::Definition;
 use linebench::defender::{
@@ -92,6 +92,16 @@ pub fn run_setup(
     print_header(out, "== counters")?;
     for definition in wanted {
         print_line(out, &paint(Color::Bold, &definition.name).to_string())?;
+        if definition.acquisition.is_none() && options.counters.is_none() {
+            print_line(
+                out,
+                &format!(
+                    "  no release to fetch; a build of it is measured with --given {}=<path>",
+                    definition.name
+                ),
+            )?;
+            continue;
+        }
         if let Err(refused) = fetch_counter(
             out,
             definition,
@@ -303,6 +313,7 @@ pub fn run_benchmark(
 ) -> Result<i32, String> {
     let privileged = is_privileged(platform);
     check_commit(&locations.corpus, &locations.checkout)?;
+    check_declares_files(&locations.corpus)?;
     let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
     let binaries = collect_binaries(&instances, platform)?;
     let defender = read_defender_state(platform, privileged, &locations.checkout, &binaries);
@@ -344,7 +355,7 @@ pub fn run_benchmark(
     };
     let now = read_seconds_since_epoch();
     let stamp = format_utc_stamp(now);
-    let is_local = instances.iter().any(|i| i.identity.is_a_local_build());
+    let is_local = instances.iter().any(Instance::is_an_experiment);
     let mut res = locations.out.clone();
     if is_local {
         res = res.join(LOCAL_DIR);
@@ -477,10 +488,15 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         }
     }
     for instance in instances {
+        let with = if instance.args.is_empty() {
+            String::new()
+        } else {
+            format!(" with {}", instance.args.join(" "))
+        };
         print_line(
             out,
             &format!(
-                "   {}: {} ({})",
+                "   {}: {} ({}){with}",
                 instance.get_name(),
                 instance.identity.version,
                 instance.identity.describe_origin()
@@ -569,6 +585,7 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
                 && git.head.as_deref() == Some(locations.corpus.commit.as_str()),
             head: git.head,
             clean: git.clean,
+            extensions: locations.corpus.extensions.clone(),
         },
         settings: RunSettings {
             warmup: settings.warmup,
@@ -871,7 +888,14 @@ fn check_everything(
             ),
         )?;
     }
-    let reference = locations.corpus.files;
+    let counted_by_git = match (locations.corpus.is_pinned(), locations.corpus.files) {
+        (true, None) => Some(count_tracked_files(
+            &locations.checkout,
+            &locations.corpus.extensions,
+        )?),
+        _ => None,
+    };
+    let reference = locations.corpus.files.or(counted_by_git);
     let expected: Vec<String> = instances.iter().map(|i| i.get_name().to_string()).collect();
     let parity = judge_parity(reference, &counted, &expected, locations.corpus.tolerance);
     print_line(out, "")?;
@@ -896,6 +920,16 @@ fn check_everything(
         .collect();
     print_line(out, &format!("   lines   {}", lines.join("   ")))?;
     print_parity(out, &parity, "")?;
+    if let Some(files) = counted_by_git {
+        print_line(
+            out,
+            &format!(
+                "   files = {files}   counted from the tree of this commit; write it into {} \
+                 beside the commit, and run will then accept the definition",
+                locations.corpus.path.display()
+            ),
+        )?;
+    }
     if !parity.problems.is_empty() {
         bad.push("equal work".to_string());
     }

@@ -45,7 +45,7 @@ impl FoundRun {
         self.record
             .instances
             .iter()
-            .any(|i| i.identity.is_a_local_build())
+            .any(|i| i.identity.is_a_local_build() || !i.args.is_empty())
     }
 }
 
@@ -210,8 +210,8 @@ pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
     for Comparison { anchor, then, now } in &compared {
         let before = find_instance_record(anchor, &now.instance);
         let after = find_instance_record(current, &now.instance);
-        let same_flags = before.map(|i| (&i.languages, &i.same_work))
-            == after.map(|i| (&i.languages, &i.same_work));
+        let same_flags = before.map(|i| (&i.languages, &i.same_work, &i.args))
+            == after.map(|i| (&i.languages, &i.same_work, &i.args));
         let mut line = if same_flags {
             format!(
                 "  {:<14} t1   {} -> {}   {}",
@@ -222,8 +222,8 @@ pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
             )
         } else {
             format!(
-                "  {:<14} t1   the languages or the same-work flags changed, so the times do \
-                 not compare",
+                "  {:<14} t1   the languages, the same-work flags or the instance's own \
+                 arguments changed, so the times do not compare",
                 now.instance
             )
         };
@@ -639,10 +639,15 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         } else {
             instance.same_work_note.clone()
         };
-        lines.push(format!("  - {}: {note}", instance.identity.instance));
+        let with = if instance.args.is_empty() {
+            String::new()
+        } else {
+            format!(", run with `{}`", instance.args.join(" "))
+        };
+        lines.push(format!("  - {}: {note}{with}", instance.identity.instance));
     }
     lines.extend([
-        "- Out of the box: bare `counter <dir>`, nothing else.".to_string(),
+        "- Out of the box: bare `counter <dir>`, nothing else, plus an instance's own arguments where it has them.".to_string(),
         "- The exact flags: each counter's definition under `counters/` in the linebench repository.".to_string(),
         String::new(),
         "## Terms".to_string(),
@@ -730,6 +735,15 @@ fn find_hard_differences(then: &Record, now: &Record) -> Vec<String> {
             Some(head) => format!("at corpus commit {}", shorten_hash(head)),
             None => "with the corpus not a git checkout".to_string(),
         });
+    }
+    if !then.corpus.extensions.is_empty()
+        && !now.corpus.extensions.is_empty()
+        && then.corpus.extensions != now.corpus.extensions
+    {
+        reasons.push(format!(
+            "counting {} files",
+            then.corpus.extensions.join(", ")
+        ));
     }
     reasons.extend(find_disk_difference(then, now));
     reasons
@@ -1071,6 +1085,22 @@ mod tests {
             since[2],
             "  not compared with 20260904-100000: that run was on another cpu, 16 threads"
         );
+        let mut rust_only = build_record("20260904-120000", &[("mezura", 0.30)], "nvme0");
+        rust_only.corpus.extensions = vec!["rs".to_string()];
+        let mut before_the_field = build_record("20260904-130000", &[("mezura", 0.30)], "nvme0");
+        before_the_field.corpus.extensions.clear();
+        let since = format_since(&now, &[&rust_only, &before_the_field]);
+        assert!(
+            since.iter().any(|line| line
+                == "  not compared with 20260904-120000: that run was counting rs files"),
+            "{since:?}"
+        );
+        assert!(
+            since
+                .iter()
+                .any(|line| line.starts_with("since 20260904-130000")),
+            "{since:?}"
+        );
     }
 
     #[test]
@@ -1167,6 +1197,7 @@ mod tests {
                 same_work: vec!["--plain".to_string()],
                 same_work_note: String::new(),
                 scrub_env: Vec::new(),
+                args: Vec::new(),
             })
             .collect();
         let mut measurements = Vec::new();
@@ -1212,6 +1243,7 @@ mod tests {
                 head: Some("0".repeat(40)),
                 clean: Some(true),
                 pinned: true,
+                extensions: vec!["c".to_string(), "h".to_string()],
             },
             settings: RunSettings {
                 warmup: 3,

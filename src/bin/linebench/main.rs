@@ -9,17 +9,20 @@ mod prep;
 mod shipped;
 
 use std::env;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 use std::process;
 
 use linebench::counters::Definition;
 use linebench::machine::{Platform, detect_platform};
 
 use crate::config::{
-    Command, Locations, Options, find_config, parse_args, read_config, resolve_locations,
-    resolve_out,
+    Command, Locations, Options, find_config, find_data_dir, parse_args, read_config,
+    resolve_locations, resolve_out,
 };
 use crate::output::{Color, Output, enable_colors, paint, print_line};
-use crate::shipped::{read_shipped_corpora, read_shipped_definitions};
+use crate::shipped::collect_definitions;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HELP: &str = "\
@@ -37,16 +40,18 @@ commands
   version   the version
 
 where things are, strongest first: a flag, then the environment, then linebench.conf
-  --counters-dir <dir>        where setup keeps the binaries        LINEBENCH_COUNTERS
-  --corpus <name>             which corpus definition               LINEBENCH_CORPUS
-  --corpus-path <dir>         the checkout of that corpus
-  --out <dir>                 where results go                      LINEBENCH_OUT, default results/
-  --definitions <dir>         a checkout to read counters/ and corpora/ from, over the shipped ones
+  --corpus-path <dir>         the tree that gets counted
+  --extensions rs,c           what to count in it, for a tree with no corpus definition
+  --corpus <name>             a corpus definition, --corpus-path being its checkout   LINEBENCH_CORPUS
+  --counters-dir <dir>        where setup keeps the binaries   LINEBENCH_COUNTERS, default counters/ in linebench's own directory
+  --out <dir>                 where results go                 LINEBENCH_OUT, default results/
+  --add <path>                a counter or corpus definition of your own, or a directory of them, beside the built-in ones
 
 what a run measures
   --counters a,b,c            the instances, in the order they are timed; default every definition and every given
   --given <c>@<tag>=<path>    a build of counter <c> measured as the instance <c>@<tag>, copied before it is timed
   --definition <c>@<tag>=<f>  the definition that instance runs under, when its flags differ from the release's
+  --args <c>@<tag>=<text>     arguments of that instance's own, split on spaces, right after the target; with no --given they ride on the release
   --control <instance>        the instance timed alone at both ends of the run; default control = in the conf, else the first
 
 setup
@@ -84,7 +89,7 @@ fn dispatch() -> Result<i32, String> {
             commands::run_report(&mut out, &resolve_out(&options, &config))
         }
         Command::Setup => {
-            let resolved = resolve_everything(&options)?;
+            let resolved = resolve_everything(&mut out, &options)?;
             commands::run_setup(
                 &mut out,
                 &options,
@@ -94,7 +99,7 @@ fn dispatch() -> Result<i32, String> {
             )
         }
         Command::Check => {
-            let resolved = resolve_everything(&options)?;
+            let resolved = resolve_everything(&mut out, &options)?;
             commands::run_check(
                 &mut out,
                 &options,
@@ -104,7 +109,7 @@ fn dispatch() -> Result<i32, String> {
             )
         }
         Command::Noise => {
-            let resolved = resolve_everything(&options)?;
+            let resolved = resolve_everything(&mut out, &options)?;
             commands::run_noise(
                 &mut out,
                 &options,
@@ -114,7 +119,7 @@ fn dispatch() -> Result<i32, String> {
             )
         }
         Command::Run => {
-            let resolved = resolve_everything(&options)?;
+            let resolved = resolve_everything(&mut out, &options)?;
             commands::run_benchmark(
                 &mut out,
                 &options,
@@ -132,20 +137,26 @@ struct Resolved {
     definitions: Vec<Definition>,
 }
 
-fn resolve_everything(options: &Options) -> Result<Resolved, String> {
+fn resolve_everything(out: &mut dyn Write, options: &Options) -> Result<Resolved, String> {
     let platform = detect_platform()?;
+    let data_dir = find_data_dir();
+    if let Some(dir) = &data_dir {
+        let _ = fs::create_dir_all(dir);
+    }
     let config_path = find_config();
     let config = read_config(&config_path)?;
-    let definitions_dir = options
-        .definitions
-        .clone()
-        .or_else(|| config.definitions.clone());
-    let definitions = read_shipped_definitions(definitions_dir.as_deref())?;
-    let corpora = read_shipped_corpora(definitions_dir.as_deref())?;
-    let locations = resolve_locations(options, &config, &config_path, &corpora)?;
+    let added: Vec<PathBuf> = config.add.iter().chain(&options.add).cloned().collect();
+    let definitions = collect_definitions(out, &added)?;
+    let locations = resolve_locations(
+        options,
+        &config,
+        &config_path,
+        &definitions.corpora,
+        data_dir.as_deref(),
+    )?;
     Ok(Resolved {
         platform,
         locations,
-        definitions,
+        definitions: definitions.counters,
     })
 }

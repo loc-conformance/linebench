@@ -74,6 +74,8 @@ pub struct CorpusRecord {
     pub head: Option<String>,
     pub clean: Option<bool>,
     pub pinned: bool,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +95,8 @@ pub struct InstanceRecord {
     pub same_work: Vec<String>,
     pub same_work_note: String,
     pub scrub_env: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl InstanceRecord {
@@ -103,6 +107,7 @@ impl InstanceRecord {
             same_work: instance.definition.run.same_work.clone(),
             same_work_note: instance.definition.run.same_work_note.clone(),
             scrub_env: instance.definition.run.scrub_env.clone(),
+            args: instance.args.clone(),
         })
     }
 }

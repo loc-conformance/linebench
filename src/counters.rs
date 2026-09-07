@@ -115,6 +115,7 @@ impl Definition {
         &self,
         target: &Path,
         extensions: &[String],
+        extra: &[String],
         same_work: bool,
         as_json: bool,
     ) -> Result<Vec<String>, String> {
@@ -125,6 +126,7 @@ impl Definition {
             .iter()
             .map(|part| part.replace(TARGET, &target))
             .collect();
+        args.extend(extra.iter().cloned());
         if same_work {
             args.extend(self.spell_languages(extensions)?);
             args.extend(self.run.same_work.iter().cloned());
@@ -641,13 +643,30 @@ extension-case = "exact""#,
         let scc = parse(SCC, "scc").unwrap();
         let tree = Path::new("/tree");
         let c = build_strings(&["c"]);
-        assert_eq!(scc.build_args(tree, &c, false, false).unwrap(), ["/tree"]);
         assert_eq!(
-            scc.build_args(tree, &c, false, true).unwrap(),
-            ["/tree", "--format", "json"]
+            scc.build_args(tree, &c, &[], false, false).unwrap(),
+            ["/tree"]
         );
         assert_eq!(
-            scc.build_args(tree, &c, true, true).unwrap(),
+            scc.build_args(tree, &c, &[], false, true).unwrap(),
+            ["/tree", "--format", "json"]
+        );
+        let own = build_strings(&["--threads", "4"]);
+        assert_eq!(
+            scc.build_args(tree, &c, &own, true, false).unwrap(),
+            [
+                "/tree",
+                "--threads",
+                "4",
+                "-i",
+                "c",
+                "-c",
+                "--no-cocomo",
+                "--no-config"
+            ]
+        );
+        assert_eq!(
+            scc.build_args(tree, &c, &[], true, true).unwrap(),
             [
                 "/tree",
                 "-i",

@@ -15,6 +15,7 @@ pub const NOTHING_COMPARED_NO_COUNTS: &str =
 pub const NOTHING_COMPARED_ALONE: &str =
     "nothing compared: one instance with counts and no declared file count to hold it against";
 const CORPUS_SUFFIX: &str = "toml";
+const AD_HOC_CORPUS: &str = "tree";
 const GIT_DIR: &str = ".git";
 const FULL_COMMIT: usize = 40;
 const SHORT_HASH: usize = 9;
@@ -204,13 +205,6 @@ pub fn parse_corpus(text: &str, path: &Path) -> Result<Corpus, String> {
             corpus.commit
         ));
     }
-    if corpus.is_pinned() && corpus.files.is_none() {
-        return Err(format!(
-            "{}: commit is set and files is not: run check over the checkout at that commit and \
-             write the file count the counters agree on",
-            path.display()
-        ));
-    }
     if corpus.files == Some(0) {
         return Err(format!(
             "{}: files = 0 would hold every count against nothing",
@@ -218,6 +212,32 @@ pub fn parse_corpus(text: &str, path: &Path) -> Result<Corpus, String> {
         ));
     }
     Ok(corpus)
+}
+
+pub fn build_corpus_of(checkout: &Path, extensions: &[String]) -> Result<Corpus, String> {
+    let name = fs::canonicalize(checkout)
+        .ok()
+        .as_deref()
+        .unwrap_or(checkout)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| AD_HOC_CORPUS.to_string());
+    let extensions: Vec<String> = extensions
+        .iter()
+        .map(|extension| extension.trim_start_matches('.').to_string())
+        .collect();
+    if extensions.iter().any(String::is_empty) {
+        return Err("--extensions holds an empty extension, and nothing carries that".to_string());
+    }
+    Ok(Corpus {
+        name,
+        path: checkout.to_path_buf(),
+        remote: String::new(),
+        commit: String::new(),
+        files: None,
+        extensions,
+        tolerance: DEFAULT_TOLERANCE,
+    })
 }
 
 pub fn read_git_state(checkout: &Path) -> GitState {
@@ -257,6 +277,47 @@ pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
             shorten_hash(&corpus.commit)
         )),
     }
+}
+
+pub fn check_declares_files(corpus: &Corpus) -> Result<(), String> {
+    if corpus.is_pinned() && corpus.files.is_none() {
+        return Err(format!(
+            "{}: commit is set and files is not: run check over the checkout at that commit and \
+             write in the files = line it prints",
+            corpus.path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn count_tracked_files(checkout: &Path, extensions: &[String]) -> Result<u64, String> {
+    let shown = checkout.to_string_lossy();
+    let listing = match capture_with_status(
+        "git",
+        &["-C", &shown, "ls-tree", "-r", "-z", "--name-only", "HEAD"],
+    ) {
+        Ok((true, listing)) => listing,
+        _ => {
+            return Err(format!(
+                "git could not list the files committed at HEAD in {shown}, and the reference \
+                 count comes from that listing"
+            ));
+        }
+    };
+    let carries_one = |path: &str| {
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|found| {
+                extensions
+                    .iter()
+                    .any(|wanted| wanted.eq_ignore_ascii_case(found))
+            })
+    };
+    Ok(listing
+        .split('\0')
+        .filter(|path| !path.is_empty() && carries_one(path))
+        .count() as u64)
 }
 
 pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Result<(), String> {
@@ -493,9 +554,47 @@ fn parse_tolerance<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D:
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use super::*;
 
     const SHIPPED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/corpora");
+
+    #[test]
+    fn the_tracked_files_carrying_the_extensions_are_counted_whatever_their_case() {
+        let dir = env::temp_dir().join("linebench-the_tracked_files_are_counted");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let shown = dir.to_string_lossy().into_owned();
+        run_git(&["init", "-q", &shown]).unwrap();
+        for name in ["a.rs", "sub/B.RS", "c.txt", "d"] {
+            fs::write(dir.join(name), "x").unwrap();
+        }
+        run_git(&["-C", &shown, "add", "-A"]).unwrap();
+        run_git(&[
+            "-C",
+            &shown,
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "i",
+        ])
+        .unwrap();
+        fs::write(dir.join("e.rs"), "x").unwrap();
+        fs::write(dir.join("staged.rs"), "x").unwrap();
+        run_git(&["-C", &shown, "add", "staged.rs"]).unwrap();
+        let rs = ["rs".to_string()];
+        let both = ["txt".to_string(), "rs".to_string()];
+        assert_eq!(count_tracked_files(&dir, &rs).unwrap(), 2);
+        assert_eq!(count_tracked_files(&dir, &both).unwrap(), 3);
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(count_tracked_files(&dir, &rs).is_err());
+    }
 
     #[test]
     fn the_shipped_corpora_parse_and_the_tolerance_is_a_percentage() {
@@ -508,11 +607,13 @@ mod tests {
         assert_eq!(linux.files, Some(63765));
         assert_eq!(corpora[0].files, None);
         let pinned = "name = \"t\"\nextensions = [\"c\"]\ncommit = \"0000000000000000000000000000000000000000\"\n";
+        let undeclared = parse_corpus(pinned, Path::new("t.toml")).unwrap();
         assert!(
-            parse_corpus(pinned, Path::new("t.toml"))
+            check_declares_files(&undeclared)
                 .unwrap_err()
                 .contains("commit is set and files is not")
         );
+        assert!(check_declares_files(linux).is_ok());
         assert!(
             parse_corpus(
                 "name = \"t\"\nextensions = [\"c\"]\nfiles = 0\n",

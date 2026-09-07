@@ -123,7 +123,7 @@ pub fn fetch_counter(
     let Some(how) = &definition.acquisition else {
         return Err(format!(
             "{} says nothing about where to fetch it from, so a build of it is measured with \
-             --given {}@<tag>=<path>",
+             --given {}=<path>",
             definition.path.display(),
             definition.name
         ));
@@ -207,7 +207,7 @@ pub fn identify_counter(
         let how = match &definition.acquisition {
             Some(how) => format!("run setup to fetch {} {}", definition.name, how.version),
             None => format!(
-                "a build of it is measured with --given {}@<tag>=<path>",
+                "a build of it is measured with --given {}=<path>",
                 definition.name
             ),
         };
@@ -247,7 +247,7 @@ pub fn identify_counter(
 
 pub fn stage_given(
     definition: &Definition,
-    tag: &str,
+    tag: Option<&str>,
     source: &Path,
     platform: Platform,
     dir: &Path,
@@ -255,7 +255,10 @@ pub fn stage_given(
     if !source.is_file() {
         return Err(format!("{} is not a file", source.display()));
     }
-    let instance = format!("{}{INSTANCE_SEPARATOR}{tag}", definition.name);
+    let instance = match tag {
+        Some(tag) => format!("{}{INSTANCE_SEPARATOR}{tag}", definition.name),
+        None => definition.name.clone(),
+    };
     let staged = dir.join(GIVEN_DIR).join(&instance);
     fs::create_dir_all(&staged)
         .map_err(|error| format!("{} could not be created: {error}", staged.display()))?;
@@ -277,7 +280,7 @@ pub fn stage_given(
         sha256,
         version,
         origin: Origin::Given {
-            label: tag.to_string(),
+            label: tag.unwrap_or(&definition.name).to_string(),
         },
     })
 }
@@ -972,9 +975,15 @@ blanks   = \"Blank\"
         fs::create_dir_all(&dir).unwrap();
         let source = env::current_exe().unwrap();
         let platform = detect_platform().unwrap();
-        let identity = stage_given(&definition, "dev", &source, platform, &dir).unwrap();
+        let identity = stage_given(&definition, Some("dev"), &source, platform, &dir).unwrap();
         let copied = identity.binary.is_file();
-        let refused = stage_given(&definition, "dev", &dir.join("nowhere"), platform, &dir);
+        let refused = stage_given(
+            &definition,
+            Some("dev"),
+            &dir.join("nowhere"),
+            platform,
+            &dir,
+        );
         fs::remove_dir_all(&dir).unwrap();
         assert!(copied);
         assert_eq!(identity.instance, "scc@dev");

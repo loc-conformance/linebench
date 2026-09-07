@@ -65,11 +65,16 @@ impl Table {
 pub struct Instance {
     pub definition: Definition,
     pub identity: Identity,
+    pub args: Vec<String>,
 }
 
 impl Instance {
     pub fn get_name(&self) -> &str {
         &self.identity.instance
+    }
+
+    pub fn is_an_experiment(&self) -> bool {
+        self.identity.is_a_local_build() || !self.args.is_empty()
     }
 }
 
@@ -344,9 +349,13 @@ pub fn build_args(
     table: Table,
     as_json: bool,
 ) -> Result<Vec<String>, String> {
-    instance
-        .definition
-        .build_args(corpus, extensions, table.uses_same_work(), as_json)
+    instance.definition.build_args(
+        corpus,
+        extensions,
+        &instance.args,
+        table.uses_same_work(),
+        as_json,
+    )
 }
 
 pub fn build_command(

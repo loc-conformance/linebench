@@ -32,13 +32,13 @@ a script (cloc on Linux and macOS).
 
 ## Running it
 
-Copy `linebench.conf.example` to `linebench.conf` (that exact name, in the directory you run
-from, gitignored) and say where the counter binaries and the corpus checkout live on this
-machine:
+linebench keeps its own directory on every machine, made on first use: `%APPDATA%\linebench`
+on Windows, `~/Library/Application Support/linebench` on macOS, `~/.local/share/linebench` on
+Linux. The counter binaries go there by default, under `counters/`, and so does
+`linebench.conf`, copied from `linebench.conf.example`; a `linebench.conf` in the directory you
+run from wins over it. The conf says where the corpus checkouts live on this machine:
 
 ```toml
-counters = "D:/counters"
-
 [corpora]
 linux = "D:/corpora/linux"
 ```
@@ -84,19 +84,39 @@ flag.
 
 ## Where things are
 
-| setting | flag | environment | default |
-|---|---|---|---|
-| the counters directory | `--counters-dir` | `LINEBENCH_COUNTERS` | none, must be set |
-| the corpus | `--corpus <name>` | `LINEBENCH_CORPUS` | the only one in `[corpora]` |
-| its checkout | `--corpus-path` | | the `[corpora]` entry |
-| where results go | `--out` | `LINEBENCH_OUT` | `results/` in the current directory |
-| the definitions | `--definitions <checkout>` | | the ones built into the binary |
-| the control | `--control <instance>` | | `control =` in the file, else the first instance |
-| a GitHub API token for `setup` | | `GITHUB_TOKEN`, else `GH_TOKEN` | none, anonymous |
+A flag beats an environment variable, which beats `linebench.conf`.
 
-A flag beats an environment variable, which beats the file. With nothing set, every command but
-`report` refuses with the recipe. Keep the corpus and the counters on a local disk: measuring
-across `/mnt` from WSL, or over a network share, measures the mount.
+| what | flag | environment | in the conf | default |
+|---|---|---|---|---|
+| the tree that gets counted | `--corpus-path <dir>` | | `[corpora]` entry | the `[corpora]` entry of the corpus |
+| what to count in it, with no corpus definition | `--extensions rs,c` | | | |
+| which corpus definition | `--corpus <name>` | `LINEBENCH_CORPUS` | | the only `[corpora]` entry, when there is one |
+| the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
+| where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
+| definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | none |
+| the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
+| a GitHub API token for `setup` | | `GITHUB_TOKEN`, else `GH_TOKEN` | | none |
+
+The tree is the checkout of a corpus definition (the kernel as `linux`, this repository as
+`linebench`, or one you added), or any directory at all together with `--extensions`, which
+names the file extensions every counter is pointed at so that all of them do the same work.
+Such a run is recorded as unpinned, named after the directory, and the counters' counts are
+compared with each other; the flag is refused beside `--corpus`, since a definition says its
+own extensions.
+
+The counters directory is where `setup` puts what it fetches, with the manifest of hashes
+beside the binaries and the copies of your own builds under `given/`; the setting is only for
+keeping them elsewhere, say under a Defender exclusion path. Results go one
+`results/<corpus>/<system>/<stamp>/` per run, with `results/README.md` as the page over all of
+them. `--add` takes a counter or a corpus `.toml`, or a directory of them, read beside the
+built-in ones; one named like a built-in definition takes its place, and a line says so. The
+control is the instance timed alone at both ends of the run, whose shift is read as the
+machine's own movement. The token lifts the anonymous rate limit on the release lookup and goes
+to that one call only.
+
+With nothing set at all, every command but `report` refuses and prints the recipe. Keep the
+corpus and the counters on a local disk: measuring across `/mnt` from WSL, or over a network
+share, measures the mount.
 
 The counters directory belongs to `setup`. A binary in it whose hash is not the one setup
 wrote is refused, with the two ways out: run setup again, or measure your own build as an
@@ -122,7 +142,8 @@ runs you want compared: "since the last run" reads every change against the cont
 shift, and that shift is only known when an earlier run timed the same control build. After
 the control's version changes, the block says so until a later run shares the new build.
 
-A build of your own is an instance too, named `<counter>@<tag>`:
+A build of your own is an instance too, named `<counter>@<tag>`, or by the counter's plain
+name when its definition has no `[acquisition]`, so no release stands beside it:
 
 ```
 linebench run --counters mezura,mezura@dev --given mezura@dev=D:\dev\mezura\target\release\mezura.exe
@@ -146,6 +167,15 @@ Both fit in `linebench.conf`, so the dev loop is one word:
 binary     = "D:/dev/mezura/target/release/mezura.exe"
 definition = "D:/dev/mezura/.linebench/mezura.toml"
 ```
+
+An instance can carry arguments of its own: `args = ["--threads", "4", "16"]` in its `[given]`
+entry, or `--args mezura@c16="--threads 4 16"` for one run, split on whitespace. They go right
+after the target, before the languages and the same-work flags, in every invocation of that
+instance, both tables included. With no binary of its own the instance runs the release
+binary, so `[given."mezura@c16"]` holding only `args` measures the release with those
+arguments beside the release as it is. Arguments make an instance of their own, so the name
+carries a tag, and a changed `args` sets a run aside in "since the last run" the way changed
+same-work flags do.
 
 The tag is a column name. The bytes are identified afresh on every run by the hash and the
 version line in the record, so a stale entry cannot describe the wrong binary. A run holding
@@ -290,14 +320,20 @@ tolerance  = "1%"
 Only what differs between one tree and another lives here. How each counter spells these
 extensions and what it turns off is in its own definition. A definition with a `commit` is
 checked before every run and every `check`: a checkout on anything else is refused. `files` is
-the number of files carrying those extensions at that commit, written once by hand from what
-`check` prints, and required beside a `commit`. Leave `commit` blank to measure a tree as it
+the number of files carrying those extensions in the tree of that commit, `git ls-tree -r HEAD`,
+a number no index, working tree or gitignore can move: `check` over a definition with a
+`commit` and no `files` counts them and prints the line to paste, and `run` refuses until it is
+there. The counters walk the working tree, so a checkout with files added or removed comes out
+as an equal-work problem, which is the point of the reference. Leave `commit` blank to measure a tree as it
 stands: the run is recorded as unpinned, there is no count to declare, and the counters' file
 counts are compared with each other. `remote` is only needed to fetch.
 
-Both directories are built into the binary. To measure with a definition you are editing,
-point `--definitions` (or `definitions =` in the conf) at a checkout, and `counters/` and
-`corpora/` are read from there instead.
+Both directories are built into the binary. A definition of your own, a counter or a corpus,
+joins them with `--add <file>` (or `add = [...]` in the conf), repeatable, and a directory of
+`.toml` files does too; one named like a built-in definition takes its place, and a line says
+so. A tree with no corpus definition is counted as it stands with `--corpus-path <dir>
+--extensions rs,c`: unpinned, named after the directory, the counters' counts compared with
+each other.
 
 ## Where results go
 
