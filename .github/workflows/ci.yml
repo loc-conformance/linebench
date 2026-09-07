@@ -66,6 +66,8 @@ jobs:
       # No timing is read on a shared runner.
       - name: Fetch every counter
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./target/release/linebench setup --allow-elevated \
             --counters-dir "${{ runner.temp }}/counters" \

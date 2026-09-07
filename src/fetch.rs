@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::io::{self, Write};
@@ -21,6 +22,8 @@ pub const MANIFEST_FILE: &str = "linebench-fetched.toml";
 pub const GIVEN_DIR: &str = "given";
 pub const INSTANCE_SEPARATOR: char = '@';
 const GITHUB_API: &str = "https://api.github.com/repos";
+const GITHUB_TOKEN_ENVS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
+const RATE_LIMIT_STATUSES: [&str; 2] = ["403", "429"];
 const CHECKSUM_WORDS: [&str; 2] = ["checksum", "sha256"];
 const PARTIAL_PREFIX: &str = ".partial-";
 const USER_AGENT: &str = concat!(
@@ -561,7 +564,7 @@ fn find_release(repository: &str, version: &str) -> Result<Release, String> {
     let mut refused = Vec::new();
     for tag in [format!("v{version}"), version.to_string()] {
         let url = format!("{GITHUB_API}/{repository}/releases/tags/{tag}");
-        match read_url(&url) {
+        match read_github_api(&url) {
             Ok(document) => {
                 return serde_json::from_str(&document).map_err(|error| {
                     format!("what github answered about {repository} {tag} does not read: {error}")
@@ -571,10 +574,50 @@ fn find_release(repository: &str, version: &str) -> Result<Release, String> {
         }
     }
     refused.dedup();
-    Err(format!(
+    Err(explain_lookup_refusal(repository, version, &refused))
+}
+
+fn explain_lookup_refusal(repository: &str, version: &str, refused: &[String]) -> String {
+    let limited = refused.iter().any(|message| {
+        RATE_LIMIT_STATUSES
+            .iter()
+            .any(|status| message.contains(status))
+    });
+    if limited {
+        return format!(
+            "github refused to say what {repository} has released ({}): anonymous lookups are \
+             limited per address, and a token in GITHUB_TOKEN or GH_TOKEN lifts that",
+            refused.join("; ")
+        );
+    }
+    format!(
         "{repository} has no release tagged v{version} or {version}: {}",
         refused.join("; ")
-    ))
+    )
+}
+
+fn read_github_api(url: &str) -> Result<String, String> {
+    let token = GITHUB_TOKEN_ENVS
+        .iter()
+        .find_map(|name| env::var(name).ok())
+        .filter(|token| !token.trim().is_empty());
+    let (curl, wget) = build_api_args(url, token.as_deref());
+    let curl: Vec<&str> = curl.iter().map(String::as_str).collect();
+    let wget: Vec<&str> = wget.iter().map(String::as_str).collect();
+    download_with_curl_or_wget(&curl, &wget)
+}
+
+fn build_api_args(url: &str, token: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let mut curl = vec!["-sSfL".to_string()];
+    let mut wget = vec!["-qO-".to_string()];
+    if let Some(token) = token {
+        curl.push("-H".to_string());
+        curl.push(format!("Authorization: Bearer {token}"));
+        wget.push(format!("--header=Authorization: Bearer {token}"));
+    }
+    curl.push(url.to_string());
+    wget.push(url.to_string());
+    (curl, wget)
 }
 
 fn find_asset_for<'a>(assets: &'a [Asset], system: &str, arch: &str) -> Result<&'a Asset, String> {
@@ -706,6 +749,24 @@ mod tests {
     use super::*;
     use crate::counters::parse_definition;
     use crate::machine::detect_platform;
+
+    #[test]
+    fn the_github_api_is_asked_with_the_token_when_there_is_one_and_a_403_names_the_rate_limit() {
+        let url = "https://api.github.com/repos/boyter/scc/releases/tags/v4.0.0";
+        let (curl, wget) = build_api_args(url, Some("t0k"));
+        assert_eq!(curl, ["-sSfL", "-H", "Authorization: Bearer t0k", url]);
+        assert_eq!(wget, ["-qO-", "--header=Authorization: Bearer t0k", url]);
+        let (curl, wget) = build_api_args(url, None);
+        assert_eq!(curl, ["-sSfL", url]);
+        assert_eq!(wget, ["-qO-", url]);
+        let limited = ["curl: (22) The requested URL returned error: 403".to_string()];
+        assert!(explain_lookup_refusal("boyter/scc", "4.0.0", &limited).contains("GITHUB_TOKEN"));
+        let missing = ["curl: (22) The requested URL returned error: 404".to_string()];
+        assert!(
+            explain_lookup_refusal("boyter/scc", "4.0.0", &missing)
+                .starts_with("boyter/scc has no release tagged v4.0.0 or 4.0.0: curl")
+        );
+    }
 
     const SCC: &str = "\
 name = \"scc\"
