@@ -12,8 +12,8 @@ use linebench::measure::{CONTROL_END, CONTROL_START, TABLES};
 use linebench::record::RECORD_FILE;
 use linebench::record::{
     InstanceRecord, Pooled, Record, calculate_drift, collect_table_rows,
-    describe_empty_bare_counts, format_busy, format_thousands, format_wall, read_record,
-    shorten_version,
+    describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_wall,
+    read_record, shorten_version,
 };
 
 pub const PAGE_FILE: &str = "README.md";
@@ -393,9 +393,9 @@ fn format_run_section(
                 .filter(|_| cpu > 0.0)
                 .map(|l| l as f64 / cpu);
             lines.push(format!(
-                "| {} | {wall} | {:.2}x | {:.2} s | {:.2} s | {:.2} | {} | {} | {} | {} |",
+                "| {} | {wall} | {} | {:.2} s | {:.2} s | {:.2} | {} | {} | {} | {} |",
                 row.instance,
-                row.relative,
+                format_relative(row.relative, row.relative_stddev),
                 row.user_s,
                 row.system_s,
                 row.parallelism,
@@ -648,7 +648,7 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         "## Terms".to_string(),
         String::new(),
         "- **wall**: how long a run takes on the clock, in milliseconds: the mean of all the timed runs, both command orders together, ± their σ. That σ holds the run-to-run noise plus half the gap between the two orders.".to_string(),
-        "- **vs fastest**: this counter's wall divided by the fastest counter's wall in the same table.".to_string(),
+        "- **vs fastest**: this counter's wall divided by the fastest counter's wall in the same table, ± the σ of that ratio, worked out from the two walls' σ. A ratio whose interval reaches 1.00 is within the noise of the fastest.".to_string(),
         "- **user cpu**: cpu seconds spent running the counter's own code, summed over every thread. 16 threads busy for one second is 16 s.".to_string(),
         "- **system cpu**: cpu seconds spent inside the operating system on the counter's behalf, opening and reading files, plus whatever sits on that path (antivirus, filter drivers).".to_string(),
         "- **parallelism**: user plus system cpu, divided by wall: 4.6 s of cpu inside a 0.35 s run means 13 threads were busy on average.".to_string(),

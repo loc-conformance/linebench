@@ -164,6 +164,7 @@ pub struct Pooled {
     pub counted_lines: Option<u64>,
     pub single_order: bool,
     pub relative: f64,
+    pub relative_stddev: f64,
 }
 
 pub fn collect_measurements(
@@ -236,6 +237,7 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
             counted_lines: one.counted_lines,
             single_order: true,
             relative: 1.0,
+            relative_stddev: 0.0,
         };
     };
     let mean = (one.mean_s + other.mean_s) / 2.0;
@@ -259,6 +261,7 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
         counted_lines: one.counted_lines,
         single_order: false,
         relative: 1.0,
+        relative_stddev: 0.0,
     }
 }
 
@@ -280,9 +283,18 @@ pub fn collect_table_rows(measurements: &[Measurement], table: Table) -> (Vec<Po
         }
     }
     rows.sort_by(|a, b| a.mean_s.total_cmp(&b.mean_s));
-    if let Some(fastest) = rows.first().map(|row| row.mean_s).filter(|m| *m > 0.0) {
-        for row in &mut rows {
+    if let Some((fastest, fastest_stddev)) = rows
+        .first()
+        .filter(|row| row.mean_s > 0.0)
+        .map(|row| (row.mean_s, row.stddev_s))
+    {
+        for (index, row) in rows.iter_mut().enumerate() {
             row.relative = row.mean_s / fastest;
+            if index > 0 {
+                let own = (row.stddev_s / row.mean_s).powi(2);
+                let fastest_s = (fastest_stddev / fastest).powi(2);
+                row.relative_stddev = row.relative * (own + fastest_s).sqrt();
+            }
         }
     }
     (rows, order_moves)
@@ -331,7 +343,7 @@ fn build_summary_cells(row: Pooled) -> [String; 8] {
     [
         row.instance,
         wall,
-        format!("{:.2}x", row.relative),
+        format_relative(row.relative, row.relative_stddev),
         format!("{:.2} s", row.user_s),
         format!("{:.2} s", row.system_s),
         format!("{:.2}", row.parallelism),
@@ -378,6 +390,14 @@ pub fn format_wall(mean_s: f64, stddev_s: f64) -> String {
         format!("{text} ± {:.0}", stddev_s * 1000.0)
     } else {
         text
+    }
+}
+
+pub fn format_relative(relative: f64, stddev: f64) -> String {
+    if stddev > 0.0 {
+        format!("{relative:.2}x ± {stddev:.2}")
+    } else {
+        format!("{relative:.2}x")
     }
 }
 
@@ -754,6 +774,13 @@ mod tests {
         assert!((rows[0].mean_s - 0.35).abs() < 1e-9 && !rows[0].single_order);
         assert!((rows[2].relative - 0.52 / 0.35).abs() < 1e-9);
         assert!(rows[1].single_order && rows[1].relative > 1.0);
+        assert_eq!(rows[0].relative_stddev, 0.0);
+        let scc_spread = ((0.01f64.powi(2) + 0.01f64.powi(2)) / 2.0 + 0.04f64.powi(2) / 4.0).sqrt();
+        let mezura_spread =
+            ((0.01f64.powi(2) + 0.01f64.powi(2)) / 2.0 + 0.02f64.powi(2) / 4.0).sqrt();
+        let spreads = ((scc_spread / 0.52).powi(2) + (mezura_spread / 0.35).powi(2)).sqrt();
+        let ratio_spread = rows[2].relative * spreads;
+        assert!((rows[2].relative_stddev - ratio_spread).abs() < 1e-9);
         assert_eq!(order_moves.len(), 2);
         assert!((order_moves[0] - 0.02 / 0.34).abs() < 1e-9);
 
@@ -821,6 +848,8 @@ mod tests {
         assert_eq!(format_wall(1.2345, 0.0123), "1,235 ms ± 12");
         assert_eq!(format_wall(0.344, 0.0), "344 ms");
         assert_eq!(format_wall(0.0, 0.0), "");
+        assert_eq!(format_relative(1.3421, 0.1149), "1.34x ± 0.11");
+        assert_eq!(format_relative(1.0, 0.0), "1.00x");
         assert_eq!(shorten_version("scc version 4.0.0"), "4.0.0");
         assert_eq!(
             shorten_version("v3.0.0 (2026-09-02)"),
@@ -849,7 +878,7 @@ mod tests {
             measure("t2-rev", "mezura", 0.75),
             measure("t2-fwd", "mezura@v3.1.0-a-very-long-tag", 0.25),
         ];
-        let heading = "   instance                       wall                     vs fastest  \
+        let heading = "   instance                       wall                     vs fastest    \
                        user cpu  system cpu  parallelism  files  lines";
         assert_eq!(
             format_summary_tables(&measurements),
@@ -857,17 +886,17 @@ mod tests {
                 "",
                 "   Same work",
                 heading,
-                "   mezura@v3.1.0-a-very-long-tag  250 ms ± 10 (one order)  1.00x       1.00 s    \
-                 0.00 s      4.00",
-                "   mezura                         500 ms ± 10              2.00x       1.00 s    \
-                 1.00 s      4.00",
+                "   mezura@v3.1.0-a-very-long-tag  250 ms ± 10 (one order)  1.00x         \
+                 1.00 s    0.00 s      4.00",
+                "   mezura                         500 ms ± 10              2.00x ± 0.09  \
+                 1.00 s    1.00 s      4.00",
                 "",
                 "   Out of the box",
                 heading,
-                "   mezura@v3.1.0-a-very-long-tag  250 ms ± 10 (one order)  1.00x       1.00 s    \
-                 0.00 s      4.00",
-                "   mezura                         750 ms ± 10              3.00x       1.00 s    \
-                 2.00 s      4.00",
+                "   mezura@v3.1.0-a-very-long-tag  250 ms ± 10 (one order)  1.00x         \
+                 1.00 s    0.00 s      4.00",
+                "   mezura                         750 ms ± 10              3.00x ± 0.13  \
+                 1.00 s    2.00 s      4.00",
             ]
         );
     }
