@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -43,6 +45,8 @@ use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const NOISE_RUNS: u32 = 5;
+const NOISE_RETRY_SECONDS: u64 = 5;
+const UNSTEADY_STEP: usize = 2;
 const UNREADABLE_OUTPUT_LINES: usize = 10;
 const BACKGROUND_CORE_STEPS: [f64; 3] = [0.75, 1.5, 3.0];
 const SPREAD_STEPS: [f64; 3] = [5.0, 10.0, 15.0];
@@ -194,8 +198,36 @@ pub fn run_noise(
     check_commit(&locations.corpus, &locations.checkout)?;
     let chosen = build_instances(out, definitions, locations, options, platform)?;
     let (instances, control) = (chosen.instances, chosen.control);
-    let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
+    let scratch = Scratch::create("noise")?;
     print_header(out, "== noise")?;
+    let Some(worst) = judge_noise(out, locations, &instances, control, platform, &scratch)? else {
+        return Ok(1);
+    };
+    if worst < UNSTEADY_STEP {
+        return Ok(0);
+    }
+    print_line(out, "")?;
+    print_line(
+        out,
+        &format!("unsteady, so measuring again in {NOISE_RETRY_SECONDS} s"),
+    )?;
+    thread::sleep(Duration::from_secs(NOISE_RETRY_SECONDS));
+    print_header(out, "== noise, measured again")?;
+    match judge_noise(out, locations, &instances, control, platform, &scratch)? {
+        Some(worst) if worst < UNSTEADY_STEP => Ok(0),
+        _ => Ok(1),
+    }
+}
+
+fn judge_noise(
+    out: &mut dyn Write,
+    locations: &Locations,
+    instances: &[Instance],
+    control: usize,
+    platform: Platform,
+    scratch: &Scratch,
+) -> Result<Option<usize>, String> {
+    let cores = thread::available_parallelism().map_or(1, |c| c.get());
     let busy = sample_background_busy(platform);
     let others = busy.map(|b| (b * cores as f64 / 100.0 * 10.0).round() / 10.0);
     match (busy, others) {
@@ -212,18 +244,17 @@ pub fn run_noise(
         )?,
         _ => print_line(out, "   background    not sampled on this platform")?,
     }
-    let scratch = Scratch::create("noise")?;
     let export = time_the_control(
         out,
         locations,
-        &instances,
+        instances,
         control,
         platform,
         scratch.get_path(),
     )?;
     let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
         print_line(out, "   workload      hyperfine failed")?;
-        return Ok(1);
+        return Ok(None);
     };
     let times: Vec<f64> = result["times"]
         .as_array()
@@ -231,7 +262,7 @@ pub fn run_noise(
         .unwrap_or_default();
     if times.len() < 2 {
         print_line(out, "   workload      hyperfine gave too few runs")?;
-        return Ok(1);
+        return Ok(None);
     }
     let warm = &times[1..];
     let warm_mean = warm.iter().sum::<f64>() / warm.len() as f64;
@@ -307,7 +338,7 @@ pub fn run_noise(
         format!("{}: {}.", VERDICTS[worst], blamed.join(" and "))
     };
     print_line(out, &paint_step(worst, &verdict))?;
-    Ok(if worst >= 2 { 1 } else { 0 })
+    Ok(Some(worst))
 }
 
 pub fn run_benchmark(

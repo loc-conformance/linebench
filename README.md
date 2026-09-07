@@ -246,7 +246,9 @@ using, then runs the control five times, the first one cold on purpose: about fi
 in all with mezura on the kernel, minutes with cloc. It reports the spread across the warm
 runs, the parallelism the workload reached, and whether the first run shows the tree was cold.
 `steady` and `relatively steady` exit 0, `somewhat unsteady` and `not steady` exit 1, so a
-script can gate on it.
+script can gate on it. An unsteady verdict is measured once more after five seconds, the whole
+thing, background sample included, and the second verdict is the one that counts: a passing
+process or a cache that was still settling gets that one chance to have gone away.
 
 | | steady | relatively steady | somewhat unsteady | not steady |
 |---|---|---|---|---|
