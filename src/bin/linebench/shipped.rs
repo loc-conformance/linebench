@@ -72,6 +72,20 @@ pub fn collect_definitions(out: &mut dyn Write, added: &[PathBuf]) -> Result<Def
     }
     counters.sort_by(|a, b| a.name.cmp(&b.name));
     corpora.sort_by(|a, b| a.name.cmp(&b.name));
+    for corpus in &corpora {
+        for (system, names) in &corpus.skip {
+            if let Some(name) = names
+                .iter()
+                .find(|name| !counters.iter().any(|d| &d.name == *name))
+            {
+                return Err(format!(
+                    "{}: [skip] names {name} under {system}, and no counter definition has that \
+                     name",
+                    corpus.path.display()
+                ));
+            }
+        }
+    }
     Ok(Definitions { counters, corpora })
 }
 
@@ -156,6 +170,16 @@ blanks   = \"Blank\"
         );
         let missing = collect_definitions(&mut Vec::new(), &[dir.join("gone")]).unwrap_err();
         assert!(missing.contains("is not there"), "{missing}");
+        fs::write(
+            dir.join("big.toml"),
+            "name = \"big\"\nextensions = [\"c\"]\n[skip]\nwindows = [\"nope\"]\n",
+        )
+        .unwrap();
+        let unknown = collect_definitions(&mut Vec::new(), &[dir.join("big.toml")]).unwrap_err();
+        assert!(
+            unknown.contains("no counter definition has that name"),
+            "{unknown}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -500,6 +500,18 @@ fn format_run_section(
         }
         lines.push(bullet);
     }
+    if !record.settings.skipped.is_empty() {
+        let explained: Vec<String> = record
+            .settings
+            .skipped
+            .iter()
+            .map(|entry| match entry.split_once(": ") {
+                Some((name, reason)) => format!("{name}, because {reason}"),
+                None => entry.clone(),
+            })
+            .collect();
+        lines.push(format!("- **Left out**: {}.", explained.join("; ")));
+    }
     let empty_bare = describe_empty_bare_counts(&record.counts);
     if !empty_bare.is_empty() {
         lines.push(format!(
@@ -1155,7 +1167,11 @@ mod tests {
         local.instances[0].identity.origin = Origin::Given {
             label: "dev".to_string(),
         };
-        let latest = build_record("20260903-100000", &[("mezura", 0.32)], "nvme0");
+        let mut latest = build_record("20260903-100000", &[("mezura", 0.32)], "nvme0");
+        latest.settings.skipped = vec![
+            "cloc: the corpus definition leaves it out on windows".to_string(),
+            "tokei: it is not set up on this machine".to_string(),
+        ];
         let out_root = env::temp_dir().join("linebench-a_release_section_never_anchors");
         let _ = fs::remove_dir_all(&out_root);
         fs::create_dir_all(&out_root).unwrap();
@@ -1174,6 +1190,13 @@ mod tests {
             "{page}"
         );
         assert!(!page.contains("since 20260902-100000"), "{page}");
+        assert!(
+            page.contains(
+                "- **Left out**: cloc, because the corpus definition leaves it out on windows; \
+                 tokei, because it is not set up on this machine."
+            ),
+            "{page}"
+        );
         assert!(page.contains("## Local builds"), "{page}");
     }
 
@@ -1252,6 +1275,7 @@ mod tests {
                 instances: rows.iter().map(|(name, _)| name.to_string()).collect(),
                 control: control.to_string(),
                 unequal_exclusions: None,
+                skipped: Vec::new(),
             },
             instances,
             counts: Vec::new(),

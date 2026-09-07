@@ -315,6 +315,9 @@ commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
 files      = 63765
 extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
 tolerance  = "1%"
+
+[skip]
+windows = ["cloc"]
 ```
 
 Only what differs between one tree and another lives here. How each counter spells these
@@ -324,7 +327,13 @@ the number of files carrying those extensions in the tree of that commit, `git l
 a number no index, working tree or gitignore can move: `check` over a definition with a
 `commit` and no `files` counts them and prints the line to paste, and `run` refuses until it is
 there. The counters walk the working tree, so a checkout with files added or removed comes out
-as an equal-work problem, which is the point of the reference. Leave `commit` blank to measure a tree as it
+as an equal-work problem, which is the point of the reference. `[skip]` names, per system, the
+counters left out of the default set over this corpus, with WSL counting as linux: cloc takes
+about 90 s per run over the kernel on Windows, so a plain `run` there would be two hours of
+cloc. `check` follows the same default, so a skipped counter is checked over that corpus by
+naming it. A counter named in `--counters` runs all the same, with a warning. The record and the page say which counters
+were left out of a run and why, whether by the corpus or because they were not set up on the
+machine. Leave `commit` blank to measure a tree as it
 stands: the run is recorded as unpinned, there is no count to declare, and the counters' file
 counts are compared with each other. `remote` is only needed to fetch.
 

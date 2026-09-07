@@ -86,6 +86,8 @@ pub struct RunSettings {
     pub instances: Vec<String>,
     pub control: String,
     pub unequal_exclusions: Option<String>,
+    #[serde(default)]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

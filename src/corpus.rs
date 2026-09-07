@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ pub const NOTHING_COMPARED_ALONE: &str =
     "nothing compared: one instance with counts and no declared file count to hold it against";
 const CORPUS_SUFFIX: &str = "toml";
 const AD_HOC_CORPUS: &str = "tree";
+const SKIP_SYSTEMS: [&str; 3] = ["windows", "linux", "macos"];
 const GIT_DIR: &str = ".git";
 const FULL_COMMIT: usize = 40;
 const SHORT_HASH: usize = 9;
@@ -38,11 +40,19 @@ pub struct Corpus {
         deserialize_with = "parse_tolerance"
     )]
     pub tolerance: f64,
+    #[serde(default)]
+    pub skip: BTreeMap<String, Vec<String>>,
 }
 
 impl Corpus {
     pub fn is_pinned(&self) -> bool {
         !self.commit.is_empty()
+    }
+
+    pub fn skips(&self, system: &str, counter: &str) -> bool {
+        self.skip
+            .get(system)
+            .is_some_and(|names| names.iter().any(|name| name == counter))
     }
 }
 
@@ -211,6 +221,17 @@ pub fn parse_corpus(text: &str, path: &Path) -> Result<Corpus, String> {
             path.display()
         ));
     }
+    if let Some(system) = corpus
+        .skip
+        .keys()
+        .find(|system| !SKIP_SYSTEMS.contains(&system.as_str()))
+    {
+        return Err(format!(
+            "{}: [skip] names the system {system}; the systems are {}, and WSL counts as linux",
+            path.display(),
+            SKIP_SYSTEMS.join(", ")
+        ));
+    }
     Ok(corpus)
 }
 
@@ -237,6 +258,7 @@ pub fn build_corpus_of(checkout: &Path, extensions: &[String]) -> Result<Corpus,
         files: None,
         extensions,
         tolerance: DEFAULT_TOLERANCE,
+        skip: BTreeMap::new(),
     })
 }
 
@@ -594,6 +616,23 @@ mod tests {
         assert_eq!(count_tracked_files(&dir, &both).unwrap(), 3);
         fs::remove_dir_all(&dir).unwrap();
         assert!(count_tracked_files(&dir, &rs).is_err());
+    }
+
+    #[test]
+    fn a_corpus_leaves_a_counter_out_per_system_and_names_only_systems_that_exist() {
+        let corpus = parse_corpus(
+            "name = \"t\"\nextensions = [\"c\"]\n[skip]\nwindows = [\"cloc\"]\n",
+            Path::new("t.toml"),
+        )
+        .unwrap();
+        assert!(corpus.skips("windows", "cloc"));
+        assert!(!corpus.skips("linux", "cloc") && !corpus.skips("windows", "scc"));
+        let refused = parse_corpus(
+            "name = \"t\"\nextensions = [\"c\"]\n[skip]\nwsl = [\"cloc\"]\n",
+            Path::new("t.toml"),
+        )
+        .unwrap_err();
+        assert!(refused.contains("WSL counts as linux"), "{refused}");
     }
 
     #[test]

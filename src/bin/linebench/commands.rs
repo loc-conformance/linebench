@@ -139,7 +139,8 @@ pub fn run_check(
     platform: Platform,
 ) -> Result<i32, String> {
     check_commit(&locations.corpus, &locations.checkout)?;
-    let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
+    let chosen = build_instances(out, definitions, locations, options, platform)?;
+    let (instances, control) = (chosen.instances, chosen.control);
     print_header(
         out,
         &format!(
@@ -187,7 +188,8 @@ pub fn run_noise(
     platform: Platform,
 ) -> Result<i32, String> {
     check_commit(&locations.corpus, &locations.checkout)?;
-    let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
+    let chosen = build_instances(out, definitions, locations, options, platform)?;
+    let (instances, control) = (chosen.instances, chosen.control);
     let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
     print_header(out, "== noise")?;
     let busy = sample_background_busy(platform);
@@ -314,7 +316,8 @@ pub fn run_benchmark(
     let privileged = is_privileged(platform);
     check_commit(&locations.corpus, &locations.checkout)?;
     check_declares_files(&locations.corpus)?;
-    let (instances, control) = build_instances(out, definitions, locations, options, platform)?;
+    let chosen = build_instances(out, definitions, locations, options, platform)?;
+    let (instances, control) = (chosen.instances, chosen.control);
     let binaries = collect_binaries(&instances, platform)?;
     let defender = read_defender_state(platform, privileged, &locations.checkout, &binaries);
     let unequal = match find_unequal_exclusions(&defender) {
@@ -387,6 +390,7 @@ pub fn run_benchmark(
         now,
         res: &res,
         is_local,
+        left_out: chosen.left_out,
     };
     let outcome = measure_and_record(out, context);
     if let Err(refused) = &outcome {
@@ -430,6 +434,7 @@ struct RunContext<'a> {
     now: u64,
     res: &'a Path,
     is_local: bool,
+    left_out: Vec<String>,
 }
 
 struct Scratch(PathBuf);
@@ -471,6 +476,7 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         now,
         res,
         is_local,
+        left_out,
     } = context;
     print_header(out, "== phase 0: machine state")?;
     let background = sample_background_busy(platform);
@@ -594,6 +600,7 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
             instances: names,
             control: instances[control].get_name().to_string(),
             unequal_exclusions: unequal,
+            skipped: left_out,
         },
         instances: instances
             .iter()

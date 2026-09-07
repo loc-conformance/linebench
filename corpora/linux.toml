@@ -14,3 +14,8 @@ commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
 files      = 63765
 extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
 tolerance  = "1%"
+
+# Left out of the default set on the systems named. cloc takes about 90 s per run over this tree
+# on Windows, so a plain run there would be two hours of cloc. Named in --counters it runs.
+[skip]
+windows = ["cloc"]

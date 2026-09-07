@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 
+use linebench::corpus::Corpus;
 use linebench::counters::{Definition, read_definition_for};
 use linebench::fetch::{INSTANCE_SEPARATOR, identify_counter, read_manifest, stage_given};
 use linebench::machine::Platform;
@@ -10,33 +11,63 @@ use linebench::measure::Instance;
 use crate::config::{Locations, Options};
 use crate::output::{print_line, print_warning};
 
+pub struct Chosen {
+    pub instances: Vec<Instance>,
+    pub control: usize,
+    pub left_out: Vec<String>,
+}
+
 pub fn build_instances(
     out: &mut dyn Write,
     definitions: &[Definition],
     locations: &Locations,
     options: &Options,
     platform: Platform,
-) -> Result<(Vec<Instance>, usize), String> {
+) -> Result<Chosen, String> {
     let manifest = read_manifest(&locations.counters_dir)?;
+    let system = platform.as_system();
+    let corpus = &locations.corpus;
+    let mut left_out = Vec::new();
     let selected: Vec<String> = match &options.counters {
         Some(named) => {
             if named.is_empty() {
                 return Err("--counters names nothing".to_string());
             }
+            for name in named {
+                if corpus.skips(system, name) {
+                    print_warning(
+                        out,
+                        &format!(
+                            "{name} is named, and the corpus definition leaves it out on \
+                             {system}; it runs all the same"
+                        ),
+                    )?;
+                }
+            }
             named.clone()
         }
         None => {
-            let (set_up, left_out) = choose_set_up(definitions, &locations.counters_dir, platform)?;
-            for name in left_out {
-                print_line(out, &format!("{name} is not set up, left out"))?;
+            let (set_up, reasons) =
+                choose_set_up(definitions, &locations.counters_dir, platform, corpus)?;
+            for entry in &reasons {
+                print_line(out, entry)?;
             }
+            left_out = reasons;
             let selected: Vec<String> = set_up
                 .into_iter()
                 .filter(|name| !locations.given.contains_key(name))
                 .chain(locations.given.keys().cloned())
                 .collect();
             if selected.is_empty() {
-                return Err("no counter is set up: run setup".to_string());
+                let any_skipped = definitions.iter().any(|d| corpus.skips(system, &d.name));
+                return Err(if any_skipped {
+                    format!(
+                        "every counter that is set up is left out by the corpus definition on \
+                         {system}; name one with --counters"
+                    )
+                } else {
+                    "no counter is set up: run setup".to_string()
+                });
             }
             selected
         }
@@ -110,8 +141,13 @@ pub fn build_instances(
     let find_control = |named: &str| instances.iter().position(|i| i.get_name() == named);
     let control = match (&options.control, &locations.control) {
         (Some(named), _) => find_control(named).ok_or_else(|| {
+            let skipped = if corpus.skips(system, named) {
+                format!(", and the corpus definition leaves {named} out on {system}")
+            } else {
+                String::new()
+            };
             format!(
-                "--control {named} is not among the instances of this run ({})",
+                "--control {named} is not among the instances of this run ({}){skipped}",
                 selected.join(", ")
             )
         })?,
@@ -131,7 +167,11 @@ pub fn build_instances(
         },
         (None, None) => 0,
     };
-    Ok((instances, control))
+    Ok(Chosen {
+        instances,
+        control,
+        left_out,
+    })
 }
 
 fn check_given_name<'a>(name: &'a str, definition: &Definition) -> Result<Option<&'a str>, String> {
@@ -149,15 +189,26 @@ fn choose_set_up(
     definitions: &[Definition],
     counters_dir: &Path,
     platform: Platform,
+    corpus: &Corpus,
 ) -> Result<(Vec<String>, Vec<String>), String> {
+    let system = platform.as_system();
     let mut set_up = Vec::new();
     let mut left_out = Vec::new();
     for definition in definitions {
-        let binary = counters_dir.join(definition.get_binary_name(platform.as_system())?);
-        if binary.is_file() {
+        let binary = counters_dir.join(definition.get_binary_name(system)?);
+        let could_run = binary.is_file() || definition.acquisition.is_some();
+        if could_run && corpus.skips(system, &definition.name) {
+            left_out.push(format!(
+                "{}: the corpus definition leaves it out on {system}",
+                definition.name
+            ));
+        } else if binary.is_file() {
             set_up.push(definition.name.clone());
         } else if definition.acquisition.is_some() {
-            left_out.push(definition.name.clone());
+            left_out.push(format!(
+                "{}: it is not set up on this machine",
+                definition.name
+            ));
         }
     }
     Ok((set_up, left_out))
@@ -176,6 +227,7 @@ mod tests {
     use std::env;
     use std::fs;
 
+    use linebench::corpus::parse_corpus;
     use linebench::counters::{parse_definition, read_definitions};
 
     use super::*;
@@ -204,9 +256,41 @@ blanks   = \"blanks\"
         let mut definitions =
             read_definitions(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/counters"))).unwrap();
         definitions.push(parse_definition(GIVEN_ONLY, Path::new("mine.toml")).unwrap());
-        let (set_up, left_out) = choose_set_up(&definitions, &dir, Platform::Windows).unwrap();
+        let plain =
+            parse_corpus("name = \"t\"\nextensions = [\"c\"]\n", Path::new("t.toml")).unwrap();
+        let (set_up, left_out) =
+            choose_set_up(&definitions, &dir, Platform::Windows, &plain).unwrap();
         assert_eq!(set_up, ["scc"]);
-        assert_eq!(left_out, ["cloc", "mezura", "tokei"]);
+        assert_eq!(
+            left_out,
+            [
+                "cloc: it is not set up on this machine",
+                "mezura: it is not set up on this machine",
+                "tokei: it is not set up on this machine"
+            ]
+        );
+        let skipping = parse_corpus(
+            "name = \"t\"\nextensions = [\"c\"]\n[skip]\nwindows = [\"scc\", \"cloc\"]\n",
+            Path::new("t.toml"),
+        )
+        .unwrap();
+        let (set_up, left_out) =
+            choose_set_up(&definitions, &dir, Platform::Windows, &skipping).unwrap();
+        assert!(set_up.is_empty());
+        assert_eq!(
+            left_out[0],
+            "cloc: the corpus definition leaves it out on windows"
+        );
+        assert_eq!(
+            left_out[2],
+            "scc: the corpus definition leaves it out on windows"
+        );
+        assert!(left_out.iter().all(|entry| !entry.starts_with("mine")));
+        let (_, on_wsl) = choose_set_up(&definitions, &dir, Platform::Wsl, &skipping).unwrap();
+        assert!(
+            on_wsl.iter().all(|entry| !entry.contains("leaves it out")),
+            "{on_wsl:?}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
