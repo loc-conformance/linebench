@@ -37,6 +37,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install hyperfine
+        uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
       - name: Test
         run: cargo test --all-features --verbose
 
@@ -49,11 +54,6 @@ jobs:
           if git ls-files --eol | grep -E "w/(crlf|mixed)"; then
             echo "the working copy holds a file with CRLF line endings"; exit 1
           fi
-
-      - name: Install hyperfine
-        uses: taiki-e/install-action@v2
-        with:
-          tool: hyperfine
 
       # tokei is built with cargo and that takes minutes, and the key is the definitions because
       # a raised version is exactly the change that has to fetch again

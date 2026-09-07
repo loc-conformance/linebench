@@ -36,6 +36,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Install hyperfine
+        uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
       - name: Test
         run: cargo test --all-features --verbose
 
