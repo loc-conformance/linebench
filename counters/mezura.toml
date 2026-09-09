@@ -12,9 +12,11 @@ version = "3.0.0"
 args           = ["{target}"]
 json           = ["--output", "json"]
 languages      = ["--languages", "{extensions}"]
-same-work      = ["--hide", "keywords", "--count-minified", "--count-generated",
-                  "--counting", "region", "--no-heuristics"]
-same-work-note = "keyword counting off, minified and generated files counted, region counting model, content identification off"
+same-work      = ["--no-gitignore", "--no-ignore-files", "--no-local", "--hide", "keywords",
+                  "--count-minified", "--count-generated", "--count-not-code",
+                  "--counting", "region",
+                  "--no-heuristics"]
+same-work-note = "ignore files off, no project settings read, keyword counting off, minified, generated and non code files counted, region counting model, content identification off"
 scrub-env      = ["MEZURA_PHASE_TIMING", "CLICOLOR_FORCE"]
 
 [read]

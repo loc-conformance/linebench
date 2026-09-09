@@ -17,8 +17,8 @@ args           = ["{target}"]
 json           = ["--json"]
 languages      = ["--include-ext={extensions}"]
 extension-case = "exact"
-same-work      = ['--vcs=git -c "safe.directory=*" ls-files --cached --others --exclude-standard', "--skip-uniqueness"]
-same-work-note = "gitignore obeyed through git ls-files, uncommitted files included, duplicate file detection off"
+same-work      = ["--skip-uniqueness"]
+same-work-note = "no ignore files of its own to turn off, duplicate file detection off"
 scrub-env      = []
 
 [read]

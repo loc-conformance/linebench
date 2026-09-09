@@ -12,16 +12,18 @@ version = "14.0.0"
 args           = ["{target}"]
 json           = ["--output", "json"]
 languages      = ["-t", "{names}"]
-same-work      = []
-same-work-note = "nothing beyond the counting to turn off"
+same-work      = ["--no-ignore"]
+same-work-note = "ignore files off, nothing else beyond the counting to turn off"
 scrub-env      = ["RAYON_NUM_THREADS"]
 
 [language-names]
 c    = "C"
 h    = "C Header"
 s    = "GNU Style Assembly"
+asm  = "Assembly"
 py   = "Python"
 pl   = "Perl"
+pm   = "Perl"
 rs   = "Rust"
 sh   = "Shell"
 toml = "TOML"

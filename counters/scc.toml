@@ -11,8 +11,9 @@ version = "4.0.0"
 args           = ["{target}"]
 json           = ["--format", "json"]
 languages      = ["-i", "{extensions}"]
-same-work      = ["-c", "--no-cocomo", "--no-config"]
-same-work-note = "complexity and cost estimates off, no config file read"
+same-work      = ["--no-gitignore", "--no-ignore", "--no-scc-ignore", "-c", "--no-cocomo",
+                  "--no-config"]
+same-work-note = "ignore files off, complexity and cost estimates off, no config file read"
 scrub-env      = ["SCC_CONFIG_PATH"]
 
 [read]

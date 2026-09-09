@@ -11,9 +11,23 @@
 name       = "linux"
 remote     = "https://github.com/torvalds/linux.git"
 commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
-files      = 63765
-extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
+files      = 63779
+extensions = ["c", "h", "s", "asm", "py", "pl", "pm", "rs", "sh"]
 tolerance  = "1%"
+
+# The commit holds 63,779 files with these extensions and Windows can only show 63,767 of them.
+# The kernel tracks xt_CONNMARK.h beside xt_connmark.h and eight more pairs like it, NTFS keeps
+# one name of each pair, and git reports the twelve it could not write as modified for good.
+# A filesystem that tells case apart holds all of them.
+#
+# Two counters still land apart, diffed file by file on 2026-09-09. tokei adds 55 files that carry
+# no extension, which it knows by their #! line, and it has no flag to stop. The other three hold
+# to the extensions, mezura through --no-shebang. tokei keeps its 55 because it is also the only
+# one with no content identification, so they stand against work it never does. cloc ends 26 lower
+# over files of zero bytes, which it always skips.
+#
+# asm and pm are named because mezura's Assembly owns .s and .asm together and its Perl owns .pl
+# and .pm, so asking for s and pl brought 14 files the extension filtered counters never saw.
 
 # Left out of the default set on the systems named. cloc takes about 90 s per run over this tree
 # on Windows, so a plain run there would be two hours of cloc. Named in --counters it runs.
