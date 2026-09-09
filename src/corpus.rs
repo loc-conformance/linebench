@@ -145,9 +145,7 @@ impl Verdict<'_> {
             Verdict::Equal {
                 reference: Some(_),
                 instances: 1,
-            } => Some(format!(
-                "within {tolerance} of the corpus, one instance so no line comparison"
-            )),
+            } => Some(format!("within {tolerance} of the corpus")),
             Verdict::Equal {
                 reference: Some(_), ..
             } => Some(format!("within {tolerance} of the corpus")),
@@ -738,10 +736,7 @@ mod tests {
         assert_eq!(alone.describe(), NOTHING_COMPARED_ALONE);
         let against_git = judge_parity(Some(61234), &two[..1], &expected[1..2], 0.01);
         assert!(against_git.compared);
-        assert_eq!(
-            against_git.describe(),
-            "within 1.0% of the corpus, one instance so no line comparison"
-        );
+        assert_eq!(against_git.describe(), "within 1.0% of the corpus");
 
         let nothing = [count("mezura", 0, 0), count("scc", 61234, 30_000_000)];
         let one_empty = judge_parity(None, &nothing, &expected[1..3], 0.01);
