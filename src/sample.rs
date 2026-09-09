@@ -76,7 +76,9 @@ pub fn sample_memory(
         }
     }
     let wall_ms = started.elapsed().as_millis() as u64;
-    if let Some((_, high)) = read_process_memory(platform, &child) {
+    if platform == Platform::Windows
+        && let Some((_, high)) = read_process_memory(platform, &child)
+    {
         peak = peak.max(high);
     }
     let polls = samples.len();
