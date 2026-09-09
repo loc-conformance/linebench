@@ -641,7 +641,7 @@ mod tests {
         let linux = corpora.iter().find(|c| c.name == "linux").unwrap();
         assert!(linux.is_pinned() && !corpora[0].is_pinned());
         assert_eq!(linux.tolerance, 0.01);
-        assert_eq!(linux.files, Some(63765));
+        assert_eq!(linux.files, Some(63779));
         assert_eq!(corpora[0].files, None);
         let pinned = "name = \"t\"\nextensions = [\"c\"]\ncommit = \"0000000000000000000000000000000000000000\"\n";
         let undeclared = parse_corpus(pinned, Path::new("t.toml")).unwrap();

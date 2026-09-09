@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -20,7 +20,8 @@ use linebench::fetch::{fetch_counter, read_manifest};
 use linebench::insight::Insights;
 use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, VERSION_SET};
 use linebench::insight::{
-    build_insights_path, format_floor, format_memory, get_floor_set_name, write_insights,
+    build_insights_path, format_floor, format_memory, format_syscalls, format_syscalls_summary,
+    get_floor_set_name, write_insights,
 };
 use linebench::machine::{
     Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
@@ -40,11 +41,12 @@ use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts
 use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
     calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
-    format_summary_tables, format_thousands, format_utc_date, format_utc_stamp,
+    format_summary_tables, format_thousands, format_utc_date, format_utc_stamp, format_wall,
     read_seconds_since_epoch, shorten_version, write_csvs, write_notes, write_record,
 };
 use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
 use linebench::sample::sample_memory;
+use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 
 use crate::config::{Locations, Options};
 use crate::instances::build_instances;
@@ -60,6 +62,19 @@ use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const FLOOR_TARGET: &str = "floor";
+const SYSCALLS_TABLE: Table = Table::SameWork;
+const PROBE_FILE: &str = "probe.txt";
+const SYSCALLS_SUFFIX: &str = "txt";
+const TRACER_MISSING: &str = "strace is not present on the system, or is not in the PATH, so \
+                              the system calls cannot be measured. It is recommended to \
+                              download it first.";
+const TRACER_REFUSED: &str = "strace is here and it was not allowed to trace, so the system \
+                              calls cannot be measured. It needs ptrace, which a container \
+                              without CAP_SYS_PTRACE and a hardened kernel.yama.ptrace_scope both \
+                              refuse.";
+const TRACER_ELSEWHERE: &str = "the system calls are counted on linux alone, where strace is";
+const SYSCALLS_ASKS: &str = "Run the rest anyway? [Y/n] ";
+const CARRYING_ON: &str = "carrying on.";
 const MEMORY_TABLE: Table = Table::SameWork;
 const NOISE_RUNS: u32 = 5;
 const NOISE_RETRY_SECONDS: u64 = 5;
@@ -619,6 +634,22 @@ pub fn run_insights(
     fs::create_dir_all(&res)
         .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
     let scratch = Scratch::create("insights")?;
+    let tracing = match platform.is_linux() {
+        true => find_tracer(&scratch.get_path().join(PROBE_FILE)),
+        false => Tracing::NotThere,
+    };
+    let unmeasured = match (&tracing, platform.is_linux()) {
+        (Tracing::Ready(_), _) => None,
+        (_, false) => Some(TRACER_ELSEWHERE),
+        (Tracing::Refused, _) => Some(TRACER_REFUSED),
+        (Tracing::NotThere, _) => Some(TRACER_MISSING),
+    };
+    if let Some(why) = unmeasured
+        && platform.is_linux()
+        && !ask_to_go_on(out, why, options.yes)?
+    {
+        return Err("stopped.".to_string());
+    }
     let target = create_empty_repository(scratch.get_path())?;
     let scrub = collect_scrub(&instances);
     print_header(out, "== floor")?;
@@ -690,6 +721,27 @@ pub fn run_insights(
     for line in format_memory(&curves, get_report_style()) {
         print_line(out, &line)?;
     }
+    print_header(out, "== syscalls")?;
+    let syscalls = match &tracing {
+        Tracing::Ready(version) => {
+            print_line(out, &format!("   {version}"))?;
+            collect_syscalls(out, &instances, locations, &scrub, scratch.get_path())?
+        }
+        _ => {
+            print_line(out, &format!("   {}", unmeasured.unwrap_or_default()))?;
+            Vec::new()
+        }
+    };
+    if !syscalls.is_empty() {
+        print_header(out, "== syscalls summary")?;
+        for line in format_syscalls_summary(&syscalls, locations.corpus.files) {
+            print_line(out, &paint_table_line(&line))?;
+        }
+        print_line(out, "")?;
+        for line in format_syscalls(&syscalls, get_report_style()) {
+            print_line(out, &line)?;
+        }
+    }
     let insights = Insights {
         format: INSIGHTS_FORMAT,
         stamp,
@@ -704,6 +756,11 @@ pub fn run_insights(
             .collect::<Result<Vec<InstanceRecord>, String>>()?,
         floor: measurements,
         curves,
+        tracer: match tracing {
+            Tracing::Ready(version) => Some(version),
+            _ => None,
+        },
+        syscalls,
     };
     write_insights(&res, &insights)?;
     print_line(out, "")?;
@@ -1424,6 +1481,68 @@ fn build_corpus_record(locations: &Locations) -> CorpusRecord {
         clean: git.clean,
         extensions: locations.corpus.extensions.clone(),
     }
+}
+
+fn collect_syscalls(
+    out: &mut dyn Write,
+    instances: &[Instance],
+    locations: &Locations,
+    scrub: &[String],
+    scratch: &Path,
+) -> Result<Vec<Syscalls>, String> {
+    let mut counted = Vec::new();
+    for instance in instances {
+        let args = build_args(
+            instance,
+            &locations.checkout,
+            &locations.corpus.extensions,
+            SYSCALLS_TABLE,
+            false,
+        )?;
+        print_line(out, &format!(">> {}", instance.get_name()))?;
+        let into = scratch
+            .join(instance.get_name())
+            .with_extension(SYSCALLS_SUFFIX);
+        match count_syscalls(
+            instance.get_name(),
+            SYSCALLS_TABLE,
+            &instance.identity.binary,
+            &args,
+            scrub,
+            &into,
+        ) {
+            Ok(counts) => {
+                print_line(
+                    out,
+                    &format!(
+                        "   traced in {}",
+                        format_wall(counts.wall_ms as f64 / 1000.0, 0.0)
+                    ),
+                )?;
+                counted.push(counts);
+            }
+            Err(refused) => print_warning(out, &refused)?,
+        }
+    }
+    Ok(counted)
+}
+
+fn ask_to_go_on(out: &mut dyn Write, why: &str, yes: bool) -> Result<bool, String> {
+    print_line(out, "")?;
+    print_line(out, why)?;
+    if yes {
+        print_line(out, CARRYING_ON)?;
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        print_line(out, CARRYING_ON)?;
+        return Ok(true);
+    }
+    let _ = write!(out, "{SYSCALLS_ASKS}");
+    let _ = out.flush();
+    let mut answer = String::new();
+    let _ = io::stdin().read_line(&mut answer);
+    Ok(!matches!(answer.trim().to_lowercase().as_str(), "n" | "no"))
 }
 
 fn create_empty_repository(scratch: &Path) -> Result<PathBuf, String> {

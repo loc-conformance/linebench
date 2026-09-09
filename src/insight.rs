@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,17 +9,21 @@ use crate::machine::{Machine, Platform};
 use crate::measure::TABLES;
 use crate::measure::{Style, Table};
 use crate::record::LOCAL_DIR;
+use crate::record::format_thousands;
 use crate::record::{CorpusRecord, InstanceRecord, Measurement};
 use crate::sample::Curve;
 use crate::sample::LEAST_SAMPLES;
 use crate::sample::fold_into_columns;
+use crate::syscalls::get_family;
+use crate::syscalls::{Call, Syscalls};
+use crate::syscalls::{FAMILIES, OTHER_FAMILY};
 
 pub const FLOOR_WARMUP: u32 = 5;
 pub const FLOOR_RUNS: u32 = 30;
 pub const VERSION_SET: &str = "floor-version";
 pub const INSIGHTS_DIR: &str = "insights";
 pub const INSIGHTS_FILE: &str = "insights.json";
-pub const INSIGHTS_FORMAT: u32 = 2;
+pub const INSIGHTS_FORMAT: u32 = 1;
 const FLOOR_PREFIX: &str = "floor-";
 const VERSION_HEADING: &str = "--version";
 const FIRST_HEADINGS: [&str; 2] = ["instance", VERSION_HEADING];
@@ -54,6 +59,11 @@ const SHADES: [[u8; 3]; 8] = [
     [232, 64, 47],
     [238, 78, 224],
 ];
+const SYSCALLS_HEADING: &str = "family / call";
+const SYSCALLS_HEADINGS: [&str; 4] = ["instance", "syscalls", "per file", "errors"];
+const MEMBER_INDENT: &str = "  ";
+const REST_LABEL: &str = "rest";
+const SHOWN_PART: u64 = 100;
 const LABEL_WIDTH: usize = 16;
 const INDENT: &str = "   ";
 const COLUMN_GAP: usize = 2;
@@ -70,6 +80,8 @@ pub struct Insights {
     pub instances: Vec<InstanceRecord>,
     pub floor: Vec<Measurement>,
     pub curves: Vec<Curve>,
+    pub tracer: Option<String>,
+    pub syscalls: Vec<Syscalls>,
 }
 
 pub fn build_insights_path(
@@ -200,6 +212,115 @@ pub fn format_memory(curves: &[Curve], style: Style) -> Vec<String> {
         lines.push(format!("{INDENT}{:>gutter$} {ticks}", ""));
     }
     lines
+}
+
+pub fn format_syscalls_summary(counted: &[Syscalls], files: Option<u64>) -> Vec<String> {
+    if counted.is_empty() {
+        return Vec::new();
+    }
+    let headings: Vec<String> = SYSCALLS_HEADINGS[1..]
+        .iter()
+        .map(|heading| (*heading).to_string())
+        .collect();
+    let rows: Vec<Vec<String>> = counted
+        .iter()
+        .map(|counts| {
+            vec![
+                format_thousands(counts.total_calls),
+                format_per_file(counts.total_calls, files),
+                format_thousands(counts.total_errors),
+            ]
+        })
+        .collect();
+    let gutter = measure_gutter(
+        SYSCALLS_HEADINGS[0],
+        counted.iter().map(|counts| counts.instance.as_str()),
+    );
+    let widths = measure_columns(&headings, &rows);
+    let mut lines = vec![lay_out_numbers(
+        SYSCALLS_HEADINGS[0],
+        &headings,
+        gutter,
+        &widths,
+    )];
+    for (counts, row) in counted.iter().zip(&rows) {
+        lines.push(lay_out_numbers(&counts.instance, row, gutter, &widths));
+    }
+    lines
+}
+
+pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
+    if counted.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = counted
+        .iter()
+        .map(|counts| counts.instance.clone())
+        .collect();
+    let mut table: Vec<(bool, String, Vec<String>)> =
+        vec![(false, SYSCALLS_HEADING.to_string(), names)];
+    for family in FAMILIES
+        .map(|(family, _)| family)
+        .into_iter()
+        .chain([OTHER_FAMILY])
+    {
+        let totals: Vec<u64> = counted
+            .iter()
+            .map(|counts| add_up_family(counts, family, &[]))
+            .collect();
+        if totals.iter().all(|total| *total == 0) {
+            continue;
+        }
+        table.push((
+            true,
+            family.to_string(),
+            totals.iter().copied().map(describe_count).collect(),
+        ));
+        let (shown, hidden): (Vec<String>, Vec<String>) = collect_names(counted, family)
+            .into_iter()
+            .partition(|name| is_shown(name, counted));
+        for name in &shown {
+            let cells = counted
+                .iter()
+                .map(|counts| {
+                    find_call(counts, name)
+                        .map_or(String::new(), |call| format_thousands(call.calls))
+                })
+                .collect();
+            table.push((false, format!("{MEMBER_INDENT}{name}"), cells));
+        }
+        if !hidden.is_empty() && !shown.is_empty() {
+            let cells = counted
+                .iter()
+                .map(|counts| describe_count(add_up_family(counts, family, &shown)))
+                .collect();
+            table.push((
+                false,
+                format!("{MEMBER_INDENT}{REST_LABEL} ({})", hidden.len()),
+                cells,
+            ));
+        }
+    }
+    let gutter = measure_gutter("", table.iter().map(|(_, label, _)| label.as_str()));
+    let rows: Vec<Vec<String>> = table
+        .iter()
+        .skip(1)
+        .map(|(_, _, cells)| cells.clone())
+        .collect();
+    let widths = measure_columns(&table[0].2, &rows);
+    table
+        .into_iter()
+        .map(|(heavy, label, cells)| {
+            let line = lay_out_numbers(&label, &cells, gutter, &widths);
+            if heavy {
+                accent(&line, style)
+            } else if label.starts_with(MEMBER_INDENT) {
+                fade(&line, style)
+            } else {
+                line
+            }
+        })
+        .collect()
 }
 
 fn get_label(top: u64, index: usize) -> String {
@@ -340,6 +461,108 @@ fn tint(text: &str, level: u64, style: Style) -> String {
     format!("\u{1b}[38;2;{red};{green};{blue}m{text}\u{1b}[0m")
 }
 
+fn collect_names(counted: &[Syscalls], family: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for counts in counted {
+        for call in &counts.calls {
+            if get_family(&call.name) == family && !names.contains(&call.name) {
+                names.push(call.name.clone());
+            }
+        }
+    }
+    names.sort_by_key(|name| (Reverse(get_highest(counted, name)), name.clone()));
+    names
+}
+
+fn get_highest(counted: &[Syscalls], name: &str) -> u64 {
+    counted
+        .iter()
+        .filter_map(|counts| find_call(counts, name))
+        .map(|call| call.calls)
+        .max()
+        .unwrap_or_default()
+}
+
+fn find_call<'a>(counts: &'a Syscalls, name: &str) -> Option<&'a Call> {
+    counts.calls.iter().find(|call| call.name == name)
+}
+
+fn is_shown(name: &str, counted: &[Syscalls]) -> bool {
+    counted.iter().any(|counts| {
+        find_call(counts, name).is_some_and(|call| call.calls * SHOWN_PART >= counts.total_calls)
+    })
+}
+
+fn add_up_family(counts: &Syscalls, family: &str, without: &[String]) -> u64 {
+    counts
+        .calls
+        .iter()
+        .filter(|call| get_family(&call.name) == family && !without.contains(&call.name))
+        .map(|call| call.calls)
+        .sum()
+}
+
+fn describe_count(count: u64) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    format_thousands(count)
+}
+
+fn format_per_file(total: u64, files: Option<u64>) -> String {
+    match files {
+        Some(files) if files > 0 => format!("{:.1}", total as f64 / files as f64),
+        _ => String::new(),
+    }
+}
+
+fn lay_out_numbers(label: &str, cells: &[String], gutter: usize, widths: &[usize]) -> String {
+    let mut line = format!("{INDENT}{label:<gutter$}");
+    for (cell, width) in cells.iter().zip(widths) {
+        line.push_str(&format!("{cell:>width$}"));
+    }
+    line.truncate(line.trim_end().len());
+    line
+}
+
+fn measure_gutter<'a>(heading: &str, labels: impl Iterator<Item = &'a str>) -> usize {
+    labels
+        .map(|label| label.chars().count())
+        .chain([heading.chars().count()])
+        .max()
+        .unwrap_or_default()
+}
+
+fn measure_columns(headings: &[String], rows: &[Vec<String>]) -> Vec<usize> {
+    headings
+        .iter()
+        .enumerate()
+        .map(|(column, heading)| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| cell.chars().count())
+                .chain([heading.chars().count()])
+                .max()
+                .unwrap_or_default()
+                + COLUMN_GAP
+        })
+        .collect()
+}
+
+fn accent(text: &str, style: Style) -> String {
+    if style != Style::Colored {
+        return text.to_string();
+    }
+    format!("\u{1b}[1m{text}\u{1b}[0m")
+}
+
+fn fade(text: &str, style: Style) -> String {
+    if style != Style::Colored {
+        return text.to_string();
+    }
+    format!("\u{1b}[2m{text}\u{1b}[0m")
+}
+
 fn lay_out_row(cells: &[String], widths: &[usize]) -> String {
     let mut line = String::from(INDENT);
     for (index, (cell, width)) in cells.iter().zip(widths).enumerate() {
@@ -427,6 +650,25 @@ mod tests {
         }
     }
 
+    fn build_syscalls(instance: &str, counted: &[(&str, u64)]) -> Syscalls {
+        let calls: Vec<Call> = counted
+            .iter()
+            .map(|(name, calls)| Call {
+                name: (*name).to_string(),
+                calls: *calls,
+                errors: 0,
+            })
+            .collect();
+        Syscalls {
+            instance: instance.to_string(),
+            table: Table::SameWork.as_str().to_string(),
+            wall_ms: 1000,
+            total_calls: calls.iter().map(|call| call.calls).sum(),
+            total_errors: 0,
+            calls,
+        }
+    }
+
     fn read_colors(lines: &[String]) -> Vec<[u8; 3]> {
         lines
             .iter()
@@ -437,6 +679,61 @@ mod tests {
                 Some([channels.next()?, channels.next()?, channels.next()?])
             })
             .collect()
+    }
+
+    #[test]
+    fn a_call_too_small_to_stand_on_its_own_is_folded_into_the_rest_of_its_family() {
+        let counts = build_syscalls("tokei", &[("openat", 10_000), ("openat2", 5)]);
+        let lines = format_syscalls(std::slice::from_ref(&counts), Style::Plain);
+        assert!(
+            !lines.iter().any(|line| line.contains("openat2")),
+            "{lines:?}"
+        );
+        let rest = lines
+            .iter()
+            .find(|line| line.contains("rest (1)"))
+            .expect("the small call is folded into a rest row");
+        assert!(rest.ends_with('5'), "{rest}");
+        let family = lines
+            .iter()
+            .find(|line| line.starts_with("   opening"))
+            .expect("the family carries them both");
+        assert!(family.ends_with("10,005"), "{family}");
+    }
+
+    #[test]
+    fn a_call_one_counter_never_makes_leaves_that_counter_s_cell_empty() {
+        let lines = format_syscalls(
+            &[
+                build_syscalls("tokei", &[("statx", 1_000)]),
+                build_syscalls("cloc", &[("lstat", 2_000)]),
+            ],
+            Style::Plain,
+        );
+        let of = |name: &str| {
+            lines
+                .iter()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("{name} has a row in {lines:?}"))
+                .clone()
+        };
+        assert!(of("statx").ends_with("1,000"), "{}", of("statx"));
+        assert!(of("lstat").ends_with("2,000"), "{}", of("lstat"));
+    }
+
+    #[test]
+    fn the_summary_divides_the_calls_by_the_files_the_corpus_declares() {
+        let counts = build_syscalls("scc", &[("openat", 1_000)]);
+        let with_files = format_syscalls_summary(std::slice::from_ref(&counts), Some(500));
+        assert_eq!(
+            with_files[1].split_whitespace().collect::<Vec<&str>>(),
+            ["scc", "1,000", "2.0", "0"]
+        );
+        let without = format_syscalls_summary(&[counts], None);
+        assert_eq!(
+            without[1].split_whitespace().collect::<Vec<&str>>(),
+            ["scc", "1,000", "0"]
+        );
     }
 
     #[test]

@@ -300,7 +300,7 @@ they would lengthen it and disturb it.
 What a counter costs before it has counted anything. Three timings per instance, thirty runs and no
 settle: the version answer, `<counter> --version`, and the two ready floors, the run's own t1 and t2
 flags over a git repository holding no files, made in the temp directory and removed on the way out.
-It is a git repository because cloc's equal-work flags shell out to `git ls-files`.
+It is a git repository so that a counter which asks git about the tree finds one there.
 
 ```
 == floor summary

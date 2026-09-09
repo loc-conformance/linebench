@@ -811,7 +811,7 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         twice,
         "- A corpus definition pins a commit, and a checkout on any other commit refuses to run. A run on an unpinned tree says so beside its corpus line.".to_string(),
         "- Counts come from each counter's own JSON output, and the file counts are checked against the count the corpus definition declares for its commit, which is the equal work trust check above.".to_string(),
-        "- Same work: one language set for every counter, generated and minified files counted by all, gitignore obeyed by all, and every extra feature turned off. What each one turns off, as its definition declares it:".to_string(),
+        "- Same work: one language set for every counter, generated and minified files counted by all, no ignore file read by any of them, and every extra feature turned off. What each one turns off, as its definition declares it:".to_string(),
     ];
     for instance in &newest.instances {
         let note = if instance.same_work_note.is_empty() {
