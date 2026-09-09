@@ -8,6 +8,7 @@ use linebench::corpus::{Corpus, build_corpus_of};
 use linebench::counters::Definition;
 use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::files::read_toml;
+use linebench::os::capture_with_status;
 
 pub const CONFIG_FILE: &str = "linebench.conf";
 pub const DATA_DIR_NAME: &str = "linebench";
@@ -48,6 +49,7 @@ pub enum Command {
     Setup,
     Check,
     Noise,
+    Insights,
     Report,
     Help,
     Version,
@@ -65,6 +67,8 @@ pub struct Options {
     pub given: BTreeMap<String, PathBuf>,
     pub definition_of: BTreeMap<String, PathBuf>,
     pub args_of: BTreeMap<String, Vec<String>>,
+    pub expect_identical: Vec<(String, String)>,
+    pub against: Option<String>,
     pub control: Option<String>,
     pub warmup: Option<u32>,
     pub runs: Option<u32>,
@@ -75,6 +79,7 @@ pub struct Options {
     pub allow_unequal: bool,
     pub allow_elevated: bool,
     pub keep_raw: bool,
+    pub newest: bool,
 }
 
 #[derive(Debug)]
@@ -107,7 +112,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
         };
         match flag {
-            "run" | "setup" | "check" | "noise" | "report" | "help" | "version"
+            "run" | "setup" | "check" | "noise" | "insights" | "report" | "help" | "version"
                 if options.command.is_none() =>
             {
                 options.command = Some(match flag {
@@ -115,6 +120,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     "setup" => Command::Setup,
                     "check" => Command::Check,
                     "noise" => Command::Noise,
+                    "insights" => Command::Insights,
                     "report" => Command::Report,
                     "help" => Command::Help,
                     _ => Command::Version,
@@ -147,6 +153,23 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 let args = text.split_whitespace().map(String::from).collect();
                 options.args_of.insert(instance, args);
             }
+            "--expect-identical" => {
+                let first = value()?;
+                for pair in read_list(flag, first, &mut rest)? {
+                    let (left, right) = pair
+                        .split_once('=')
+                        .filter(|(left, right)| !left.is_empty() && !right.is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "{flag} takes <instance>=<instance> pairs, and {pair} is not one"
+                            )
+                        })?;
+                    options
+                        .expect_identical
+                        .push((left.to_string(), right.to_string()));
+                }
+            }
+            "--against" => options.against = Some(value()?),
             "--control" => options.control = Some(value()?),
             "--warmup" => options.warmup = Some(parse_number(flag, &value()?)?),
             "--runs" => options.runs = Some(parse_number(flag, &value()?)?),
@@ -157,6 +180,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--allow-unequal-exclusions" => options.allow_unequal = true,
             "--allow-elevated" => options.allow_elevated = true,
             "--keep-raw" => options.keep_raw = true,
+            "--newest" => options.newest = true,
             other => return Err(explain_the_unknown_argument(other)),
         }
     }
@@ -179,13 +203,15 @@ pub fn find_data_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
+    let under_sudo = !cfg!(windows) && env::var("SUDO_USER").is_ok_and(|user| !user.is_empty());
     let base = if cfg!(windows) {
         named("APPDATA")
     } else if cfg!(target_os = "macos") {
-        named("HOME").map(|home| home.join("Library").join("Application Support"))
+        find_home().map(|home| home.join("Library").join("Application Support"))
     } else {
         named("XDG_DATA_HOME")
-            .or_else(|| named("HOME").map(|home| home.join(".local").join("share")))
+            .filter(|_| !under_sudo)
+            .or_else(|| find_home().map(|home| home.join(".local").join("share")))
     };
     base.map(|dir| dir.join(DATA_DIR_NAME))
 }
@@ -387,8 +413,8 @@ fn read_list<'a>(
     split_list(flag, &text)
 }
 
-const COMMANDS: [&str; 7] = [
-    "run", "setup", "check", "noise", "report", "help", "version",
+const COMMANDS: [&str; 8] = [
+    "run", "setup", "check", "noise", "insights", "report", "help", "version",
 ];
 
 fn split_list(flag: &str, text: &str) -> Result<Vec<String>, String> {
@@ -425,9 +451,49 @@ fn parse_number(flag: &str, text: &str) -> Result<u32, String> {
         .map_err(|_| format!("{flag} takes a whole number, and {text} is not one"))
 }
 
+fn find_home() -> Option<PathBuf> {
+    let own = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
+    let Some(user) = env::var("SUDO_USER").ok().filter(|user| !user.is_empty()) else {
+        return own;
+    };
+    let from_passwd = capture_with_status("getent", &["passwd", &user])
+        .ok()
+        .filter(|(ok, _)| *ok)
+        .and_then(|(_, text)| parse_passwd_home(&text));
+    let guessed = if cfg!(target_os = "macos") {
+        PathBuf::from("/Users").join(&user)
+    } else {
+        PathBuf::from("/home").join(&user)
+    };
+    from_passwd
+        .or_else(|| guessed.is_dir().then_some(guessed))
+        .or(own)
+}
+
+fn parse_passwd_home(text: &str) -> Option<PathBuf> {
+    let home = text.lines().next()?.split(':').nth(5)?.trim();
+    (!home.is_empty()).then(|| PathBuf::from(home))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_home_in_a_passwd_line_is_the_sixth_field() {
+        assert_eq!(
+            parse_passwd_home("petros:x:1000:1000:Petros:/home/petros:/bin/bash\n"),
+            Some(PathBuf::from("/home/petros"))
+        );
+        assert_eq!(
+            parse_passwd_home("petros:x:1000:1000::/home/petros:/bin/bash"),
+            Some(PathBuf::from("/home/petros"))
+        );
+        assert_eq!(parse_passwd_home("petros:x:1000"), None);
+        assert_eq!(parse_passwd_home(""), None);
+    }
 
     #[test]
     fn flags_are_read_with_and_without_the_equals_sign_and_the_command_anywhere() {
@@ -451,7 +517,30 @@ mod tests {
         );
         assert_eq!(options.runs, Some(5));
         assert!(options.yes && !options.allow_elevated);
+        let pairs = parse("run --expect-identical mezura=mezura@dev, tokei=tokei@dev").unwrap();
+        assert_eq!(
+            pairs.expect_identical,
+            [
+                ("mezura".to_string(), "mezura@dev".to_string()),
+                ("tokei".to_string(), "tokei@dev".to_string())
+            ]
+        );
+        assert!(
+            parse("run --expect-identical mezura")
+                .unwrap_err()
+                .contains("<instance>=<instance>")
+        );
         assert!(parse("setup --allow-elevated").unwrap().allow_elevated);
+        assert!(parse("setup --newest").unwrap().newest);
+        assert!(!parse("setup").unwrap().newest);
+        assert_eq!(
+            parse("run --against 20260908-100000")
+                .unwrap()
+                .against
+                .as_deref(),
+            Some("20260908-100000")
+        );
+        assert!(parse("run --against").unwrap_err().contains("--against"));
         assert!(
             parse("run --runs five")
                 .unwrap_err()

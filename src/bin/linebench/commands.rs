@@ -11,22 +11,29 @@ use linebench::corpus::{
     Counted, Parity, Verdict, check_commit, check_declares_files, count_tracked_files,
     describe_empty_count, judge_parity, read_git_state, setup_corpus,
 };
-use linebench::counters::Definition;
+use linebench::counters::{Acquisition, Definition};
 use linebench::defender::{
     CounterBinary, DefenderState, ProcessExclusions, explain_unequal_exclusions,
     find_unequal_exclusions, judge_process_exclusions, read_defender_state,
 };
 use linebench::fetch::{fetch_counter, read_manifest};
+use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, VERSION_SET};
+use linebench::insight::{format_floor, get_floor_set_name};
 use linebench::machine::{
     Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
 };
 use linebench::measure::{
-    Instance, Runner, Settings, Style, Table, build_args, build_command, capture_plain_output,
-    get_capture_name, run_phases,
+    Instance, Runner, Settings, Style, Table, build_args, build_command, capture_json_outputs,
+    capture_plain_output, get_capture_name, join_command, run_phases,
 };
 use linebench::measure::{OUT_DIR, TABLES};
+use linebench::newest::{
+    Lookup, Standing, choose_counters_to_look_up, collect_newest_releases, describe_newest,
+    describe_pin_origin, describe_pinned_version, find_newest_release, judge_newest,
+    remember_newest,
+};
 use linebench::os::{capture_with_status, is_privileged};
-use linebench::read::read_counts;
+use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::RECORD_FORMAT;
 use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
@@ -40,10 +47,15 @@ use crate::instances::build_instances;
 use crate::output::{
     Color, Output, get_report_style, paint, print_header, print_line, print_warning,
 };
-use crate::page::{LOCAL_DIR, PAGE_FILE, collect_records, format_since, write_results_page};
+use crate::page::{
+    Collected, FoundRun, collect_records, find_named_run, format_against, format_since,
+    write_results_page,
+};
+use crate::page::{LOCAL_DIR, PAGE_FILE};
 use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
+const FLOOR_TARGET: &str = "floor";
 const NOISE_RUNS: u32 = 5;
 const NOISE_RETRY_SECONDS: u64 = 5;
 const UNSTEADY_STEP: usize = 2;
@@ -57,6 +69,8 @@ const VERDICTS: [&str; 4] = [
     "not steady",
 ];
 const COLD_CACHE_RATIO: f64 = 1.5;
+const IDENTICAL: &str = "identical";
+const DIFFER: &str = "differ";
 
 pub fn run_setup(
     out: &mut dyn Write,
@@ -83,6 +97,20 @@ pub fn run_setup(
             locations.counters_dir.display()
         )
     })?;
+    if let Some(named) = &options.counters {
+        let unknown: Vec<&str> = named
+            .iter()
+            .filter(|name| !definitions.iter().any(|d| &d.name == *name))
+            .map(String::as_str)
+            .collect();
+        if !unknown.is_empty() {
+            return Err(format!(
+                "no counter definition is named {}; setup fetches counters by the name of \
+                 their definition, so a given instance is not set up here",
+                unknown.join(", ")
+            ));
+        }
+    }
     let wanted: Vec<&Definition> = match &options.counters {
         Some(named) => definitions
             .iter()
@@ -110,13 +138,75 @@ pub fn run_setup(
             )?;
             continue;
         }
+        let mut to_fetch = None;
+        let mut newest = definition.shipped_version.is_some();
+        if options.newest
+            && let Some(how) = &definition.acquisition
+        {
+            if definition.added {
+                print_line(
+                    out,
+                    &format!(
+                        "  --newest leaves it alone, since the definition comes from {}; change \
+                         the version there",
+                        definition.path.display()
+                    ),
+                )?;
+            } else {
+                match find_newest_release(definition) {
+                    Ok(version) => {
+                        if let Err(refused) = remember_newest(
+                            &locations.counters_dir,
+                            &definition.name,
+                            how,
+                            &version,
+                            read_seconds_since_epoch(),
+                        ) {
+                            print_warning(out, &refused)?;
+                        }
+                        let shipped = definition.shipped_version.as_deref();
+                        match judge_newest(how, &version) {
+                            Standing::Newer => {
+                                print_line(
+                                    out,
+                                    &format!(
+                                        "  the newest release is {version}; {}",
+                                        describe_pinned_version(how, shipped)
+                                    ),
+                                )?;
+                                let mut chosen = definition.clone();
+                                chosen.acquisition = Some(Acquisition {
+                                    version,
+                                    ..how.clone()
+                                });
+                                to_fetch = Some(chosen);
+                                newest = true;
+                            }
+                            Standing::Same | Standing::Behind | Standing::Differs => print_line(
+                                out,
+                                &format!(
+                                    "  {}",
+                                    describe_newest(&definition.name, how, shipped, &version)
+                                ),
+                            )?,
+                        }
+                    }
+                    Err(refused) => {
+                        print_line(out, &format!("  {}", paint(Color::Red, &refused)))?;
+                        failed.push(definition.name.clone());
+                        continue;
+                    }
+                }
+            }
+        }
         if let Err(refused) = fetch_counter(
             out,
-            definition,
+            to_fetch.as_ref().unwrap_or(definition),
             platform,
             &arch,
             &locations.counters_dir,
             &mut manifest,
+            newest,
         ) {
             print_line(out, &format!("  {}", paint(Color::Red, &refused)))?;
             failed.push(definition.name.clone());
@@ -158,15 +248,30 @@ pub fn run_check(
         ),
     )?;
     let scratch = Scratch::create("check")?;
-    let (bad, nothing_compared) = check_everything(
-        out,
-        options,
-        locations,
-        &instances,
-        control,
-        platform,
-        scratch.get_path(),
-    )?;
+    let counters = choose_counters_to_look_up(instances.iter().map(|i| &i.definition));
+    let now = read_seconds_since_epoch();
+    let (checked, looked_up) = thread::scope(|scope| {
+        let lookups = scope.spawn(|| {
+            collect_newest_releases(&counters, &locations.counters_dir, now, find_newest_release)
+        });
+        let checked = check_everything(
+            out,
+            options,
+            locations,
+            &instances,
+            control,
+            platform,
+            scratch.get_path(),
+        );
+        (checked, lookups.join())
+    });
+    let (bad, nothing_compared) = checked?;
+    let (lookups, warning) =
+        looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
+    print_newest_releases(out, &lookups)?;
+    if let Some(warning) = warning {
+        print_warning(out, &warning)?;
+    }
     print_line(out, "")?;
     if bad.is_empty() {
         let verdict = if nothing_compared {
@@ -353,6 +458,13 @@ pub fn run_benchmark(
     check_declares_files(&locations.corpus)?;
     let chosen = build_instances(out, definitions, locations, options, platform)?;
     let (instances, control) = (chosen.instances, chosen.control);
+    check_identical_pairs(&options.expect_identical, &instances)?;
+    let is_local = instances.iter().any(Instance::is_an_experiment);
+    let collected = collect_records(&locations.out);
+    let against = match &options.against {
+        Some(stamp) => Some(find_named_run(&collected, stamp, &locations.out, is_local)?),
+        None => None,
+    };
     let binaries = collect_binaries(&instances, platform)?;
     let defender = read_defender_state(platform, privileged, &locations.checkout, &binaries);
     let unequal = match find_unequal_exclusions(&defender) {
@@ -393,7 +505,6 @@ pub fn run_benchmark(
     };
     let now = read_seconds_since_epoch();
     let stamp = format_utc_stamp(now);
-    let is_local = instances.iter().any(Instance::is_an_experiment);
     let mut res = locations.out.clone();
     if is_local {
         res = res.join(LOCAL_DIR);
@@ -426,6 +537,8 @@ pub fn run_benchmark(
         res: &res,
         is_local,
         left_out: chosen.left_out,
+        collected,
+        against,
     };
     let outcome = measure_and_record(out, context);
     if let Err(refused) = &outcome {
@@ -455,6 +568,68 @@ pub fn run_report(out: &mut dyn Write, results: &Path) -> Result<i32, String> {
     Ok(1)
 }
 
+pub fn run_insights(
+    out: &mut dyn Write,
+    options: &Options,
+    locations: &Locations,
+    definitions: &[Definition],
+    platform: Platform,
+) -> Result<i32, String> {
+    let chosen = build_instances(out, definitions, locations, options, platform)?;
+    let instances = chosen.instances;
+    let scratch = Scratch::create("insights")?;
+    let target = create_empty_repository(scratch.get_path())?;
+    print_header(out, "== floor")?;
+    let mut runner = Runner::new(
+        scratch.get_path(),
+        Settings {
+            warmup: FLOOR_WARMUP,
+            runs: FLOOR_RUNS,
+            settle: 0,
+        },
+        platform,
+        collect_scrub(&instances),
+        get_report_style(),
+    );
+    let mut distinct: Vec<(String, String)> = Vec::new();
+    let mut versions: Vec<(String, String)> = Vec::new();
+    for instance in &instances {
+        let command = join_command(
+            &instance.identity.binary,
+            std::slice::from_ref(&instance.definition.version_flag),
+        );
+        if !distinct.iter().any(|(_, timed)| *timed == command) {
+            distinct.push((instance.get_name().to_string(), command.clone()));
+        }
+        versions.push((instance.get_name().to_string(), command));
+    }
+    runner.run_hyperfine(out, VERSION_SET, &distinct)?;
+    for table in TABLES {
+        let commands: Vec<(String, String)> = instances
+            .iter()
+            .map(|instance| build_command(instance, &target, &locations.corpus.extensions, table))
+            .collect::<Result<_, _>>()?;
+        print_line(out, "")?;
+        runner.run_hyperfine(out, &get_floor_set_name(table), &commands)?;
+    }
+    let (measurements, skipped) = collect_measurements(scratch.get_path(), &runner.commands, &[])?;
+    for message in &skipped {
+        print_warning(out, message)?;
+    }
+    print_line(out, "")?;
+    for line in format_floor(&measurements, &versions) {
+        print_line(out, &line)?;
+    }
+    if runner.failures.is_empty() {
+        return Ok(0);
+    }
+    print_warning(
+        out,
+        &format!("hyperfine failed on {}", runner.failures.join(", ")),
+    )?;
+    Ok(1)
+}
+
 struct RunContext<'a> {
     options: &'a Options,
     locations: &'a Locations,
@@ -470,6 +645,8 @@ struct RunContext<'a> {
     res: &'a Path,
     is_local: bool,
     left_out: Vec<String>,
+    collected: Collected,
+    against: Option<String>,
 }
 
 struct Scratch(PathBuf);
@@ -512,6 +689,8 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         res,
         is_local,
         left_out,
+        mut collected,
+        against,
     } = context;
     print_header(out, "== phase 0: machine state")?;
     let background = sample_background_busy(platform);
@@ -552,6 +731,8 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         collect_scrub(instances),
         get_report_style(),
     );
+    capture_json_outputs(out, &mut runner, instances, &locations.checkout, extensions)?;
+    let identity_checks = compare_captures(out, res, instances, &options.expect_identical)?;
     run_phases(
         out,
         &mut runner,
@@ -647,6 +828,7 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         hyperfine_failures: runner.failures.clone(),
         hyperfine_warnings: runner.warnings.clone(),
         capture_failures: runner.capture_failures.clone(),
+        identity_checks,
     };
     let written = write_record(res, &record)
         .and_then(|_| write_notes(res, &record))
@@ -676,10 +858,21 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         print_line(out, "")?;
         print_parity(out, parity, "equal work    ")?;
     }
-    let collected = collect_records(&locations.out);
     for message in &collected.skipped {
         print_warning(out, message)?;
     }
+    let relative = res
+        .strip_prefix(&locations.out)
+        .unwrap_or(res)
+        .to_string_lossy()
+        .replace('\\', "/");
+    collected.found.push(FoundRun {
+        record: record.clone(),
+        relative,
+    });
+    collected
+        .found
+        .sort_by(|a, b| b.record.stamp.cmp(&a.record.stamp));
     if let Err(refused) = write_results_page(&locations.out, &collected.found) {
         print_warning(
             out,
@@ -700,6 +893,19 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
     }
     if let Err(refused) = append_to_notes(res, &since) {
         print_warning(out, &refused)?;
+    }
+    if let Some(named) = against
+        .as_deref()
+        .and_then(|stamp| collected.found.iter().find(|f| f.record.stamp == stamp))
+    {
+        let against = format_against(&record, &named.record, &earlier);
+        print_line(out, "")?;
+        for line in &against {
+            print_line(out, &format!("   {line}"))?;
+        }
+        if let Err(refused) = append_to_notes(res, &against) {
+            print_warning(out, &refused)?;
+        }
     }
     if !runner.warnings.is_empty() {
         print_line(out, "")?;
@@ -751,7 +957,115 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
             ),
         )?;
     }
-    Ok(0)
+    let differing: Vec<&String> = record
+        .identity_checks
+        .iter()
+        .filter(|line| line.starts_with(DIFFER))
+        .collect();
+    if differing.is_empty() {
+        return Ok(0);
+    }
+    for line in differing {
+        print_warning(out, &format!("expected identical, and they {line}"))?;
+    }
+    Ok(1)
+}
+
+fn check_identical_pairs(pairs: &[(String, String)], instances: &[Instance]) -> Result<(), String> {
+    let find = |name: &str| {
+        instances
+            .iter()
+            .find(|instance| instance.get_name() == name)
+            .ok_or_else(|| {
+                format!("--expect-identical names {name}, which is not an instance of this run")
+            })
+    };
+    for (left, right) in pairs {
+        let (a, b) = (find(left)?, find(right)?);
+        if left == right {
+            return Err(format!(
+                "--expect-identical {left}={right} compares an instance with itself"
+            ));
+        }
+        if a.identity.counter != b.identity.counter {
+            return Err(format!(
+                "--expect-identical {left}={right}: the two are different counters ({} and {}), \
+                 so their documents cannot be identical",
+                a.identity.counter, b.identity.counter
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn compare_captures(
+    out: &mut dyn Write,
+    res: &Path,
+    instances: &[Instance],
+    pairs: &[(String, String)],
+) -> Result<Vec<String>, String> {
+    let find = |name: &str| {
+        instances
+            .iter()
+            .find(|instance| instance.get_name() == name)
+            .expect("checked before the run")
+    };
+    let read_capture = |table: Table, instance: &Instance| -> Result<String, String> {
+        let path = res.join(OUT_DIR).join(format!(
+            "{}.json",
+            get_capture_name(table, instance.get_name())
+        ));
+        fs::read_to_string(&path)
+            .map_err(|error| format!("{} could not be read: {error}", path.display()))
+    };
+    let mut lines = Vec::new();
+    for (left, right) in pairs {
+        let (a, b) = (find(left), find(right));
+        let mut verdicts = Vec::new();
+        let mut identical_everywhere = true;
+        for table in TABLES {
+            let named = table.describe().to_lowercase();
+            let compared = read_capture(table, a).and_then(|left| {
+                let right = read_capture(table, b)?;
+                compare_documents(&a.definition, &left, &b.definition, &right)
+            });
+            let comparison = match compared {
+                Ok(comparison) => comparison,
+                Err(reason) => {
+                    identical_everywhere = false;
+                    verdicts.push(format!("{named} could not be compared: {reason}"));
+                    continue;
+                }
+            };
+            match comparison.first {
+                None => verdicts.push(format!("{named}: {IDENTICAL}")),
+                Some(first) => {
+                    identical_everywhere = false;
+                    let count = match comparison.differences {
+                        1 => "1 difference".to_string(),
+                        n => format!("{n} differences in all"),
+                    };
+                    verdicts.push(format!(
+                        "{named}: first at {}, {} against {}, {count}",
+                        first.path, first.left, first.right
+                    ));
+                }
+            }
+        }
+        let line = if identical_everywhere {
+            format!("{IDENTICAL}: {left} and {right}, same work and out of the box")
+        } else {
+            format!("{DIFFER}: {left} and {right}, {}", verdicts.join("; "))
+        };
+        let color = if identical_everywhere {
+            Color::Green
+        } else {
+            Color::Red
+        };
+        print_line(out, &format!("   {}", paint(color, &line)))?;
+        lines.push(line);
+    }
+    Ok(lines)
 }
 
 fn check_everything(
@@ -820,6 +1134,29 @@ fn check_everything(
                         });
                     } else if empty.is_some() {
                         bad.push(format!("{} {}", instance.get_name(), table.as_str()));
+                    }
+                    match find_absent_volatile_paths(&instance.definition, &text) {
+                        Ok(absent) => {
+                            for path in absent {
+                                print_line(
+                                    out,
+                                    &format!(
+                                        "         {}",
+                                        paint(
+                                            Color::Yellow,
+                                            &format!(
+                                                "volatile {path} sits nowhere in what {} printed",
+                                                instance.get_name()
+                                            )
+                                        )
+                                    ),
+                                )?;
+                            }
+                        }
+                        Err(refused) => {
+                            print_line(out, &format!("         {}", paint(Color::Red, &refused)))?;
+                            bad.push(format!("{} volatile", instance.get_name()));
+                        }
                     }
                 }
                 Err(refused) => {
@@ -1007,6 +1344,61 @@ fn time_the_control(
     Ok(fs::read_to_string(scratch.join("noise.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
+}
+
+fn create_empty_repository(scratch: &Path) -> Result<PathBuf, String> {
+    let target = scratch.join(FLOOR_TARGET);
+    let path = target.to_string_lossy().into_owned();
+    let (made, _) = capture_with_status("git", &["init", "-q", &path])
+        .map_err(|unfinished| unfinished.describe("git init"))?;
+    if !made {
+        return Err(format!(
+            "git init could not make the repository the floor is measured over, in {}",
+            target.display()
+        ));
+    }
+    Ok(target)
+}
+
+fn print_newest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), String> {
+    if lookups.is_empty() {
+        return Ok(());
+    }
+    print_line(out, "")?;
+    print_line(out, ">> releases")?;
+    for lookup in lookups {
+        let Some(how) = &lookup.definition.acquisition else {
+            continue;
+        };
+        let text = match &lookup.outcome {
+            Ok(newest) => {
+                let mut text = describe_newest(
+                    &lookup.definition.name,
+                    how,
+                    lookup.definition.shipped_version.as_deref(),
+                    newest,
+                );
+                if let Some(hours) = lookup.age_seconds.map(|age| age / 3600).filter(|h| *h > 0) {
+                    text.push_str(&format!(" (looked up {hours} h ago)"));
+                }
+                match judge_newest(how, newest) {
+                    Standing::Newer | Standing::Differs => paint(Color::Yellow, &text).to_string(),
+                    Standing::Same | Standing::Behind => text,
+                }
+            }
+            Err(reason) => {
+                let mut text = format!("the newest release could not be looked up: {reason}");
+                if let Some(origin) =
+                    describe_pin_origin(how, lookup.definition.shipped_version.as_deref())
+                {
+                    text.push_str(&format!(" ({origin})"));
+                }
+                paint(Color::Yellow, &text).to_string()
+            }
+        };
+        print_line(out, &format!("   {:<12}{text}", lookup.definition.name))?;
+    }
+    Ok(())
 }
 
 fn print_first_lines(out: &mut dyn Write, text: &str) -> Result<usize, String> {

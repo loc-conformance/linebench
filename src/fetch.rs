@@ -48,6 +48,8 @@ pub struct Fetched {
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_with: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub newest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +118,7 @@ pub fn fetch_counter(
     arch: &str,
     dir: &Path,
     manifest: &mut Manifest,
+    newest: bool,
 ) -> Result<PathBuf, String> {
     let system = platform.as_system();
     let named = definition.get_binary_name(system)?;
@@ -128,11 +131,15 @@ pub fn fetch_counter(
             definition.name
         ));
     };
-    if let Some(fetched) = manifest.0.get(&definition.name)
+    if let Some(fetched) = manifest.0.get_mut(&definition.name)
         && fetched.version == how.version
         && target.is_file()
         && calculate_sha256(&target)? == fetched.sha256
     {
+        if fetched.newest != newest {
+            fetched.newest = newest;
+            write_manifest(dir, manifest)?;
+        }
         print_line(
             out,
             &format!("  {} {} is already here", definition.name, how.version),
@@ -186,6 +193,7 @@ pub fn fetch_counter(
             source,
             sha256,
             built_with,
+            newest,
         },
     );
     write_manifest(dir, manifest)?;
@@ -370,6 +378,45 @@ pub fn calculate_sha256(file: &Path) -> Result<String, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+pub(crate) fn explain_github_refusal(repository: &str, refused: &[String]) -> Option<String> {
+    if mentions_any(refused, &BAD_TOKEN_MARKS) {
+        return Some(format!(
+            "github refused the token in GITHUB_TOKEN or GH_TOKEN ({}): unset it, or set a valid \
+             one",
+            refused.join("; ")
+        ));
+    }
+    if mentions_any(refused, &RATE_LIMIT_MARKS) {
+        return Some(format!(
+            "github refused to say what {repository} has released ({}): anonymous lookups are \
+             limited per address, and a token in GITHUB_TOKEN or GH_TOKEN lifts that",
+            refused.join("; ")
+        ));
+    }
+    None
+}
+
+pub(crate) fn mentions_any(refused: &[String], marks: &[&str]) -> bool {
+    refused.iter().any(|message| {
+        let message = message.to_ascii_lowercase();
+        marks.iter().any(|mark| message.contains(mark))
+    })
+}
+
+pub(crate) fn read_github_api_within(url: &str, seconds: u32) -> Result<String, String> {
+    read_github_api_with(url, Some(seconds))
+}
+
+pub(crate) fn read_url_within(url: &str, seconds: u32) -> Result<String, String> {
+    let max_time = seconds.to_string();
+    let timeout = format!("--timeout={seconds}");
+    download_with_curl_or_wget(
+        &["-sSfL", "--max-time", &max_time, url],
+        None,
+        &["-qO-", &timeout, "--tries=1", url],
+    )
 }
 
 enum Refusal {
@@ -585,30 +632,12 @@ fn find_release(repository: &str, version: &str) -> Result<Release, String> {
 }
 
 fn explain_lookup_refusal(repository: &str, version: &str, refused: &[String]) -> String {
-    let mentions = |marks: &[&str]| {
-        refused.iter().any(|message| {
-            let message = message.to_ascii_lowercase();
-            marks.iter().any(|mark| message.contains(mark))
-        })
-    };
-    if mentions(&BAD_TOKEN_MARKS) {
-        return format!(
-            "github refused the token in GITHUB_TOKEN or GH_TOKEN ({}): unset it, or set a valid \
-             one",
+    explain_github_refusal(repository, refused).unwrap_or_else(|| {
+        format!(
+            "{repository} has no release tagged v{version} or {version}: {}",
             refused.join("; ")
-        );
-    }
-    if mentions(&RATE_LIMIT_MARKS) {
-        return format!(
-            "github refused to say what {repository} has released ({}): anonymous lookups are \
-             limited per address, and a token in GITHUB_TOKEN or GH_TOKEN lifts that",
-            refused.join("; ")
-        );
-    }
-    format!(
-        "{repository} has no release tagged v{version} or {version}: {}",
-        refused.join("; ")
-    )
+        )
+    })
 }
 
 struct ApiRequest {
@@ -618,20 +647,30 @@ struct ApiRequest {
 }
 
 fn read_github_api(url: &str) -> Result<String, String> {
+    read_github_api_with(url, None)
+}
+
+fn read_github_api_with(url: &str, max_seconds: Option<u32>) -> Result<String, String> {
     let token = GITHUB_TOKEN_ENVS
         .iter()
         .find_map(|name| env::var(name).ok())
         .filter(|token| !token.trim().is_empty());
-    let request = build_api_args(url, token.as_deref());
+    let request = build_api_args(url, token.as_deref(), max_seconds);
     let curl: Vec<&str> = request.curl.iter().map(String::as_str).collect();
     let wget: Vec<&str> = request.wget.iter().map(String::as_str).collect();
     download_with_curl_or_wget(&curl, request.config.as_deref(), &wget)
 }
 
-fn build_api_args(url: &str, token: Option<&str>) -> ApiRequest {
+fn build_api_args(url: &str, token: Option<&str>, max_seconds: Option<u32>) -> ApiRequest {
     let mut curl = vec!["-sSfL".to_string()];
     let mut config = None;
     let mut wget = vec!["-nv".to_string(), "-O-".to_string()];
+    if let Some(seconds) = max_seconds {
+        curl.push("--max-time".to_string());
+        curl.push(seconds.to_string());
+        wget.push(format!("--timeout={seconds}"));
+        wget.push("--tries=1".to_string());
+    }
     if let Some(token) = token {
         curl.push("-K".to_string());
         curl.push("-".to_string());
@@ -791,9 +830,20 @@ mod tests {
     use crate::machine::detect_platform;
 
     #[test]
+    fn a_lookup_carries_a_deadline_both_curl_and_wget_understand() {
+        let url = "https://api.github.com/repos/boyter/scc/releases/latest";
+        let request = build_api_args(url, None, Some(10));
+        assert_eq!(request.curl, ["-sSfL", "--max-time", "10", url]);
+        assert_eq!(
+            request.wget,
+            ["-nv", "-O-", "--timeout=10", "--tries=1", url]
+        );
+    }
+
+    #[test]
     fn the_github_api_is_asked_with_the_token_when_there_is_one_and_a_403_names_the_rate_limit() {
         let url = "https://api.github.com/repos/boyter/scc/releases/tags/v4.0.0";
-        let request = build_api_args(url, Some("t0k"));
+        let request = build_api_args(url, Some("t0k"), None);
         assert_eq!(request.curl, ["-sSfL", "-K", "-", url]);
         assert_eq!(
             request.config.as_deref(),
@@ -803,7 +853,7 @@ mod tests {
             request.wget,
             ["-nv", "-O-", "--header=Authorization: Bearer t0k", url]
         );
-        let request = build_api_args(url, None);
+        let request = build_api_args(url, None, None);
         assert_eq!(request.curl, ["-sSfL", url]);
         assert_eq!(request.config, None);
         assert_eq!(request.wget, ["-nv", "-O-", url]);
@@ -917,6 +967,7 @@ blanks   = \"Blank\"
             source: "scc_Windows_x86_64.zip".to_string(),
             sha256: "abc".to_string(),
             built_with: None,
+            newest: false,
         };
         let origin = decide_origin(&scc, binary, Some(&fetched), "abc").unwrap();
         assert_eq!(
@@ -1021,16 +1072,18 @@ blanks   = \"Blank\"
                 source: "crates.io tokei 14.0.0".to_string(),
                 sha256: "abc".to_string(),
                 built_with: Some("rustc 1.97.1".to_string()),
+                newest: false,
             },
         );
         manifest.0.insert(
             "scc".to_string(),
             Fetched {
                 channel: Channel::GithubReleaseAsset,
-                version: "4.0.0".to_string(),
+                version: "4.1.0".to_string(),
                 source: "scc_Windows_x86_64.zip".to_string(),
                 sha256: "def".to_string(),
                 built_with: None,
+                newest: true,
             },
         );
         write_manifest(&dir, &manifest).unwrap();
@@ -1041,6 +1094,8 @@ blanks   = \"Blank\"
             written.contains("[scc]") && written.contains("channel = \"crates-io\""),
             "{written}"
         );
+        assert_eq!(written.matches("newest = true").count(), 1, "{written}");
+        assert!(!written.contains("newest = false"), "{written}");
         assert_eq!(read, manifest);
     }
 

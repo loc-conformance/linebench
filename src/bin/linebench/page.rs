@@ -13,12 +13,11 @@ use linebench::record::RECORD_FILE;
 use linebench::record::{
     InstanceRecord, Pooled, Record, calculate_drift, collect_table_rows,
     describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_wall,
-    read_record, shorten_version,
+    pool_orders, propagate_ratio_stddev, read_record, shorten_version,
 };
 
 pub const PAGE_FILE: &str = "README.md";
 pub const LOCAL_DIR: &str = "local";
-const CONTROL_MOVED_THRESHOLD: f64 = 0.03;
 const RUN_DEPTH: usize = 3;
 const LONG_CONTEXT_VALUE: usize = 60;
 const CONTEXT: [(&str, ReadContext); 11] = [
@@ -137,6 +136,86 @@ pub fn write_results_page(out_root: &Path, found: &[FoundRun]) -> Result<bool, S
 }
 
 pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
+    format_comparison(current, earlier, &Block::Since).0
+}
+
+pub fn format_against(current: &Record, named: &Record, earlier: &[&Record]) -> Vec<String> {
+    let stamp = named.stamp.as_str();
+    let (_, anchors) = format_comparison(current, earlier, &Block::Since);
+    if anchors == [stamp] {
+        return vec![format!("against {stamp}: the run above")];
+    }
+    let mut reasons = Vec::new();
+    if named.stamp >= current.stamp {
+        reasons.push("recorded after this run".to_string());
+    }
+    if named.machine.platform != current.machine.platform {
+        reasons.push(format!("on {}", describe_platform(named.machine.platform)));
+    }
+    if named.corpus.name != current.corpus.name {
+        reasons.push(format!("over the {} corpus", named.corpus.name));
+    }
+    reasons.extend(find_hard_differences(named, current));
+    let mut lines = if reasons.is_empty() {
+        format_comparison(current, &[named], &Block::Against(stamp.to_string())).0
+    } else {
+        let mut lines = vec![format!("against {stamp}: not comparable")];
+        lines.extend(describe_runs_set_aside(&[SetAside {
+            record: named,
+            reasons,
+        }]));
+        lines
+    };
+    lines
+        .push("  asked for with --against; the results page does not carry this block".to_string());
+    lines
+}
+
+pub fn find_named_run(
+    collected: &Collected,
+    stamp: &str,
+    out: &Path,
+    this_run_is_local: bool,
+) -> Result<String, String> {
+    let matches: Vec<&FoundRun> = collected
+        .found
+        .iter()
+        .filter(|found| found.record.stamp == stamp)
+        .collect();
+    match matches.as_slice() {
+        [] => Err(match collected.found.first() {
+            Some(newest) => format!(
+                "no run {stamp} under {}, the newest there is {}",
+                out.display(),
+                newest.record.stamp
+            ),
+            None => format!(
+                "no run {stamp} under {}, where no run has been recorded",
+                out.display()
+            ),
+        }),
+        [one] if one.is_local() && !this_run_is_local => Err(format!(
+            "{stamp} holds a build given by hand, so it is kept out of the published runs, and \
+             a run that would be published cannot be read against it"
+        )),
+        [one] => Ok(one.record.stamp.clone()),
+        many => Err(format!(
+            "{stamp} names {} runs under {}: {}",
+            many.len(),
+            out.display(),
+            many.iter()
+                .map(|found| found.relative.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn format_comparison(
+    current: &Record,
+    earlier: &[&Record],
+    block: &Block,
+) -> (Vec<String>, Vec<String>) {
     let mut comparable: Vec<&Record> = Vec::new();
     let mut set_aside: Vec<SetAside> = Vec::new();
     for record in earlier
@@ -163,22 +242,33 @@ pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
         })
         .collect();
     let (now_rows, _) = collect_table_rows(&current.measurements, Table::SameWork);
-    let mut never_measured = Vec::new();
-    let mut compared: Vec<Comparison> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     for now in &now_rows {
         let latest = tables
             .iter()
             .filter_map(|(record, rows)| {
                 rows.iter()
                     .find(|row| row.instance == now.instance)
-                    .map(|then| (*record, then.mean_s))
+                    .map(|then| (*record, then.mean_s, then.mean_stddev_s))
             })
             .max_by(|a, b| a.0.stamp.cmp(&b.0.stamp));
-        match latest {
-            Some((anchor, then)) => compared.push(Comparison { anchor, then, now }),
-            None => never_measured.push(now.instance.as_str()),
-        }
+        rows.push(match latest {
+            Some((anchor, then_mean_s, then_mean_stddev_s)) => Row::Compared(Comparison {
+                anchor,
+                then_mean_s,
+                then_mean_stddev_s,
+                now,
+            }),
+            None => Row::New(now),
+        });
     }
+    let compared: Vec<&Comparison> = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Compared(comparison) => Some(comparison),
+            Row::New(_) => None,
+        })
+        .collect();
     let mut anchors: Vec<&Record> = compared
         .iter()
         .map(|comparison| comparison.anchor)
@@ -186,62 +276,49 @@ pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
     anchors.sort_by(|a, b| b.stamp.cmp(&a.stamp));
     anchors.dedup_by(|a, b| a.stamp == b.stamp);
     let Some(main) = anchors.first().copied() else {
-        let mut lines = vec![
-            if set_aside.is_empty() {
-                "since: no earlier run on this machine over this corpus shares an instance with \
-                 this one"
-            } else {
-                "since: no earlier run comparable with this one shares an instance with it"
-            }
-            .to_string(),
-        ];
+        let mut lines = vec![block.describe_nothing_shared(!set_aside.is_empty())];
         lines.extend(describe_runs_set_aside(&set_aside));
-        return lines;
+        return (lines, Vec::new());
     };
-    let mut lines = vec![format!(
-        "since {} ({})",
-        main.stamp,
-        if current.corpus.head.is_some() {
-            "same machine, same corpus commit"
-        } else {
-            "same machine; the corpus is not a git checkout, so whether it changed is unknown"
-        }
-    )];
-    for Comparison { anchor, then, now } in &compared {
-        let before = find_instance_record(anchor, &now.instance);
-        let after = find_instance_record(current, &now.instance);
-        let same_flags = before.map(|i| (&i.languages, &i.same_work, &i.args))
-            == after.map(|i| (&i.languages, &i.same_work, &i.args));
-        let mut line = if same_flags {
-            format!(
-                "  {:<14} t1   {} -> {}   {}",
-                now.instance,
-                format_wall(*then, 0.0),
-                format_wall(now.mean_s, 0.0),
-                format_change(*then, now.mean_s)
-            )
-        } else {
-            format!(
-                "  {:<14} t1   the languages, the same-work flags or the instance's own \
-                 arguments changed, so the times do not compare",
-                now.instance
-            )
+    let same_builds = compared.iter().all(|comparison| {
+        let sha_of = |record: &Record| {
+            find_instance_record(record, &comparison.now.instance)
+                .map(|i| i.identity.sha256.clone())
         };
-        if let (Some(before), Some(after)) = (before, after)
-            && before.identity.sha256 != after.identity.sha256
-        {
-            line.push_str(&format!(
-                "   build {} -> {}",
-                shorten_hash(&before.identity.sha256),
-                shorten_hash(&after.identity.sha256)
-            ));
-        }
-        if anchor.stamp != main.stamp {
-            line.push_str(&format!("   (from {})", anchor.stamp));
-        }
-        lines.push(line);
+        sha_of(comparison.anchor) == sha_of(current)
+    });
+    let mut sameness = vec!["same machine"];
+    if current.corpus.head.is_some() {
+        sameness.push("same corpus commit");
     }
-    lines.extend(format_control_shift(current, &comparable, main));
+    if same_builds {
+        sameness.push("same builds");
+    }
+    let mut sameness = sameness.join(", ");
+    if current.corpus.head.is_none() {
+        sameness.push_str("; the corpus is not a git checkout, so whether it changed is unknown");
+    }
+    let mut lines = vec![format!(
+        "{} {} ({})",
+        block.get_heading(),
+        main.stamp,
+        sameness
+    )];
+    let control = find_control_mean(current);
+    for row in &rows {
+        lines.push(match row {
+            Row::Compared(comparison) => {
+                format_compared_row(current, comparison, main, control.as_ref())
+            }
+            Row::New(now) => format!(
+                "  {:<14} t1   {}   {}",
+                now.instance,
+                format_wall(now.mean_s, 0.0),
+                block.describe_new_instance(!set_aside.is_empty())
+            ),
+        });
+    }
+    lines.extend(format_control_shift(current, &comparable, main, block));
     for anchor in &anchors {
         let differences = find_context_differences(anchor, current);
         if differences.is_empty() {
@@ -264,17 +341,6 @@ pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
             }
         }
     }
-    if !never_measured.is_empty() {
-        lines.push(format!(
-            "  {}   {}",
-            if set_aside.is_empty() {
-                "never measured before on this machine"
-            } else {
-                "not measured in any comparable earlier run"
-            },
-            never_measured.join(", ")
-        ));
-    }
     let mut absent_now: Vec<&str> = Vec::new();
     for anchor in &anchors {
         let Some((_, rows)) = tables
@@ -293,18 +359,87 @@ pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
     }
     if !absent_now.is_empty() {
         lines.push(format!(
-            "  measured in the runs above and not in this run   {}",
+            "  {}   {}",
+            block.describe_absent_now(),
             absent_now.join(", ")
         ));
     }
     lines.extend(describe_runs_set_aside(&set_aside));
-    lines
+    let anchors = anchors.iter().map(|anchor| anchor.stamp.clone()).collect();
+    (lines, anchors)
+}
+
+enum Block {
+    Since,
+    Against(String),
+}
+
+impl Block {
+    fn get_heading(&self) -> &'static str {
+        match self {
+            Block::Since => "since",
+            Block::Against(_) => "against",
+        }
+    }
+
+    fn describe_no_shared_control(&self) -> String {
+        match self {
+            Block::Since => "  no earlier run shares this run's control, so the machine's own \
+                             shift is not known"
+                .to_string(),
+            Block::Against(_) => "  that run does not share this run's control, so the \
+                                  machine's own shift over the span is not known"
+                .to_string(),
+        }
+    }
+
+    fn describe_nothing_shared(&self, anything_set_aside: bool) -> String {
+        match self {
+            Block::Since if anything_set_aside => {
+                "since: no earlier run comparable with this one shares an instance with it"
+                    .to_string()
+            }
+            Block::Since => "since: no earlier run on this machine over this corpus shares an \
+                             instance with this one"
+                .to_string(),
+            Block::Against(stamp) => {
+                format!("against {stamp}: that run shares no instance with this one")
+            }
+        }
+    }
+
+    fn describe_new_instance(&self, anything_set_aside: bool) -> String {
+        match self {
+            Block::Since if anything_set_aside => "not in any comparable earlier run".to_string(),
+            Block::Since => "never measured before on this machine".to_string(),
+            Block::Against(stamp) => format!("not in {stamp}"),
+        }
+    }
+
+    fn describe_absent_now(&self) -> String {
+        match self {
+            Block::Since => "measured in the runs above and not in this run".to_string(),
+            Block::Against(stamp) => format!("measured in {stamp} and not in this run"),
+        }
+    }
+}
+
+enum Row<'a> {
+    Compared(Comparison<'a>),
+    New(&'a Pooled),
 }
 
 struct Comparison<'a> {
     anchor: &'a Record,
-    then: f64,
+    then_mean_s: f64,
+    then_mean_stddev_s: f64,
     now: &'a Pooled,
+}
+
+#[derive(Clone, Copy)]
+struct Shift {
+    change: f64,
+    stddev: f64,
 }
 
 struct SetAside<'a> {
@@ -512,6 +647,14 @@ fn format_run_section(
             .collect();
         lines.push(format!("- **Left out**: {}.", explained.join("; ")));
     }
+    if !record.identity_checks.is_empty() {
+        let checks = record.identity_checks.join("; ");
+        lines.push(if checks.contains("differ:") {
+            format!("- **Expected identical**: **{checks}.**")
+        } else {
+            format!("- **Expected identical**: {checks}.")
+        });
+    }
     let empty_bare = describe_empty_bare_counts(&record.counts);
     if !empty_bare.is_empty() {
         lines.push(format!(
@@ -558,10 +701,24 @@ fn format_every_run(release: &[&FoundRun]) -> Vec<String> {
         }
     }
     let columns: Vec<String> = instances.into_iter().collect();
+    let mut versions: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for entry in release {
+        for instance in &entry.record.instances {
+            versions
+                .entry(instance.identity.instance.as_str())
+                .or_default()
+                .insert(shorten_version(&instance.identity.version));
+        }
+    }
+    let disagreeing: BTreeSet<&str> = versions
+        .iter()
+        .filter(|(_, seen)| seen.len() > 1)
+        .map(|(instance, _)| *instance)
+        .collect();
     let mut lines = vec![
         "## Every run".to_string(),
         String::new(),
-        "Same-work times, the sections above show only the latest run per platform. Commits, machine state and everything else: inside each run's directory.".to_string(),
+        "Same-work times, the sections above show only the latest run per platform. A column whose runs measured different versions of the counter says which beside each time. Commits, machine state and everything else: inside each run's directory.".to_string(),
         String::new(),
         format!("| run | platform | corpus | {} | machine steadiness |", columns.join(" | ")),
         format!("|---|---|---|{}---|", "---|".repeat(columns.len())),
@@ -577,7 +734,18 @@ fn format_every_run(release: &[&FoundRun]) -> Vec<String> {
             cells.push(
                 rows.iter()
                     .find(|r| &r.instance == column)
-                    .map(|r| format_wall(r.mean_s, 0.0))
+                    .map(|r| {
+                        let mut cell = format_wall(r.mean_s, 0.0);
+                        if disagreeing.contains(column.as_str())
+                            && let Some(instance) = find_instance_record(&entry.record, column)
+                        {
+                            cell.push_str(&format!(
+                                " ({})",
+                                shorten_version(&instance.identity.version)
+                            ));
+                        }
+                        cell
+                    })
                     .unwrap_or_default(),
             );
         }
@@ -673,63 +841,180 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         "- **lines per cpu second**: the lines this counter counted, divided by its user plus system cpu. How cheaply it counts, with the number of cores taken out of the picture.".to_string(),
         "- **files / lines**: what the counter reported counting. Under \"Same work\" every counter must nearly agree, and the equal work check says whether they did. Out of the box they differ by design.".to_string(),
         "- **machine steadiness**: the same binary timed at the start and at the end of the whole run. The percentage is how far apart the two means came out.".to_string(),
+        "- **since the last run**: each instance's same-work wall against its own latest comparable earlier run, ± the σ of that change from the two means' own σ (σ/√n per order, the order gap kept whole). \"within the noise\" means the change minus the control's own shift is inside the combined σ.".to_string(),
         String::new(),
     ]);
     lines
 }
 
-fn format_control_shift(current: &Record, comparable: &[&Record], main: &Record) -> Vec<String> {
-    let Some((name, sha, now_mean)) = find_control_mean(current) else {
+fn format_compared_row(
+    current: &Record,
+    comparison: &Comparison,
+    main: &Record,
+    control: Option<&(String, String, Pooled)>,
+) -> String {
+    let Comparison {
+        anchor,
+        then_mean_s,
+        then_mean_stddev_s,
+        now,
+    } = comparison;
+    let before = find_instance_record(anchor, &now.instance);
+    let after = find_instance_record(current, &now.instance);
+    let same_flags = before.map(|i| (&i.languages, &i.same_work, &i.args))
+        == after.map(|i| (&i.languages, &i.same_work, &i.args));
+    let mut line = if same_flags {
+        let mut now_wall = format_wall(now.mean_s, 0.0);
+        if now.single_order {
+            now_wall.push_str(" (one order)");
+        }
+        let mut line = format!(
+            "  {:<14} t1   {} -> {}   {}",
+            now.instance,
+            format_wall(*then_mean_s, 0.0),
+            now_wall,
+            format_change(*then_mean_s, now.mean_s)
+        );
+        if let Some(shift) = calculate_shift(
+            *then_mean_s,
+            *then_mean_stddev_s,
+            now.mean_s,
+            now.mean_stddev_s,
+        ) {
+            line.push_str(&format!(" ± {}", format_percent(shift.stddev)));
+            if is_within_the_noise(shift, find_machine_shift(control, anchor)) {
+                line.push_str("   within the noise");
+            }
+        }
+        line
+    } else {
+        format!(
+            "  {:<14} t1   the languages, the same-work flags or the instance's own \
+             arguments changed, so the times do not compare",
+            now.instance
+        )
+    };
+    if let (Some(before), Some(after)) = (before, after) {
+        let was = shorten_version(&before.identity.version);
+        let is = shorten_version(&after.identity.version);
+        if was != is {
+            line.push_str(&format!("   version {was} -> {is}"));
+        } else if before.identity.sha256 != after.identity.sha256 {
+            line.push_str(&format!(
+                "   build {} -> {}",
+                shorten_hash(&before.identity.sha256),
+                shorten_hash(&after.identity.sha256)
+            ));
+        }
+    }
+    if anchor.stamp != main.stamp {
+        line.push_str(&format!("   (from {})", anchor.stamp));
+    }
+    line
+}
+
+fn format_control_shift(
+    current: &Record,
+    comparable: &[&Record],
+    main: &Record,
+    block: &Block,
+) -> Vec<String> {
+    let Some((name, sha, now)) = find_control_mean(current) else {
         return vec![
             "  this run has no control measurement, so the machine's own shift is not known"
                 .to_string(),
         ];
     };
-    let mut same_name: Vec<(&Record, String, f64)> = comparable
+    let mut same_name: Vec<(&Record, String, Pooled)> = comparable
         .iter()
         .filter_map(|record| {
             find_control_mean(record)
                 .filter(|(then_name, _, _)| *then_name == name)
-                .map(|(_, then_sha, then_mean)| (*record, then_sha, then_mean))
+                .map(|(_, then_sha, then)| (*record, then_sha, then))
         })
         .collect();
     same_name.sort_by(|a, b| b.0.stamp.cmp(&a.0.stamp));
     let same_build = same_name
         .iter()
         .find(|(_, then_sha, _)| *then_sha == sha)
-        .map(|(record, _, then_mean)| (*record, *then_mean));
-    let mut lines = Vec::new();
+        .map(|(record, _, then)| (*record, then));
     match (same_build, same_name.first()) {
-        (Some((record, then_mean)), _) => {
+        (Some((record, then)), _) => {
+            let shift = calculate_shift(
+                then.mean_s,
+                then.mean_stddev_s,
+                now.mean_s,
+                now.mean_stddev_s,
+            );
             let mut line = format!(
-                "  {:<14} {:<26} {}   the machine itself",
+                "  {:<14} {:<26} {}",
                 "control",
                 name,
-                format_change(then_mean, now_mean)
+                format_change(then.mean_s, now.mean_s)
             );
+            if let Some(shift) = shift {
+                line.push_str(&format!(" ± {}", format_percent(shift.stddev)));
+            }
+            line.push_str("   the machine itself");
             if record.stamp != main.stamp {
                 line.push_str(&format!("   (from {})", record.stamp));
             }
-            lines.push(line);
-            let moved = (now_mean / then_mean - 1.0).abs();
-            if moved > CONTROL_MOVED_THRESHOLD {
+            let mut lines = vec![line];
+            if let Some(shift) = shift
+                && shift.change.abs() > shift.stddev
+            {
                 lines.push(format!(
                     "  the machine itself moved by {}, read the changes against that",
-                    format_percent(moved)
+                    format_percent(shift.change.abs())
                 ));
             }
+            lines
         }
-        (None, Some((record, _, _))) => lines.push(format!(
+        (None, Some((record, _, _))) => vec![format!(
             "  {:<14} {:<26} timed under another build in {}, so the machine's own shift is \
              not known",
             "control", name, record.stamp
-        )),
-        (None, None) => lines.push(
-            "  no earlier run shares this run's control, so the machine's own shift is not known"
-                .to_string(),
-        ),
+        )],
+        (None, None) => vec![block.describe_no_shared_control()],
     }
-    lines
+}
+
+fn find_machine_shift(
+    control: Option<&(String, String, Pooled)>,
+    anchor: &Record,
+) -> Option<Shift> {
+    let (name, sha, now) = control?;
+    let (then_name, then_sha, then) = find_control_mean(anchor)?;
+    if then_name != *name || then_sha != *sha {
+        return None;
+    }
+    calculate_shift(
+        then.mean_s,
+        then.mean_stddev_s,
+        now.mean_s,
+        now.mean_stddev_s,
+    )
+}
+
+fn calculate_shift(then: f64, then_stddev: f64, now: f64, now_stddev: f64) -> Option<Shift> {
+    if then <= 0.0 || now <= 0.0 {
+        return None;
+    }
+    let ratio = now / then;
+    Some(Shift {
+        change: ratio - 1.0,
+        stddev: propagate_ratio_stddev(ratio, now, now_stddev, then, then_stddev),
+    })
+}
+
+fn is_within_the_noise(shift: Shift, machine: Option<Shift>) -> bool {
+    match machine {
+        Some(machine) => {
+            (shift.change - machine.change).abs()
+                <= (shift.stddev.powi(2) + machine.stddev.powi(2)).sqrt()
+        }
+        None => shift.change.abs() <= shift.stddev,
+    }
 }
 
 fn find_hard_differences(then: &Record, now: &Record) -> Vec<String> {
@@ -769,18 +1054,17 @@ fn find_context_differences(previous: &Record, current: &Record) -> Vec<(String,
         .collect()
 }
 
-fn find_control_mean(record: &Record) -> Option<(String, String, f64)> {
+fn find_control_mean(record: &Record) -> Option<(String, String, Pooled)> {
     let name = record.settings.control.clone();
     let sha = find_instance_record(record, &name)?.identity.sha256.clone();
-    let mean_of = |set: &str| {
+    let measurement_of = |set: &str| {
         record
             .measurements
             .iter()
             .find(|m| m.set == set && m.mean_s > 0.0)
-            .map(|m| m.mean_s)
     };
-    let (start, end) = (mean_of(CONTROL_START)?, mean_of(CONTROL_END)?);
-    Some((name, sha, (start + end) / 2.0))
+    let (start, end) = (measurement_of(CONTROL_START)?, measurement_of(CONTROL_END)?);
+    Some((name, sha, pool_orders(start, Some(end))))
 }
 
 fn find_instance_record<'a>(record: &'a Record, instance: &str) -> Option<&'a InstanceRecord> {
@@ -976,11 +1260,18 @@ mod tests {
         let since = format_since(&wednesday, &[&monday, &tuesday]);
         assert_eq!(
             since[0],
-            "since 20260902-100000 (same machine, same corpus commit)"
+            "since 20260902-100000 (same machine, same corpus commit, same builds)"
         );
-        assert!(since[1].starts_with("  mezura         t1   310 ms -> 320 ms   +3.2%"));
-        assert!(!since[1].contains("(from"), "{}", since[1]);
-        assert!(since[2].starts_with("  scc            t1   500 ms -> 550 ms   +10.0%"));
+        assert_eq!(
+            since[1],
+            "  mezura         t1   310 ms -> 320 ms   +3.2% ± 0.8%   within the noise"
+        );
+        assert!(
+            since[2].starts_with("  scc            t1   500 ms -> 550 ms   +10.0% ± 0.5%"),
+            "{}",
+            since[2]
+        );
+        assert!(!since[2].contains("within the noise"), "{}", since[2]);
         assert!(since[2].ends_with("(from 20260901-100000)"), "{}", since[2]);
         assert!(
             since[3].starts_with("  control        mezura"),
@@ -988,9 +1279,325 @@ mod tests {
             since[3]
         );
         assert!(
-            since[3].contains("+3.2%   the machine itself"),
+            since[3].contains("+3.2% ± 0.8%   the machine itself"),
             "{}",
             since[3]
+        );
+        assert_eq!(
+            since[4],
+            "  the machine itself moved by 3.2%, read the changes against that"
+        );
+    }
+
+    #[test]
+    fn a_change_is_read_against_the_machines_own_move_and_a_machine_at_rest_says_nothing() {
+        let five = Shift {
+            change: 0.05,
+            stddev: 0.005,
+        };
+        let inside = |change: f64| {
+            Some(Shift {
+                change,
+                stddev: 0.005,
+            })
+        };
+        assert!(is_within_the_noise(five, inside(0.045)));
+        assert!(!is_within_the_noise(five, inside(0.03)));
+        assert!(is_within_the_noise(
+            Shift {
+                change: 0.004,
+                stddev: 0.005
+            },
+            None
+        ));
+        assert!(!is_within_the_noise(five, None));
+        let then = build_record(
+            "20260901-100000",
+            &[("mezura", 0.30), ("scc", 0.50)],
+            "nvme0",
+        );
+        let now = build_record(
+            "20260902-100000",
+            &[("mezura", 0.30), ("scc", 0.55)],
+            "nvme0",
+        );
+        let since = format_since(&now, &[&then]);
+        assert!(
+            since[1].ends_with("+0.0% ± 0.9%   within the noise"),
+            "{}",
+            since[1]
+        );
+        assert!(since[2].ends_with("+10.0% ± 0.5%"), "{}", since[2]);
+        assert!(
+            !since
+                .iter()
+                .any(|line| line.starts_with("  the machine itself moved")),
+            "{since:?}"
+        );
+    }
+
+    #[test]
+    fn a_change_is_judged_against_the_machines_move_over_the_rows_own_span() {
+        let monday = build_record(
+            "20260901-100000",
+            &[("mezura", 0.30), ("scc", 0.50)],
+            "nvme0",
+        );
+        let tuesday = build_record("20260902-100000", &[("mezura", 0.33)], "nvme0");
+        let wednesday = build_record(
+            "20260903-100000",
+            &[("mezura", 0.33), ("scc", 0.55)],
+            "nvme0",
+        );
+        let since = format_since(&wednesday, &[&monday, &tuesday]);
+        assert!(
+            since[1].ends_with("+0.0% ± 0.8%   within the noise"),
+            "{}",
+            since[1]
+        );
+        assert!(
+            since[2].ends_with("+10.0% ± 0.5%   within the noise   (from 20260901-100000)"),
+            "{}",
+            since[2]
+        );
+        assert!(
+            since[3].contains("+0.0% ± 0.8%   the machine itself"),
+            "{}",
+            since[3]
+        );
+    }
+
+    #[test]
+    fn a_row_measured_in_one_order_says_so() {
+        let then = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        let mut now = build_record("20260902-100000", &[("mezura", 0.31)], "nvme0");
+        let reverse = get_set_name(Table::SameWork, REVERSE);
+        now.measurements.retain(|m| m.set != reverse);
+        let since = format_since(&now, &[&then]);
+        assert!(
+            since[1].starts_with("  mezura         t1   300 ms -> 310 ms (one order)   +3.3% ±"),
+            "{}",
+            since[1]
+        );
+    }
+
+    #[test]
+    fn an_against_block_reads_every_row_against_the_named_run_whatever_came_between() {
+        let monday = build_record(
+            "20260901-100000",
+            &[("mezura", 0.30), ("scc", 0.50)],
+            "nvme0",
+        );
+        let tuesday = build_record("20260902-100000", &[("mezura", 0.33)], "nvme0");
+        let wednesday = build_record(
+            "20260903-100000",
+            &[("mezura", 0.33), ("scc", 0.55), ("tokei", 0.60)],
+            "nvme0",
+        );
+        let earlier = [&monday, &tuesday];
+        let against = format_against(&wednesday, &monday, &earlier);
+        assert_eq!(
+            against[0],
+            "against 20260901-100000 (same machine, same corpus commit, same builds)"
+        );
+        assert!(
+            against[1].starts_with("  mezura         t1   300 ms -> 330 ms   +10.0% ±")
+                && against[1].ends_with("within the noise"),
+            "{}",
+            against[1]
+        );
+        assert!(
+            against[2].starts_with("  scc            t1   500 ms -> 550 ms   +10.0% ±")
+                && against[2].ends_with("within the noise"),
+            "{}",
+            against[2]
+        );
+        assert_eq!(
+            against[3],
+            "  tokei          t1   600 ms   not in 20260901-100000"
+        );
+        assert!(
+            against[4].starts_with("  control        mezura") && against[4].contains("+10.0% ±"),
+            "{}",
+            against[4]
+        );
+        assert!(
+            !against.iter().any(|line| line.contains("(from")),
+            "{against:?}"
+        );
+        assert_eq!(
+            against.last().unwrap(),
+            "  asked for with --against; the results page does not carry this block"
+        );
+        let partly_above = format_against(&wednesday, &tuesday, &earlier);
+        assert!(
+            partly_above[0].starts_with("against 20260902-100000 (same machine"),
+            "{}",
+            partly_above[0]
+        );
+        assert_eq!(
+            partly_above[2],
+            "  scc            t1   550 ms   not in 20260902-100000"
+        );
+        assert_eq!(
+            format_against(&wednesday, &monday, &[&monday]),
+            ["against 20260901-100000: the run above"]
+        );
+        let mut without_cloc = build_record("20260904-100000", &[("mezura", 0.32)], "nvme0");
+        without_cloc.instances[0].identity.instance = "mezura".to_string();
+        let with_cloc = build_record(
+            "20260903-110000",
+            &[("mezura", 0.30), ("cloc", 1.90)],
+            "nvme0",
+        );
+        let newer = build_record("20260903-120000", &[("mezura", 0.31)], "nvme0");
+        let against = format_against(&without_cloc, &with_cloc, &[&with_cloc, &newer]);
+        assert!(
+            against
+                .iter()
+                .any(|line| line == "  measured in 20260903-110000 and not in this run   cloc"),
+            "{against:?}"
+        );
+        let later = build_record("20260905-100000", &[("mezura", 0.30)], "nvme0");
+        assert_eq!(
+            format_against(&without_cloc, &later, &[])[1],
+            "  not compared with 20260905-100000: that run was recorded after this run"
+        );
+    }
+
+    #[test]
+    fn an_against_block_names_another_platform_or_corpus_as_the_reason() {
+        let now = build_record("20260902-100000", &[("mezura", 0.31)], "nvme0");
+        let mut linux = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        linux.machine.platform = Platform::Linux;
+        assert_eq!(
+            format_against(&now, &linux, &[&linux])[..2],
+            [
+                "against 20260901-100000: not comparable",
+                "  not compared with 20260901-100000: that run was on Native Linux"
+            ]
+        );
+        let mut kernel = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        kernel.corpus.name = "kernel".to_string();
+        assert_eq!(
+            format_against(&now, &kernel, &[&kernel])[1],
+            "  not compared with 20260901-100000: that run was over the kernel corpus"
+        );
+        let mut other_cpu = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        other_cpu.machine.cpu = "another cpu".to_string();
+        assert_eq!(
+            format_against(&now, &other_cpu, &[&other_cpu])[1],
+            "  not compared with 20260901-100000: that run was on another cpu, 16 threads"
+        );
+        let mut other_control = build_record(
+            "20260901-100000",
+            &[("scc", 0.50), ("mezura", 0.30)],
+            "nvme0",
+        );
+        other_control.settings.control = "scc".to_string();
+        let newer = build_record("20260901-110000", &[("mezura", 0.30)], "nvme0");
+        let against = format_against(&now, &other_control, &[&other_control, &newer]);
+        assert!(
+            against.iter().any(|line| line
+                == "  that run does not share this run's control, so the machine's own shift \
+                    over the span is not known"),
+            "{against:?}"
+        );
+    }
+
+    #[test]
+    fn a_named_run_is_found_by_its_stamp_and_a_published_run_may_not_name_a_local_one() {
+        let release = build_record(
+            "20260901-100000",
+            &[("mezura", 0.30), ("cloc", 1.90)],
+            "nvme0",
+        );
+        let mut local = build_record("20260902-100000", &[("mezura", 0.31)], "nvme0");
+        local.instances[0].identity.origin = Origin::Given {
+            label: "dev".to_string(),
+        };
+        let twin = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        let found = |record: Record, corpus: &str| FoundRun {
+            relative: format!("{corpus}/windows/{}", record.stamp),
+            record,
+        };
+        let out = Path::new("results");
+        let collected = Collected {
+            found: vec![found(local, "linux"), found(release, "linux")],
+            skipped: Vec::new(),
+        };
+        assert_eq!(
+            find_named_run(&collected, "20260901-100000", out, false).unwrap(),
+            "20260901-100000"
+        );
+        assert!(
+            find_named_run(&collected, "20260902-100000", out, false)
+                .unwrap_err()
+                .contains("given by hand")
+        );
+        assert_eq!(
+            find_named_run(&collected, "20260902-100000", out, true).unwrap(),
+            "20260902-100000"
+        );
+        assert!(
+            find_named_run(&collected, "20260903-100000", out, false)
+                .unwrap_err()
+                .ends_with("the newest there is 20260902-100000")
+        );
+        let nothing = Collected {
+            found: Vec::new(),
+            skipped: Vec::new(),
+        };
+        assert!(
+            find_named_run(&nothing, "20260901-100000", out, false)
+                .unwrap_err()
+                .ends_with("where no run has been recorded")
+        );
+        let mut doubled = collected;
+        doubled.found.push(found(twin, "kernel"));
+        let refused = find_named_run(&doubled, "20260901-100000", out, false).unwrap_err();
+        assert!(
+            refused.contains("names 2 runs") && refused.contains("kernel/windows/20260901-100000"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_version_change_is_named_on_the_line_and_the_heading_drops_same_builds() {
+        let then = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        let mut now = build_record("20260902-100000", &[("mezura", 0.31)], "nvme0");
+        now.instances[0].identity.version = "mezura 2.0.0".to_string();
+        now.instances[0].identity.sha256 = "f".repeat(64);
+        let since = format_since(&now, &[&then]);
+        assert!(!since[0].contains("same builds"), "{}", since[0]);
+        assert!(
+            since[1].ends_with("   version 1.0.0 -> 2.0.0"),
+            "{}",
+            since[1]
+        );
+        assert!(!since[1].contains("build "), "{}", since[1]);
+    }
+
+    #[test]
+    fn an_instance_new_to_the_machine_gets_a_row_in_its_place() {
+        let then = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        let now = build_record(
+            "20260902-100000",
+            &[("mezura", 0.31), ("scc", 0.50)],
+            "nvme0",
+        );
+        let since = format_since(&now, &[&then]);
+        assert_eq!(
+            since[2],
+            "  scc            t1   500 ms   never measured before on this machine"
+        );
+        assert!(since[3].starts_with("  control"), "{}", since[3]);
+        let mut other_cpu = build_record("20260901-110000", &[("scc", 0.50)], "nvme0");
+        other_cpu.machine.cpu = "another cpu".to_string();
+        let since = format_since(&now, &[&then, &other_cpu]);
+        assert_eq!(
+            since[2],
+            "  scc            t1   500 ms   not in any comparable earlier run"
         );
     }
 
@@ -1012,7 +1619,7 @@ mod tests {
         let since = format_since(&now, &[&other_disk, &unknown_disk]);
         assert_eq!(
             since[0],
-            "since 20260902-100000 (same machine, same corpus commit)"
+            "since 20260902-100000 (same machine, same corpus commit, same builds)"
         );
         assert!(
             since.iter().any(|line| line
@@ -1186,7 +1793,7 @@ mod tests {
         let page = fs::read_to_string(out_root.join(PAGE_FILE)).unwrap();
         fs::remove_dir_all(&out_root).unwrap();
         assert!(
-            page.contains("since 20260901-100000 (same machine, same corpus commit)"),
+            page.contains("since 20260901-100000 (same machine, same corpus commit, same builds)"),
             "{page}"
         );
         assert!(!page.contains("since 20260902-100000"), "{page}");
@@ -1198,6 +1805,38 @@ mod tests {
             "{page}"
         );
         assert!(page.contains("## Local builds"), "{page}");
+    }
+
+    #[test]
+    fn a_column_whose_runs_measured_different_versions_says_which_beside_each_time() {
+        let mut then = build_record(
+            "20260901-100000",
+            &[("mezura", 0.30), ("scc", 0.50)],
+            "nvme0",
+        );
+        then.instances[0].identity.version = "mezura 0.9.0".to_string();
+        then.instances[0].identity.sha256 = "9".repeat(64);
+        let now = build_record(
+            "20260902-100000",
+            &[("mezura", 0.32), ("scc", 0.55)],
+            "nvme0",
+        );
+        let runs = [now, then].map(|record| FoundRun {
+            relative: format!("linux/windows/{}", record.stamp),
+            record,
+        });
+        let lines = format_every_run(&runs.iter().collect::<Vec<_>>());
+        let table: Vec<&String> = lines.iter().filter(|l| l.starts_with("| [")).collect();
+        assert!(
+            table[0].contains("| 320 ms (1.0.0) | 550 ms |"),
+            "{}",
+            table[0]
+        );
+        assert!(
+            table[1].contains("| 300 ms (0.9.0) | 500 ms |"),
+            "{}",
+            table[1]
+        );
     }
 
     fn build_record(stamp: &str, rows: &[(&str, f64)], device: &str) -> Record {
@@ -1284,6 +1923,7 @@ mod tests {
             hyperfine_failures: Vec::new(),
             hyperfine_warnings: Vec::new(),
             capture_failures: Vec::new(),
+            identity_checks: Vec::new(),
         }
     }
 

@@ -99,6 +99,10 @@ pub struct Definition {
     pub name: String,
     #[serde(skip)]
     pub path: PathBuf,
+    #[serde(skip)]
+    pub shipped_version: Option<String>,
+    #[serde(skip)]
+    pub added: bool,
     pub repository: Option<String>,
     #[serde(default = "get_default_version_flag")]
     pub version_flag: String,
@@ -106,6 +110,8 @@ pub struct Definition {
     pub acquisition: Option<Acquisition>,
     pub run: Run,
     pub read: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub volatile: Vec<String>,
     #[serde(default)]
     pub language_names: BTreeMap<String, String>,
 }

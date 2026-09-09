@@ -1,6 +1,7 @@
 name         = "cloc"
 repository   = "https://github.com/AlDanial/cloc"
 version-flag = "--version"
+volatile     = ["header.elapsed_seconds", "header.files_per_second", "header.lines_per_second", "header.cloc_version"]
 
 [acquisition]
 channel = "github-release-file"

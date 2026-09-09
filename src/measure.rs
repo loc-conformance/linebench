@@ -288,6 +288,17 @@ impl Runner {
     }
 }
 
+pub fn capture_json_outputs(
+    out: &mut dyn Write,
+    runner: &mut Runner,
+    instances: &[Instance],
+    corpus: &Path,
+    extensions: &[String],
+) -> Result<(), String> {
+    print_line(out, "\n== JSON captures (also the settling runs)")?;
+    capture_every_instance(out, runner, instances, corpus, extensions, true)
+}
+
 pub fn run_phases(
     out: &mut dyn Write,
     runner: &mut Runner,
@@ -296,8 +307,6 @@ pub fn run_phases(
     corpus: &Path,
     extensions: &[String],
 ) -> Result<(), String> {
-    print_line(out, "\n== JSON captures (also the settling runs)")?;
-    capture_every_instance(out, runner, instances, corpus, extensions, true)?;
     let bare = build_command(&instances[control], corpus, extensions, Table::OutOfTheBox)?;
     print_line(out, "\n== opening control run")?;
     runner.run_hyperfine(out, CONTROL_START, std::slice::from_ref(&bare))?;

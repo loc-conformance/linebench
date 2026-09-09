@@ -38,7 +38,8 @@ pub fn collect_definitions(out: &mut dyn Write, added: &[PathBuf]) -> Result<Def
                     .is_some_and(|table| table.contains_key(key))
             };
             if has(COUNTER_KEY) {
-                let definition = parse_definition(&text, &file)?;
+                let mut definition = parse_definition(&text, &file)?;
+                definition.added = true;
                 match counters.iter().position(|d| d.name == definition.name) {
                     Some(at) => {
                         print_line(

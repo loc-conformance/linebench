@@ -64,6 +64,8 @@ pub struct Record {
     pub hyperfine_warnings: Vec<String>,
     #[serde(default)]
     pub capture_failures: Vec<String>,
+    #[serde(default)]
+    pub identity_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +166,7 @@ pub struct Pooled {
     pub instance: String,
     pub mean_s: f64,
     pub stddev_s: f64,
+    pub mean_stddev_s: f64,
     pub user_s: f64,
     pub system_s: f64,
     pub parallelism: f64,
@@ -237,6 +240,7 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
             instance: one.instance.clone(),
             mean_s: one.mean_s,
             stddev_s: one.stddev_s,
+            mean_stddev_s: calculate_mean_stddev(one),
             user_s: one.user_s,
             system_s: one.system_s,
             parallelism: one.parallelism.unwrap_or(0.0),
@@ -248,8 +252,11 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
         };
     };
     let mean = (one.mean_s + other.mean_s) / 2.0;
-    let spread = ((one.stddev_s.powi(2) + other.stddev_s.powi(2)) / 2.0
-        + (one.mean_s - other.mean_s).powi(2) / 4.0)
+    let half_gap_squared = (one.mean_s - other.mean_s).powi(2) / 4.0;
+    let spread = ((one.stddev_s.powi(2) + other.stddev_s.powi(2)) / 2.0 + half_gap_squared).sqrt();
+    let mean_stddev = ((calculate_mean_stddev(one).powi(2) + calculate_mean_stddev(other).powi(2))
+        / 4.0
+        + half_gap_squared)
         .sqrt();
     let user = (one.user_s + other.user_s) / 2.0;
     let system = (one.system_s + other.system_s) / 2.0;
@@ -257,6 +264,7 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
         instance: one.instance.clone(),
         mean_s: mean,
         stddev_s: spread,
+        mean_stddev_s: mean_stddev,
         user_s: user,
         system_s: system,
         parallelism: if mean > 0.0 {
@@ -270,6 +278,21 @@ pub fn pool_orders(one: &Measurement, other: Option<&Measurement>) -> Pooled {
         relative: 1.0,
         relative_stddev: 0.0,
     }
+}
+
+pub fn propagate_ratio_stddev(
+    ratio: f64,
+    numerator: f64,
+    numerator_stddev: f64,
+    denominator: f64,
+    denominator_stddev: f64,
+) -> f64 {
+    if numerator <= 0.0 || denominator <= 0.0 {
+        return 0.0;
+    }
+    let own = (numerator_stddev / numerator).powi(2);
+    let other = (denominator_stddev / denominator).powi(2);
+    ratio * (own + other).sqrt()
 }
 
 pub fn collect_table_rows(measurements: &[Measurement], table: Table) -> (Vec<Pooled>, Vec<f64>) {
@@ -298,9 +321,13 @@ pub fn collect_table_rows(measurements: &[Measurement], table: Table) -> (Vec<Po
         for (index, row) in rows.iter_mut().enumerate() {
             row.relative = row.mean_s / fastest;
             if index > 0 {
-                let own = (row.stddev_s / row.mean_s).powi(2);
-                let fastest_s = (fastest_stddev / fastest).powi(2);
-                row.relative_stddev = row.relative * (own + fastest_s).sqrt();
+                row.relative_stddev = propagate_ratio_stddev(
+                    row.relative,
+                    row.mean_s,
+                    row.stddev_s,
+                    fastest,
+                    fastest_stddev,
+                );
             }
         }
     }
@@ -725,6 +752,13 @@ fn split_utc(seconds_since_epoch: u64) -> (String, String) {
     )
 }
 
+fn calculate_mean_stddev(measurement: &Measurement) -> f64 {
+    if measurement.runs == 0 {
+        return measurement.stddev_s;
+    }
+    measurement.stddev_s / (measurement.runs as f64).sqrt()
+}
+
 fn round_to(value: f64, decimals: i32) -> f64 {
     let scale = 10f64.powi(decimals);
     (value * scale).round() / scale
@@ -797,6 +831,12 @@ mod tests {
         let expected = ((0.01f64.powi(2) + 0.01f64.powi(2)) / 2.0 + 0.04f64.powi(2) / 4.0).sqrt();
         assert!((pooled.stddev_s - expected).abs() < 1e-9);
         assert!((pooled.parallelism - 4.0).abs() < 1e-9);
+        let of_the_mean = ((0.01f64.powi(2) / 15.0 + 0.01f64.powi(2) / 15.0) / 4.0
+            + 0.04f64.powi(2) / 4.0)
+            .sqrt();
+        assert!((pooled.mean_stddev_s - of_the_mean).abs() < 1e-9);
+        let alone = pool_orders(&one, None);
+        assert!((alone.mean_stddev_s - 0.01 / 15f64.sqrt()).abs() < 1e-9);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 name         = "mezura"
 repository   = "https://github.com/subamanis/mezura"
 version-flag = "--version"
+volatile     = ["generated_at", "mezura_version", "performance"]
 
 [acquisition]
 channel = "github-release-asset"

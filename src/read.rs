@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -7,6 +7,10 @@ use crate::counters::{Definition, Output};
 
 const ELEMENTS: &str = "[]";
 const STEP: char = '.';
+const VOLATILE: &str = "volatile";
+const THE_DOCUMENT: &str = "the document";
+const ABSENT: &str = "absent";
+const SHOWN_VALUE: usize = 60;
 const TOKEI_TOTAL: &str = "Total";
 const TOKEI_REPORTS: &str = "reports";
 const TOKEI_CHILDREN: &str = "children";
@@ -29,13 +33,42 @@ impl Counts {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Difference {
+    pub path: String,
+    pub left: String,
+    pub right: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comparison {
+    pub differences: usize,
+    pub first: Option<Difference>,
+}
+
+impl Comparison {
+    pub fn is_identical(&self) -> bool {
+        self.differences == 0
+    }
+
+    fn note(&mut self, path: &str, left: String, right: String) {
+        self.differences += 1;
+        if self.first.is_none() {
+            self.first = Some(Difference {
+                path: if path.is_empty() {
+                    THE_DOCUMENT.to_string()
+                } else {
+                    path.to_string()
+                },
+                left,
+                right,
+            });
+        }
+    }
+}
+
 pub fn read_counts(definition: &Definition, text: &str) -> Result<Counts, String> {
-    let document: Value = serde_json::from_str(text).map_err(|error| {
-        format!(
-            "{} printed something that is not JSON: {error}",
-            definition.name
-        )
-    })?;
+    let document = parse_document(definition, text)?;
     let counts = match definition.output {
         Some(Output::TokeiJson) => read_tokei_document(definition, &document)?,
         None => read_by_paths(definition, &document)?,
@@ -62,6 +95,47 @@ pub fn read_counts(definition: &Definition, text: &str) -> Result<Counts, String
         ));
     }
     Ok(counts)
+}
+
+pub fn compare_documents(
+    left: &Definition,
+    left_text: &str,
+    right: &Definition,
+    right_text: &str,
+) -> Result<Comparison, String> {
+    let mut left_document = parse_document(left, left_text)?;
+    let mut right_document = parse_document(right, right_text)?;
+    for definition in [left, right] {
+        for path in &definition.volatile {
+            let steps = parse_path(definition, VOLATILE, path)?;
+            remove_at(&mut left_document, &steps);
+            remove_at(&mut right_document, &steps);
+        }
+    }
+    sort_lists(&mut left_document);
+    sort_lists(&mut right_document);
+    let mut comparison = Comparison {
+        differences: 0,
+        first: None,
+    };
+    count_differences("", &left_document, &right_document, &mut comparison);
+    Ok(comparison)
+}
+
+pub fn find_absent_volatile_paths(
+    definition: &Definition,
+    text: &str,
+) -> Result<Vec<String>, String> {
+    let document = parse_document(definition, text)?;
+    let mut absent = Vec::new();
+    for path in &definition.volatile {
+        let steps = parse_path(definition, VOLATILE, path)?;
+        if walk(vec![&document], &steps).is_ok_and(|found| !found.is_empty()) {
+            continue;
+        }
+        absent.push(path.clone());
+    }
+    Ok(absent)
 }
 
 enum Step {
@@ -232,7 +306,7 @@ fn walk_to_elements<'a>(
     path: &str,
     document: &'a Value,
 ) -> Result<Vec<&'a Value>, String> {
-    let steps = parse_path(definition, EACH, path)?;
+    let steps = parse_path(definition, &format!("[read] {EACH}"), path)?;
     if !matches!(steps.last(), Some(Step::Every)) {
         return Err(format!(
             "{}: [read] each = \"{path}\" does not end in {ELEMENTS}, so it names one value where \
@@ -253,7 +327,7 @@ fn sum_over_elements(
     path: &str,
     required: bool,
 ) -> Result<Option<u64>, String> {
-    let steps = parse_path(definition, name, path)?;
+    let steps = parse_path(definition, &format!("[read] {name}"), path)?;
     if steps.iter().any(|step| matches!(step, Step::Every)) {
         return Err(format!(
             "{}: [read] {name} = \"{path}\" fans out over {ELEMENTS}, and a count is one value \
@@ -325,8 +399,8 @@ fn parse_path(definition: &Definition, name: &str, path: &str) -> Result<Vec<Ste
             steps.push(Step::Key(key.to_string()));
         } else if !every || part != ELEMENTS {
             return Err(format!(
-                "{}: [read] {name} = \"{path}\" is not a path: dot-separated names, each \
-                 optionally ending in {ELEMENTS}, or {ELEMENTS} alone for the document itself",
+                "{}: {name} = \"{path}\" is not a path: dot-separated names, each optionally \
+                 ending in {ELEMENTS}, or {ELEMENTS} alone for the document itself",
                 definition.path.display()
             ));
         }
@@ -344,6 +418,106 @@ fn read_whole_number(definition: &Definition, path: &str, value: &Value) -> Resu
             definition.name
         )
     })
+}
+
+fn parse_document(definition: &Definition, text: &str) -> Result<Value, String> {
+    serde_json::from_str(text).map_err(|error| {
+        format!(
+            "{} printed something that is not JSON: {error}",
+            definition.name
+        )
+    })
+}
+
+fn remove_at(node: &mut Value, steps: &[Step]) {
+    match steps {
+        [] => {}
+        [Step::Key(key)] => {
+            if let Some(object) = node.as_object_mut() {
+                object.remove(key);
+            }
+        }
+        [Step::Key(key), rest @ ..] => {
+            if let Some(child) = node.get_mut(key) {
+                remove_at(child, rest);
+            }
+        }
+        [Step::Every, rest @ ..] => {
+            if let Some(items) = node.as_array_mut() {
+                for item in items {
+                    remove_at(item, rest);
+                }
+            }
+        }
+    }
+}
+
+fn sort_lists(node: &mut Value) {
+    match node {
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                sort_lists(item);
+            }
+            if items.iter().all(Value::is_object) {
+                items.sort_by_cached_key(Value::to_string);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                sort_lists(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn count_differences(path: &str, left: &Value, right: &Value, found: &mut Comparison) {
+    match (left, right) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for key in keys {
+                let at = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}{STEP}{key}")
+                };
+                match (a.get(key), b.get(key)) {
+                    (Some(x), Some(y)) => count_differences(&at, x, y, found),
+                    (x, y) => found.note(&at, describe_presence(x), describe_presence(y)),
+                }
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            for (index, (x, y)) in a.iter().zip(b).enumerate() {
+                count_differences(&format!("{path}[{index}]"), x, y, found);
+            }
+            if a.len() != b.len() {
+                found.note(
+                    path,
+                    format!("{} items", a.len()),
+                    format!("{} items", b.len()),
+                );
+            }
+        }
+        _ if left == right => {}
+        _ => found.note(
+            path,
+            shorten(&left.to_string()),
+            shorten(&right.to_string()),
+        ),
+    }
+}
+
+fn describe_presence(value: Option<&Value>) -> String {
+    value.map_or_else(|| ABSENT.to_string(), |value| shorten(&value.to_string()))
+}
+
+fn shorten(text: &str) -> String {
+    if text.chars().count() <= SHOWN_VALUE {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(SHOWN_VALUE).collect();
+    format!("{cut}...")
 }
 
 #[cfg(test)]
@@ -464,6 +638,58 @@ mod tests {
             &TOKEI.replace(r#""blanks":290,"code":1712"#, r#""blanks":290,"code":1700"#),
             "tokei printed a Total of 1700 code, 12 comments, 290 blanks and its languages with their children add up to 1712, 12, 290",
         );
+    }
+
+    #[test]
+    fn two_documents_are_identical_once_volatile_fields_and_list_order_are_set_aside() {
+        let mezura = read_shipped("mezura");
+        let mut bare = mezura.clone();
+        bare.volatile.clear();
+        let one = r#"{"generated_at":"2026-09-07T14:20:22","mezura_version":"3.0.0","total":{"files":2,"lines":10},"warnings":[{"code":"a"},{"code":"b"}]}"#;
+        let two = r#"{"generated_at":"2026-09-07T14:20:23","mezura_version":"3.1.0","total":{"files":2,"lines":10},"warnings":[{"code":"b"},{"code":"a"}]}"#;
+        let same = compare_documents(&mezura, one, &mezura, two).unwrap();
+        assert!(same.is_identical(), "{same:?}");
+        assert!(
+            !compare_documents(&bare, one, &bare, two)
+                .unwrap()
+                .is_identical()
+        );
+        assert!(
+            compare_documents(&bare, one, &mezura, two)
+                .unwrap()
+                .is_identical()
+        );
+        let three = r#"{"generated_at":"x","mezura_version":"3.1.0","total":{"files":2,"lines":11,"extra":1},"warnings":[{"code":"a"},{"code":"b"}]}"#;
+        let apart = compare_documents(&mezura, one, &mezura, three).unwrap();
+        assert_eq!(apart.differences, 2);
+        assert_eq!(
+            apart.first,
+            Some(Difference {
+                path: "total.extra".to_string(),
+                left: ABSENT.to_string(),
+                right: "1".to_string(),
+            })
+        );
+        let unlike = compare_documents(&bare, "[1,2]", &bare, "[1]").unwrap();
+        assert_eq!(unlike.first.unwrap().path, THE_DOCUMENT);
+        let mut odd = mezura.clone();
+        odd.volatile = vec!["a..b".to_string()];
+        odd.path = Path::new("my.toml").to_path_buf();
+        let refused = compare_documents(&mezura, one, &odd, two).unwrap_err();
+        assert!(
+            refused.contains("my.toml: volatile = \"a..b\" is not a path"),
+            "{refused}"
+        );
+        assert!(
+            compare_documents(&bare, "{", &bare, two)
+                .unwrap_err()
+                .contains("not JSON")
+        );
+        assert_eq!(
+            find_absent_volatile_paths(&mezura, one).unwrap(),
+            ["performance"]
+        );
+        assert!(find_absent_volatile_paths(&odd, one).is_err());
     }
 
     #[test]

@@ -60,6 +60,14 @@ address, a limit that shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TO
 the token goes to that one call and never to a download. The workflow sets the token Actions
 provides.
 
+`setup --newest` fetches the newest release of each counter in place of the version its
+definition pins, for every counter or for those named by `--counters`, and records that pin
+in the manifest beside the binary. From then on that version is the one in effect for every
+command on this machine, until the definition itself catches up with it or passes it, when
+every command says the pin is set aside; `check` says which counter is pinned this way. A
+definition that comes from `--add` is left alone, with a line. A plain `setup` keeps the pin.
+To go back, remove the counter's entry from `linebench-fetched.toml` and run `setup` again.
+
 Then, on Linux and macOS:
 
 ```
@@ -105,8 +113,9 @@ Such a run is recorded as unpinned, named after the directory, and the counters'
 compared with each other; the flag is refused beside `--corpus`, since a definition says its
 own extensions.
 
-The counters directory is where `setup` puts what it fetches, with the manifest of hashes
-beside the binaries and the copies of your own builds under `given/`; the setting is only for
+The counters directory is where `setup` puts what it fetches, with the manifest of hashes,
+and of any `--newest` pin, beside the binaries and the copies of your own builds under
+`given/`; the setting is only for
 keeping them elsewhere, say under a Defender exclusion path. Results go one
 `results/<corpus>/<system>/<stamp>/` per run, with `results/README.md` as the page over all of
 them. `--add` takes a counter or a corpus `.toml`, or a directory of them, read beside the
@@ -180,6 +189,14 @@ arguments beside the release as it is. Arguments make an instance of their own, 
 carries a tag, and a changed `args` sets a run aside in "since the last run" the way changed
 same-work flags do.
 
+`--expect-identical mezura=mezura@dev` (pairs, comma separated) checks that two instances of
+one counter printed the same JSON, in both tables, before any timing starts. The fields the
+counter's definition lists as `volatile` (a timestamp, its version, its own timing) are set
+aside, lists of objects are compared regardless of their order, and the first difference is
+named with both values. The verdict is printed, kept in the record and shown on the page, and
+a run where the two differ exits 1 once everything is written: the times still stand, the
+claim that the work was the same does not.
+
 The tag is a column name. The bytes are identified afresh on every run by the hash and the
 version line in the record, so a stale entry cannot describe the wrong binary. A run holding
 any given instance is written under `results/local/`, which is gitignored, and the results page
@@ -214,8 +231,21 @@ the corpus:
    lines   mezura 36,036,878   scc 36,013,098   tokei 36,022,156
    within 1.0% of the corpus
 
+>> releases
+   mezura      3.0.0 is the newest release
+   scc         the newest release is 4.1.0; the definition pins 4.0.0; setup --counters scc --newest fetches it
+   tokei       14.0.0 is the newest crates.io release
+
 all good.
 ```
+
+The `releases` lines say whether the version each definition pins is still the newest one
+published: one lookup per counter, on the channel the definition fetches from, GitHub's
+releases or crates.io. The lookups run beside the counters, each times out after ten seconds,
+and their answers are kept for six hours beside the fetched binaries, since GitHub allows an
+address sixty anonymous calls an hour; a token in `GITHUB_TOKEN` goes to GitHub alone. A
+lookup that fails prints why, in yellow, and the check passes all the same. Nothing is fetched
+here: the pinned version stays what the definition says until someone changes it.
 
 The `corpus` number is the reference: the file count the corpus definition declares for its
 commit, `files = 63765`, so "who is off" has an answer with two instances or with one. Lines
@@ -257,6 +287,52 @@ process or a cache that was still settling gets that one chance to have gone awa
 
 A real run samples the background the same way before it measures anything and records it.
 
+## insights
+
+```
+linebench insights
+```
+
+Measurements that each need their own executions over their own target, kept out of a run where
+they would lengthen it and disturb it. The first of them is the floor, what a counter costs
+before it has counted anything.
+
+For every counter it times three things, thirty runs and no settle: the version answer,
+`<counter> --version`, and the two ready floors, the run's own t1 and t2 flags over a git
+repository holding no files, made in the temp directory and removed on the way out. The
+repository is a git one because cloc's equal-work flags shell out to `git ls-files`.
+
+The version command carries the binary and its version flag alone, so two instances that ride one
+binary, an `--args` instance beside the release it rides on, produce the same command. It is timed
+once and printed on both rows. A build of your own is its own file, so it is timed on its own. The
+ready floors carry each instance's arguments, which is where a flag that changes the setting up
+shows itself.
+
+```
+   instance  --version      ready t1       ready t2
+   mezura    25.1 ms ± 0.5  32.1 ms ± 0.7  31.7 ms ± 0.8
+   scc       28.1 ms ± 0.7  28.9 ms ± 0.8  28.8 ms ± 0.8
+   tokei     9.5 ms ± 0.4   16.1 ms ± 0.9  16.1 ms ± 1.2
+
+   --version       the binary answering its version flag and quitting
+   ready t1, t2    the same binary over a target with no files, its report printed
+```
+
+The ready floor holds everything a counter does when it has nothing to count, the printing of its
+empty report included, so it is a cost of its own with no clean startup to be read off it: a run
+subtracts nothing, and the only clean split of the phases is one a counter times for itself. A
+version answer stops where each counter decides to stop, one of them parsing a flag and another
+building its language table first, so the columns of a single row compare with each other while
+the version column of two rows does not. What the two columns of one row do say is how much of a
+counter's floor is the runtime it ships on: tokei answers in 9.5 of the 16.1 it needs to be ready,
+while cloc, where the corpus keeps it, answers in 165 of its 198, because a Perl interpreter comes
+up before any of cloc's own code runs.
+
+The times are wall clock. Windows charges cpu time in ticks of 15.625 ms, so at this scale a
+single run's user and system split is a coin toss, and the table carries no cpu columns.
+
+Nothing is written yet: the numbers are printed, and the scratch repository is removed.
+
 ## Counters and corpora
 
 A counter is `counters/<name>.toml`. Its keys mirror the linejudge adapter where the idea is
@@ -296,7 +372,11 @@ blanks   = "Blank"
 that matches an extension by its exact case says `extension-case = "exact"`, and `{extensions}`
 is then spelled as written, in lower case and in upper case, `s,S`; the default is `any`, for a
 counter that ignores case. `same-work` is what the same-work table adds, and `same-work-note`
-is what the results page prints for it. `scrub-env` names variables removed from the counter's
+is what the results page prints for it. `volatile` names the fields of the counter's JSON that
+differ between two runs or two builds of it (a timestamp, the version, its own timing), in the
+`[read]` path syntax, so that `--expect-identical` can set them aside; `check` warns about one
+that sits nowhere in what the counter printed. `scrub-env` names variables removed from the
+counter's
 environment. `[read]` says where the counts sit in the counter's own JSON, and every bucket
 beyond code and comments is read by name, so one block covers a counter that prints `blanks`
 in one mode and `extra` in another. A counter whose JSON the paths cannot reach declares
@@ -370,7 +450,8 @@ and the methodology and the terms.
 Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
 `summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`,
 hyperfine's own output; `transcript.txt`, everything the run printed; `notes.md`, the
-checklist to fill in by hand, with the "since the last run" block under it. `out/` holds every
+checklist to fill in by hand, with the "since the last run" block under it, and the
+`--against` block when one was asked for. `out/` holds every
 counter's JSON and is deleted once the counts are read; `--keep-raw` keeps it, and then also
 captures each counter's plain output beside the JSON.
 
@@ -396,11 +477,34 @@ stays clear of 1.00 is apart by at least that much. The fastest row prints a pla
 At the end of a run, and on the page, "since the last run" compares every instance's same-work
 time with its own latest earlier measurement on the same machine, at the same corpus commit and
 with the corpus on the same disk, whatever else that run held; earlier runs set aside for
-another cpu, commit or disk are listed with the reason. The control's shift is printed as the
-machine's own movement, so a change is read against it, and everything else that differed
-between the two runs is listed, from the power scheme to the drift and the equal-work verdict,
-per earlier run when the instances anchor on different ones. A given instance whose build
-changed is compared all the same, with the build change on its line.
+another cpu, commit or disk are listed with the reason. An instance with no earlier
+measurement gets its row all the same, with its time and "never measured before on this
+machine". The heading says "same builds" when no compared instance's binary changed; a changed
+one carries `version 4.0.0 -> 4.1.0` on its line, or `build a81c2e5 -> 9b7e4d0` when the
+version stayed the same, as a rebuilt dev build does, and it is compared all the same.
+
+The ± on each change is the σ of the ratio now/then by the same propagation as **vs fastest**,
+fed with each mean's own σ: a mean of n runs is known to σ/√n, and the two orders are pooled
+with half their gap kept whole. The run-to-run σ the tables print would be five times too wide
+for a question about two means. The control's shift is printed the same way as the machine's
+own movement, and "the machine itself moved" is said when that shift sits outside its own ±. A
+change is judged against it: "within the noise" means the change minus the machine's shift is
+inside the combined σ of the two, so a run with the same binaries on a quieter machine reads as
+within the noise on every line, with the control line saying how far the machine itself went.
+A control that drifted 4% cannot know the machine's shift to better than about 2%, and the ±
+on its line says so. Everything else that differed between the two runs is listed, from the
+power scheme to the drift and the equal-work verdict, per earlier run when the instances
+anchor on different ones.
+
+`run --against <stamp>` adds a second block under it, read against that one run whatever
+came between, for the sum of a series of changes: the stamp is the run's directory name, as
+`done.` prints it. Same rows and rules, with the machine's shift taken over the same span,
+"not in <stamp>" for an instance that run did not hold, and "the run above" when the since
+block already reads every row against it. A run on another platform, over another corpus,
+on another cpu, commit or disk, or recorded after this one, is named as not comparable with
+the reason. The stamp is checked before the
+machine is prepared, and a run that would be published cannot name a local one. The block goes
+to the terminal and to `notes.md`; the results page does not carry it.
 
 On Windows the record also carries the Defender state: real-time protection, whether the
 corpus sits under an exclusion path, and per instance whether its process and its binary are

@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use std::process;
 
 use linebench::counters::Definition;
+use linebench::fetch::read_manifest;
 use linebench::machine::{Platform, detect_platform};
+use linebench::newest::apply_newest_pins;
 
 use crate::config::{
     Command, Locations, Options, check_skip_names, find_config, find_data_dir, parse_args,
@@ -35,6 +37,7 @@ commands
   check     run every counter once, read its counts back, and compare them with the corpus
   noise     sample the machine's background load and the run-to-run spread, before committing to a run
   run       measure, and write the record, the csv files, the notes and the results page
+  insights  measure what a run cannot, beginning with the floor each counter pays before it counts
   report    rewrite the results page from the records that are there
   help      this
   version   the version
@@ -52,9 +55,11 @@ what a run measures
   --given <c>@<tag>=<path>    a build of counter <c> measured as the instance <c>@<tag>, copied before it is timed
   --definition <c>@<tag>=<f>  the definition that instance runs under, when its flags differ from the release's
   --args <c>@<tag>=<text>     arguments of that instance's own, split on spaces, right after the target; with no --given they ride on the release
+  --expect-identical a=b,c=d  pairs of instances of one counter whose JSON output has to match, volatile fields aside; a run where they differ exits 1
   --control <instance>        the instance timed alone at both ends of the run; default control = in the conf, else the first
 
 setup
+  --newest                    fetch each counter's newest release in place of the version its definition pins, and keep that pin beside the binary
   --allow-elevated            fetch as administrator or root all the same, where there is no ordinary user, as on a CI runner
 
 run
@@ -63,6 +68,7 @@ run
   --yes                       do not ask before measuring an unprepared machine
   --allow-unequal-exclusions  measure even when MS Defender excludes some counters and not others
   --keep-raw                  keep every counter's printed output beside the record
+  --against <stamp>           a second since block read against that earlier run, whatever came between; the stamp is the run's directory name
 ";
 
 fn main() {
@@ -118,6 +124,16 @@ fn dispatch() -> Result<i32, String> {
                 resolved.platform,
             )
         }
+        Command::Insights => {
+            let resolved = resolve_everything(&mut out, &options)?;
+            commands::run_insights(
+                &mut out,
+                &options,
+                &resolved.locations,
+                &resolved.definitions,
+                resolved.platform,
+            )
+        }
         Command::Run => {
             let resolved = resolve_everything(&mut out, &options)?;
             commands::run_benchmark(
@@ -146,7 +162,7 @@ fn resolve_everything(out: &mut dyn Write, options: &Options) -> Result<Resolved
     let config_path = find_config();
     let config = read_config(&config_path)?;
     let added: Vec<PathBuf> = config.add.iter().chain(&options.add).cloned().collect();
-    let definitions = collect_definitions(out, &added)?;
+    let mut definitions = collect_definitions(out, &added)?;
     check_skip_names(&config.skip, &definitions.counters, &config_path)?;
     let locations = resolve_locations(
         options,
@@ -155,6 +171,10 @@ fn resolve_everything(out: &mut dyn Write, options: &Options) -> Result<Resolved
         &definitions.corpora,
         data_dir.as_deref(),
     )?;
+    let manifest = read_manifest(&locations.counters_dir)?;
+    for line in apply_newest_pins(&mut definitions.counters, &manifest) {
+        print_line(out, &line)?;
+    }
     Ok(Resolved {
         platform,
         locations,
