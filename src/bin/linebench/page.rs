@@ -1235,7 +1235,7 @@ mod tests {
     use std::env;
 
     use linebench::counters::Channel;
-    use linebench::defender::{Answer, DefenderState};
+    use linebench::defender::DefenderState;
     use linebench::fetch::Identity;
     use linebench::machine::Machine;
     use linebench::measure::{FORWARD, REVERSE, get_set_name};
@@ -1893,7 +1893,6 @@ mod tests {
             },
             defender: DefenderState {
                 realtime: "not applicable".to_string(),
-                corpus_excluded: Answer::NotApplicable,
                 counters: BTreeMap::new(),
             },
             background_busy_percent: Some(1.0),

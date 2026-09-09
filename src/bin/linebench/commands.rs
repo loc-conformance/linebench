@@ -466,7 +466,7 @@ pub fn run_benchmark(
         None => None,
     };
     let binaries = collect_binaries(&instances, platform)?;
-    let defender = read_defender_state(platform, privileged, &locations.checkout, &binaries);
+    let defender = read_defender_state(platform, privileged, &binaries);
     let unequal = match find_unequal_exclusions(&defender) {
         Some(unequal) if !options.allow_unequal => {
             return Err(explain_unequal_exclusions(&unequal));
@@ -1221,7 +1221,6 @@ fn check_everything(
     let state = read_defender_state(
         platform,
         is_privileged(platform),
-        &locations.checkout,
         &collect_binaries(instances, platform)?,
     );
     if platform == Platform::Windows {
@@ -1252,20 +1251,6 @@ fn check_everything(
                 ),
             )?,
         }
-        print_line(
-            out,
-            &format!(
-                "   corpus      {}",
-                match state.corpus_excluded.as_str() {
-                    "yes" => "under a Defender exclusion path".to_string(),
-                    other => paint(
-                        Color::Yellow,
-                        &format!("not under any Defender exclusion path ({other})")
-                    )
-                    .to_string(),
-                }
-            ),
-        )?;
     }
     let counted_by_git = match (locations.corpus.is_pinned(), locations.corpus.files) {
         (true, None) => Some(count_tracked_files(

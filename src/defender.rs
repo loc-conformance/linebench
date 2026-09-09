@@ -58,7 +58,6 @@ pub struct Exclusions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefenderState {
     pub realtime: String,
-    pub corpus_excluded: Answer,
     pub counters: BTreeMap<String, Exclusions>,
 }
 
@@ -94,12 +93,10 @@ pub fn judge_process_exclusions(state: &DefenderState) -> ProcessExclusions {
 pub fn read_defender_state(
     platform: Platform,
     privileged: bool,
-    corpus: &Path,
     binaries: &[CounterBinary],
 ) -> DefenderState {
     let everywhere = |answer: Answer| DefenderState {
         realtime: answer.as_str().to_string(),
-        corpus_excluded: answer,
         counters: binaries
             .iter()
             .map(|binary| {
@@ -133,9 +130,6 @@ pub fn read_defender_state(
         processes.map(|list| list.iter().map(|entry| normalize_path(entry)).collect());
     let paths: Option<Vec<String>> =
         paths.map(|list| list.iter().map(|entry| normalize_path(entry)).collect());
-    let corpus_excluded = paths
-        .as_deref()
-        .map_or(unknown, |roots| Answer::of(sits_under(corpus, roots)));
     let counters = binaries
         .iter()
         .map(|binary| {
@@ -157,11 +151,7 @@ pub fn read_defender_state(
             )
         })
         .collect();
-    DefenderState {
-        realtime,
-        corpus_excluded,
-        counters,
-    }
+    DefenderState { realtime, counters }
 }
 
 pub fn find_unequal_exclusions(state: &DefenderState) -> Option<String> {
@@ -317,7 +307,6 @@ mod tests {
         };
         let mut state = DefenderState {
             realtime: "True".to_string(),
-            corpus_excluded: Answer::No,
             counters: BTreeMap::from([
                 ("cloc".to_string(), known(false, false)),
                 ("mezura".to_string(), known(true, false)),

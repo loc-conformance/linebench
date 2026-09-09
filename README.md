@@ -225,7 +225,6 @@ the corpus:
    hyperfine   ok
    git         ok   2.51.0.windows.1
    MS Defender ok, every counter excluded
-   corpus      under a Defender exclusion path
 
    files   corpus 63,765   mezura 63,864   scc 63,724   tokei 63,782
    lines   mezura 36,036,878   scc 36,013,098   tokei 36,022,156
@@ -506,9 +505,8 @@ the reason. The stamp is checked before the
 machine is prepared, and a run that would be published cannot name a local one. The block goes
 to the terminal and to `notes.md`; the results page does not carry it.
 
-On Windows the record also carries the Defender state: real-time protection, whether the
-corpus sits under an exclusion path, and per instance whether its process and its binary are
-excluded. **Unequal exclusions refuse the run**, because files opened by an excluded process
+On Windows the record also carries the Defender state: real-time protection, and per
+instance whether its process and its binary are excluded. **Unequal exclusions refuse the run**, because files opened by an excluded process
 are never scanned and the comparison would measure who escaped the antivirus.
 `--allow-unequal-exclusions` measures anyway and marks the record, the notes and the page.
 Reading the lists needs an elevated shell; unelevated, the record says `needs admin`.
