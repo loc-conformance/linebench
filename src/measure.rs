@@ -23,6 +23,7 @@ pub const FORWARD: &str = "fwd";
 pub const REVERSE: &str = "rev";
 pub const TABLES: [Table; 2] = [Table::SameWork, Table::OutOfTheBox];
 const HYPERFINE: &str = "hyperfine";
+pub const WARNING_LABEL: &str = "WARNING: ";
 const WARNING_PREFIX: &str = "Warning:";
 const ERROR_PREFIX: &str = "Error";
 const ESCAPE: char = '\x1b';
@@ -201,14 +202,17 @@ impl Runner {
             .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
         let stderr = relayed?;
         for warning in find_warnings(&stderr) {
-            print_line(out, &format!("WARNING: {HYPERFINE} on {name}: {warning}"))?;
+            print_line(
+                out,
+                &format!("{WARNING_LABEL}{HYPERFINE} on {name}: {warning}"),
+            )?;
             self.warnings.push(format!("{name}: {warning}"));
         }
         if !status.success() {
             let detail = find_error(&stderr);
             print_line(
                 out,
-                &format!("WARNING: {HYPERFINE} reported a problem on {name}: {detail}"),
+                &format!("{WARNING_LABEL}{HYPERFINE} reported a problem on {name}: {detail}"),
             )?;
             self.failures.push(name.to_string());
         }
@@ -253,7 +257,7 @@ impl Runner {
             print_line(
                 out,
                 &format!(
-                    "WARNING: what {name} printed on stderr could not be kept in {}: {error}",
+                    "{WARNING_LABEL}what {name} printed on stderr could not be kept in {}: {error}",
                     path.display()
                 ),
             )?;
@@ -267,7 +271,7 @@ impl Runner {
             print_line(
                 out,
                 &format!(
-                    "WARNING: {} exited {exit} while writing {label}",
+                    "{WARNING_LABEL}{} exited {exit} while writing {label}",
                     program.display()
                 ),
             )?;
@@ -337,7 +341,7 @@ pub fn capture_plain_output(
     {
         print_line(
             out,
-            &format!("WARNING: the plain output captures stopped: {refused}"),
+            &format!("{WARNING_LABEL}the plain output captures stopped: {refused}"),
         )?;
     }
     Ok(())

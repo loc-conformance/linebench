@@ -38,8 +38,9 @@ pub fn build_instances(
                     print_warning(
                         out,
                         &format!(
-                            "{name} is named, and the corpus definition leaves it out on \
-                             {system}; it runs all the same"
+                            "{name} runs because --counters names it. The {} \
+                             definition leaves it out on {system}",
+                            corpus.name
                         ),
                     )?;
                 }

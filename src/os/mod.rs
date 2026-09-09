@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,8 @@ const PROC_STAT: &str = "/proc/stat";
 #[cfg(unix)]
 const PROC_SELF: &str = "/proc/self";
 const CPU_LINE: &str = "cpu ";
+const RSS_LINE: &str = "VmRSS:";
+const PEAK_LINE: &str = "VmHWM:";
 const IDLE_COLUMN: usize = 3;
 const IOWAIT_COLUMN: usize = 4;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -128,6 +130,19 @@ pub fn is_privileged(platform: Platform) -> bool {
 }
 
 #[cfg(windows)]
+pub fn read_process_memory(_platform: Platform, child: &Child) -> Option<(u64, u64)> {
+    windows::read_process_memory(child)
+}
+
+#[cfg(unix)]
+pub fn read_process_memory(platform: Platform, child: &Child) -> Option<(u64, u64)> {
+    if !platform.is_linux() {
+        return None;
+    }
+    parse_proc_status(&fs::read_to_string(format!("/proc/{}/status", child.id())).ok()?)
+}
+
+#[cfg(windows)]
 pub fn read_system_times(_platform: Platform) -> Option<(u64, u64)> {
     windows::read_system_times()
 }
@@ -138,6 +153,17 @@ pub fn read_system_times(platform: Platform) -> Option<(u64, u64)> {
         return None;
     }
     parse_proc_stat(&fs::read_to_string(PROC_STAT).ok()?)
+}
+
+pub fn parse_proc_status(text: &str) -> Option<(u64, u64)> {
+    let read = |key: &str| {
+        text.lines()
+            .find(|line| line.starts_with(key))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
+            .map(|kilobytes| kilobytes * 1024)
+    };
+    Some((read(RSS_LINE)?, read(PEAK_LINE)?))
 }
 
 pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
@@ -165,6 +191,28 @@ mod tests {
         assert_eq!(parse_proc_stat(text), Some((16770, 22775)));
         assert_eq!(parse_proc_stat("cpu  1 2 3\n"), None);
         assert_eq!(parse_proc_stat("intr 5\n"), None);
+    }
+
+    #[test]
+    fn the_resident_size_and_the_high_water_mark_come_out_of_proc_status_in_bytes() {
+        let text = "Name:	tokei
+VmRSS:	   45208 kB
+VmHWM:	   61440 kB
+Threads:	16
+";
+        assert_eq!(
+            parse_proc_status(text),
+            Some((45_208 * 1024, 61_440 * 1024))
+        );
+        assert_eq!(
+            parse_proc_status(
+                "Name:	tokei
+VmRSS:	 45208 kB
+"
+            ),
+            None
+        );
+        assert_eq!(parse_proc_status(""), None);
     }
 
     #[test]

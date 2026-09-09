@@ -4,6 +4,7 @@ use std::path::Path;
 
 use colored::{ColoredString, Colorize, control};
 
+use linebench::measure::WARNING_LABEL;
 pub use linebench::measure::print_line;
 use linebench::measure::{Style, strip_ansi};
 
@@ -42,8 +43,20 @@ impl Output {
 
 impl Write for Output {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let _ = io::stdout().write_all(bytes);
-        let plain = strip_ansi(&String::from_utf8_lossy(bytes));
+        let text = String::from_utf8_lossy(bytes);
+        match text.strip_prefix(WARNING_LABEL) {
+            Some(rest) => {
+                let _ = write!(
+                    io::stdout(),
+                    "{}{rest}",
+                    paint(Color::Yellow, WARNING_LABEL)
+                );
+            }
+            None => {
+                let _ = io::stdout().write_all(bytes);
+            }
+        }
+        let plain = strip_ansi(&text);
         match &mut self.transcript {
             Some(file) => {
                 let _ = file.write_all(plain.as_bytes());
@@ -91,10 +104,7 @@ pub fn print_header(out: &mut dyn Write, title: &str) -> Result<(), String> {
 }
 
 pub fn print_warning(out: &mut dyn Write, message: &str) -> Result<(), String> {
-    print_line(
-        out,
-        &format!("{}{message}", paint(Color::Yellow, "WARNING: ")),
-    )
+    print_line(out, &format!("{WARNING_LABEL}{message}"))
 }
 
 pub fn paint(color: Color, text: &str) -> ColoredString {

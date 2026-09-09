@@ -18,4 +18,5 @@
 
 /results/**/out/
 /results/local/
+/results/insights/local/
 /linebench.conf

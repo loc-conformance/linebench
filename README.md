@@ -292,45 +292,71 @@ A real run samples the background the same way before it measures anything and r
 linebench insights
 ```
 
-Measurements that each need their own executions over their own target, kept out of a run where
-they would lengthen it and disturb it. The first of them is the floor, what a counter costs
-before it has counted anything.
+Measurements that each want their own executions over their own target, kept out of a run where
+they would lengthen it and disturb it.
 
-For every counter it times three things, thirty runs and no settle: the version answer,
-`<counter> --version`, and the two ready floors, the run's own t1 and t2 flags over a git
-repository holding no files, made in the temp directory and removed on the way out. The
-repository is a git one because cloc's equal-work flags shell out to `git ls-files`.
+### The floor
 
-The version command carries the binary and its version flag alone, so two instances that ride one
-binary, an `--args` instance beside the release it rides on, produce the same command. It is timed
-once and printed on both rows. A build of your own is its own file, so it is timed on its own. The
-ready floors carry each instance's arguments, which is where a flag that changes the setting up
-shows itself.
+What a counter costs before it has counted anything. Three timings per instance, thirty runs and no
+settle: the version answer, `<counter> --version`, and the two ready floors, the run's own t1 and t2
+flags over a git repository holding no files, made in the temp directory and removed on the way out.
+It is a git repository because cloc's equal-work flags shell out to `git ls-files`.
 
 ```
+== floor summary
    instance  --version      ready t1       ready t2
-   mezura    25.1 ms ± 0.5  32.1 ms ± 0.7  31.7 ms ± 0.8
-   scc       28.1 ms ± 0.7  28.9 ms ± 0.8  28.8 ms ± 0.8
-   tokei     9.5 ms ± 0.4   16.1 ms ± 0.9  16.1 ms ± 1.2
+   mezura    10.9 ms ± 1.0  16.7 ms ± 1.1  16.5 ms ± 1.1
+   scc       21.3 ms ± 1.7  18.7 ms ± 1.8  19.2 ms ± 2.3
+   tokei     5.5 ms ± 0.6   11.2 ms ± 0.8  11.1 ms ± 1.2
 
    --version       the binary answering its version flag and quitting
    ready t1, t2    the same binary over a target with no files, its report printed
 ```
 
-The ready floor holds everything a counter does when it has nothing to count, the printing of its
-empty report included, so it is a cost of its own with no clean startup to be read off it: a run
-subtracts nothing, and the only clean split of the phases is one a counter times for itself. A
-version answer stops where each counter decides to stop, one of them parsing a flag and another
-building its language table first, so the columns of a single row compare with each other while
-the version column of two rows does not. What the two columns of one row do say is how much of a
-counter's floor is the runtime it ships on: tokei answers in 9.5 of the 16.1 it needs to be ready,
-while cloc, where the corpus keeps it, answers in 165 of its 198, because a Perl interpreter comes
-up before any of cloc's own code runs.
+Two instances riding one binary give the same version command, so it is timed once and printed on
+both rows. The ready floors carry each instance's arguments, which is where a flag that changes the
+setting up shows itself.
 
-The times are wall clock. Windows charges cpu time in ticks of 15.625 ms, so at this scale a
-single run's user and system split is a coin toss, and the table carries no cpu columns.
+That table is one session on Windows. The ready floor holds everything a counter does with nothing
+to count, its empty report included, so a run subtracts nothing from it. The two columns of one row
+say how much of a floor is the runtime it ships on: tokei answers its version in 5.5 of the 11.2 it
+needs to be ready, cloc in 141 of its 167, because a Perl interpreter comes up before any of cloc's
+own code runs. Down a column the numbers say less, since each counter stops answering `--version`
+at a point of its own: scc spends 21.3 ms there, longer than the 18.7 it needs to be ready.
 
-Nothing is written yet: the numbers are printed, and the scratch repository is removed.
+The times are wall clock, and the table carries no cpu columns.
+
+### The memory
+
+One execution per instance over the corpus with the t1 flags, outside hyperfine and never timed.
+linebench starts the counter and asks the system every 2 ms what it holds: `GetProcessMemoryInfo`
+on Windows, `/proc/<pid>/status` on Linux. The peak is exact, from `PeakWorkingSetSize` and
+`VmHWM`, so a peak between two samples survives. macOS takes no samples yet.
+
+![the memory mezura holds over the kernel](assets/screenshots/memory_sample.png)
+
+Every column stands at the highest reading in it, so a spike of one sample is drawn where it
+happened. The axis top comes off a ladder, 10, 20, 50, 100, 200, 500 MB and 1 GB, and a counter
+takes the first rung its peak fits in; a peak past the ladder is rounded up. Two counters on one
+rung are drawn against the same ruler, so their heights compare directly: 127 MB and 190 MB both
+stand on the 200 MB rung, four rows against six. Nothing looks at the other counters of the
+session, so a counter is drawn the same whoever else ran.
+
+Every rung owns a colour, blue at 10 MB through amber at 200 to fuchsia at 1 GB, and a height
+between two rungs is mixed from theirs, so 200 MB is the same amber in every session. The numbers
+down the side carry the colour of their own height.
+
+The time along the axis is that one execution, which carries the polling and starts cold, so it is
+longer than a timed run. A run under three seconds writes every reading it took; a longer one is
+folded to 120 values, each the highest of its slice. The peak is written on its own.
+
+### Where the numbers go
+
+`results/insights/<corpus>/<system>/<stamp>/insights.json`, beside `results/local/`, with the
+hyperfine exports kept next to it. It carries its own machine block, the Defender state, the corpus
+with its commit and the instances measured, so it stands on its own. An `--args` instance or a
+build of yours sends the session under `results/insights/local/`. Unequal Defender exclusions
+refuse the command the way they refuse a run, since one counter's floor is printed under another's.
 
 ## Counters and corpora
 
@@ -415,7 +441,7 @@ as an equal-work problem, which is the point of the reference. `[skip]` names, p
 counters left out of the default set over this corpus, with WSL counting as linux: cloc takes
 about 90 s per run over the kernel on Windows, so a plain `run` there would be two hours of
 cloc. `check` follows the same default, so a skipped counter is checked over that corpus by
-naming it. A counter named in `--counters` runs all the same, with a warning. For one machine
+naming it. A counter named in `--counters` runs, with a warning saying so. For one machine
 over every corpus, `skip = ["cloc"]` in `linebench.conf` does the same, and `setup` then
 leaves the counter unfetched too. The record and the page say which counters
 were left out of a run and why, whether by the corpus or because they were not set up on the
@@ -437,11 +463,13 @@ results/
 ├── README.md
 ├── linux/linux/20260904-120000/
 ├── linux/windows/20260904-130000/
-└── local/linux/windows/20260904-140000/
+├── local/linux/windows/20260904-140000/
+└── insights/linux/windows/20260904-150000/
 ```
 
 One directory per corpus, then per platform, then per run, named by its UTC timestamp.
-Nothing is ever overwritten. `results/README.md` is the page, rewritten after every run and
+Nothing is ever overwritten. `insights/` holds the insight sessions in the same shape, and the page
+walks past it. `results/README.md` is the page, rewritten after every run and
 on demand with `report`: the latest run per corpus and platform with its machine, its two
 tables and its trust checks, every run once there is more than one, the local builds apart,
 and the methodology and the terms.

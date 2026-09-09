@@ -18,6 +18,7 @@ use crate::measure::{Instance, Table, get_set_name};
 use crate::read::Counts;
 
 pub const RECORD_FORMAT: u32 = 2;
+pub const LOCAL_DIR: &str = "local";
 pub const RECORD_FILE: &str = "run.json";
 pub const SUMMARY_CSV: &str = "summary.csv";
 pub const COUNTS_CSV: &str = "counts.csv";

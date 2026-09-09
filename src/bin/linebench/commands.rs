@@ -17,8 +17,11 @@ use linebench::defender::{
     find_unequal_exclusions, judge_process_exclusions, read_defender_state,
 };
 use linebench::fetch::{fetch_counter, read_manifest};
-use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, VERSION_SET};
-use linebench::insight::{format_floor, get_floor_set_name};
+use linebench::insight::Insights;
+use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, VERSION_SET};
+use linebench::insight::{
+    build_insights_path, format_floor, format_memory, get_floor_set_name, write_insights,
+};
 use linebench::machine::{
     Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
 };
@@ -34,28 +37,30 @@ use linebench::newest::{
 };
 use linebench::os::{capture_with_status, is_privileged};
 use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts};
-use linebench::record::RECORD_FORMAT;
 use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
     calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
     format_summary_tables, format_thousands, format_utc_date, format_utc_stamp,
     read_seconds_since_epoch, shorten_version, write_csvs, write_notes, write_record,
 };
+use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
+use linebench::sample::sample_memory;
 
 use crate::config::{Locations, Options};
 use crate::instances::build_instances;
 use crate::output::{
     Color, Output, get_report_style, paint, print_header, print_line, print_warning,
 };
+use crate::page::PAGE_FILE;
 use crate::page::{
     Collected, FoundRun, collect_records, find_named_run, format_against, format_since,
     write_results_page,
 };
-use crate::page::{LOCAL_DIR, PAGE_FILE};
 use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const FLOOR_TARGET: &str = "floor";
+const MEMORY_TABLE: Table = Table::SameWork;
 const NOISE_RUNS: u32 = 5;
 const NOISE_RETRY_SECONDS: u64 = 5;
 const UNSTEADY_STEP: usize = 2;
@@ -575,21 +580,58 @@ pub fn run_insights(
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
+    check_commit(&locations.corpus, &locations.checkout)?;
     let chosen = build_instances(out, definitions, locations, options, platform)?;
     let instances = chosen.instances;
+    let defender = read_defender_state(
+        platform,
+        is_privileged(platform),
+        &collect_binaries(&instances, platform)?,
+    );
+    let unequal = match find_unequal_exclusions(&defender) {
+        Some(unequal) if !options.allow_unequal => {
+            return Err(explain_unequal_exclusions(&unequal));
+        }
+        Some(unequal) => {
+            print_warning(
+                out,
+                &format!("measuring with unequal MS Defender exclusions: {unequal}"),
+            )?;
+            Some(unequal)
+        }
+        None => None,
+    };
+    let now = read_seconds_since_epoch();
+    let stamp = format_utc_stamp(now);
+    let res = build_insights_path(
+        &locations.out,
+        &locations.corpus.name,
+        platform,
+        &stamp,
+        instances.iter().any(Instance::is_an_experiment),
+    );
+    if res.exists() {
+        return Err(format!(
+            "{} is already there, refusing to write over it",
+            res.display()
+        ));
+    }
+    fs::create_dir_all(&res)
+        .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
     let scratch = Scratch::create("insights")?;
     let target = create_empty_repository(scratch.get_path())?;
+    let scrub = collect_scrub(&instances);
     print_header(out, "== floor")?;
     let mut runner = Runner::new(
-        scratch.get_path(),
+        &res,
         Settings {
             warmup: FLOOR_WARMUP,
             runs: FLOOR_RUNS,
             settle: 0,
         },
         platform,
-        collect_scrub(&instances),
-        get_report_style(),
+        scrub.clone(),
+        Style::Hidden,
     );
     let mut distinct: Vec<(String, String)> = Vec::new();
     let mut versions: Vec<(String, String)> = Vec::new();
@@ -612,14 +654,63 @@ pub fn run_insights(
         print_line(out, "")?;
         runner.run_hyperfine(out, &get_floor_set_name(table), &commands)?;
     }
-    let (measurements, skipped) = collect_measurements(scratch.get_path(), &runner.commands, &[])?;
+    let (measurements, skipped) = collect_measurements(&res, &runner.commands, &[])?;
     for message in &skipped {
         print_warning(out, message)?;
     }
-    print_line(out, "")?;
+    print_header(out, "== floor summary")?;
     for line in format_floor(&measurements, &versions) {
+        print_line(out, &paint_table_line(&line))?;
+    }
+    print_line(out, "")?;
+    print_header(out, "== memory")?;
+    let mut curves = Vec::new();
+    for instance in &instances {
+        let args = build_args(
+            instance,
+            &locations.checkout,
+            &locations.corpus.extensions,
+            MEMORY_TABLE,
+            false,
+        )?;
+        print_line(out, &format!(">> {}", instance.get_name()))?;
+        match sample_memory(
+            platform,
+            instance.get_name(),
+            MEMORY_TABLE,
+            &instance.identity.binary,
+            &args,
+            &scrub,
+        ) {
+            Ok(curve) => curves.push(curve),
+            Err(refused) => print_warning(out, &refused)?,
+        }
+    }
+    print_header(out, "== memory summary")?;
+    for line in format_memory(&curves, get_report_style()) {
         print_line(out, &line)?;
     }
+    let insights = Insights {
+        format: INSIGHTS_FORMAT,
+        stamp,
+        date: format_utc_date(now),
+        machine: collect_machine(platform, &locations.checkout),
+        defender,
+        unequal_exclusions: unequal,
+        corpus: build_corpus_record(locations),
+        instances: instances
+            .iter()
+            .map(|instance| InstanceRecord::of(instance, &locations.corpus.extensions))
+            .collect::<Result<Vec<InstanceRecord>, String>>()?,
+        floor: measurements,
+        curves,
+    };
+    write_insights(&res, &insights)?;
+    print_line(out, "")?;
+    print_line(
+        out,
+        &format!("   wrote {}", res.join(INSIGHTS_FILE).display()),
+    )?;
     if runner.failures.is_empty() {
         return Ok(0);
     }
@@ -790,7 +881,6 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         &names,
         locations.corpus.tolerance,
     );
-    let git = read_git_state(&locations.checkout);
     let record = Record {
         format: RECORD_FORMAT,
         stamp: stamp.to_string(),
@@ -799,16 +889,7 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
         defender,
         background_busy_percent: background,
         prepared,
-        corpus: CorpusRecord {
-            name: locations.corpus.name.clone(),
-            checkout: locations.checkout.clone(),
-            commit: locations.corpus.commit.clone(),
-            pinned: locations.corpus.is_pinned()
-                && git.head.as_deref() == Some(locations.corpus.commit.as_str()),
-            head: git.head,
-            clean: git.clean,
-            extensions: locations.corpus.extensions.clone(),
-        },
+        corpus: build_corpus_record(locations),
         settings: RunSettings {
             warmup: settings.warmup,
             runs: settings.runs,
@@ -1329,6 +1410,20 @@ fn time_the_control(
     Ok(fs::read_to_string(scratch.join("noise.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
+}
+
+fn build_corpus_record(locations: &Locations) -> CorpusRecord {
+    let git = read_git_state(&locations.checkout);
+    CorpusRecord {
+        name: locations.corpus.name.clone(),
+        checkout: locations.checkout.clone(),
+        commit: locations.corpus.commit.clone(),
+        pinned: locations.corpus.is_pinned()
+            && git.head.as_deref() == Some(locations.corpus.commit.as_str()),
+        head: git.head,
+        clean: git.clean,
+        extensions: locations.corpus.extensions.clone(),
+    }
 }
 
 fn create_empty_repository(scratch: &Path) -> Result<PathBuf, String> {

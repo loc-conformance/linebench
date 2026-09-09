@@ -5,19 +5,19 @@ use std::path::{Path, PathBuf};
 use linebench::corpus::{Parity, Verdict, format_percent, shorten_hash};
 use linebench::defender::{ProcessExclusions, judge_process_exclusions};
 use linebench::fetch::Origin;
+use linebench::insight::INSIGHTS_DIR;
 use linebench::machine::Platform;
 use linebench::machine::UNKNOWN;
 use linebench::measure::Table;
 use linebench::measure::{CONTROL_END, CONTROL_START, TABLES};
-use linebench::record::RECORD_FILE;
 use linebench::record::{
     InstanceRecord, Pooled, Record, calculate_drift, collect_table_rows,
     describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_wall,
     pool_orders, propagate_ratio_stddev, read_record, shorten_version,
 };
+use linebench::record::{LOCAL_DIR, RECORD_FILE};
 
 pub const PAGE_FILE: &str = "README.md";
-pub const LOCAL_DIR: &str = "local";
 const RUN_DEPTH: usize = 3;
 const LONG_CONTEXT_VALUE: usize = 60;
 const CONTEXT: [(&str, ReadContext); 11] = [
@@ -1218,7 +1218,11 @@ fn collect_run_dirs(base: &Path, depth: usize) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.file_name().is_some_and(|name| name != LOCAL_DIR))
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name != LOCAL_DIR && name != INSIGHTS_DIR)
+        })
         .collect();
     dirs.sort();
     if depth == 1 {

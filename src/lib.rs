@@ -12,3 +12,4 @@ pub mod newest;
 pub mod os;
 pub mod read;
 pub mod record;
+pub mod sample;
