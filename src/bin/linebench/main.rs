@@ -28,7 +28,7 @@ use crate::shipped::collect_definitions;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HELP: &str = "\
-linebench: measure line counters on equal work, with the machine's state beside every number
+linebench: measure line counters fairly, with the machine's state as context
 
 usage: linebench <command> [flags]
 
@@ -60,10 +60,10 @@ what a run measures
 
 setup
   --newest                    fetch each counter's newest release in place of the version its definition pins, and keep that pin beside the binary
-  --allow-elevated            fetch as administrator or root all the same, where there is no ordinary user, as on a CI runner
+  --allow-elevated            fetch as administrator or root. Can be used where there is no ordinary user, like on a CI runner
 
 run
-  --warmup <n> --runs <n> --settle <s>   hyperfine's warmups, timed runs and pause; default 3, 15, 3
+  --warmup <n> --runs <n> --settle <s>   hyperfine's warmups, timed runs and pause. Default: 3, 15, 3
   --no-prep                   leave the power scheme or governor as it is
   --yes                       do not ask before measuring an unprepared machine
   --allow-unequal-exclusions  measure even when MS Defender excludes some counters and not others

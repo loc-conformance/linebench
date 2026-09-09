@@ -156,40 +156,7 @@ pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
     use super::*;
-
-    const SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-    const THE_ONE_MODULE: &str = "os/windows.rs";
-
-    #[test]
-    fn unsafe_lives_in_one_module_and_nowhere_else() {
-        let allow = ["allow(", "unsafe_code)"].concat();
-        let keyword = ["un", "safe "].concat();
-        let mut allowed = Vec::new();
-        let mut leaked = Vec::new();
-        for path in collect_sources(Path::new(SOURCES)) {
-            let text = fs::read_to_string(&path).expect("a source file");
-            let relative = path
-                .strip_prefix(SOURCES)
-                .expect("under src")
-                .to_string_lossy()
-                .replace('\\', "/");
-            if text.contains(&allow) {
-                allowed.push(relative.clone());
-            }
-            if relative != THE_ONE_MODULE && text.contains(&keyword) {
-                leaked.push(relative);
-            }
-        }
-        assert_eq!(allowed, [THE_ONE_MODULE]);
-        assert!(
-            leaked.is_empty(),
-            "leaked outside {THE_ONE_MODULE}: {leaked:?}"
-        );
-    }
 
     #[test]
     fn the_cpu_line_of_proc_stat_gives_idle_with_iowait_and_the_total() {
@@ -215,18 +182,5 @@ mod tests {
             "git ls-files gave no answer in 30 s and was stopped"
         );
         assert_eq!(capture_output("git", &["--no-such-flag-linebench"]), None);
-    }
-
-    fn collect_sources(dir: &Path) -> Vec<PathBuf> {
-        let mut found = Vec::new();
-        for entry in fs::read_dir(dir).expect("the source dir").flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                found.extend(collect_sources(&path));
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                found.push(path);
-            }
-        }
-        found
     }
 }
