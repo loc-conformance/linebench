@@ -177,19 +177,18 @@ pub fn format_memory(curves: &[Curve], style: Style) -> Vec<String> {
             continue;
         }
         let top = get_axis_top(curve.peak_bytes);
-        let gutter = format_bytes(top).chars().count();
+        let gutter = (0..CHART_ROWS)
+            .step_by(LABEL_EVERY)
+            .map(|index| get_label(top, index).chars().count())
+            .max()
+            .unwrap_or_default();
         let columns = fold_into_columns(&curve.samples, CHART_COLUMNS);
         for (index, row) in draw_rows(&columns, top as f64, CHART_ROWS)
             .into_iter()
             .enumerate()
         {
             let edge = top * (CHART_ROWS - index) as u64 / CHART_ROWS as u64;
-            let label = if index % LABEL_EVERY == 0 {
-                format_bytes(edge)
-            } else {
-                String::new()
-            };
-            let side = format!("{label:>gutter$}");
+            let side = format!("{:>gutter$}", get_label(top, index));
             lines.push(format!(
                 "{INDENT}{} \u{2502} {}",
                 tint(&side, edge, style),
@@ -201,6 +200,14 @@ pub fn format_memory(curves: &[Curve], style: Style) -> Vec<String> {
         lines.push(format!("{INDENT}{:>gutter$} {ticks}", ""));
     }
     lines
+}
+
+fn get_label(top: u64, index: usize) -> String {
+    if index.is_multiple_of(LABEL_EVERY) {
+        format_bytes(top * (CHART_ROWS - index) as u64 / CHART_ROWS as u64)
+    } else {
+        String::new()
+    }
 }
 
 fn lay_out_ticks(wall_ms: u64, width: usize) -> (String, String) {
@@ -491,6 +498,20 @@ mod tests {
             .map(|(side, _)| side.trim().to_string())
             .collect();
         assert_eq!(sides, ["500 MB", "", "333 MB", "", "167 MB", ""]);
+    }
+
+    #[test]
+    fn every_row_of_a_chart_hangs_its_bars_at_the_same_column() {
+        let lines = format_memory(&[build_curve("cloc", 7 * MEGABYTE)], Style::Plain);
+        let places: Vec<usize> = lines
+            .iter()
+            .filter_map(|line| line.find('\u{2502}'))
+            .collect();
+        assert_eq!(places.len(), CHART_ROWS);
+        assert!(
+            places.windows(2).all(|pair| pair[0] == pair[1]),
+            "{places:?}"
+        );
     }
 
     #[test]
