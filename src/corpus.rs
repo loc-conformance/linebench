@@ -640,12 +640,18 @@ mod tests {
     fn the_shipped_corpora_parse_and_the_tolerance_is_a_percentage() {
         let corpora = read_corpora(Path::new(SHIPPED)).unwrap();
         let names: Vec<&str> = corpora.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["linebench", "linux"]);
+        assert!(names.contains(&"linux"), "{names:?}");
+        for corpus in &corpora {
+            let named = &corpus.name;
+            assert!(corpus.tolerance > 0.0 && corpus.tolerance < 1.0, "{named}");
+            assert!(check_declares_files(corpus).is_ok(), "{named}");
+        }
         let linux = corpora.iter().find(|c| c.name == "linux").unwrap();
-        assert!(linux.is_pinned() && !corpora[0].is_pinned());
+        assert!(linux.is_pinned());
         assert_eq!(linux.tolerance, 0.01);
         assert_eq!(linux.files, Some(63779));
-        assert_eq!(corpora[0].files, None);
+        let unpinned = corpora.iter().find(|c| !c.is_pinned()).unwrap();
+        assert_eq!(unpinned.files, None);
         let pinned = "name = \"t\"\nextensions = [\"c\"]\ncommit = \"0000000000000000000000000000000000000000\"\n";
         let undeclared = parse_corpus(pinned, Path::new("t.toml")).unwrap();
         assert!(

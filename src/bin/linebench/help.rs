@@ -95,9 +95,12 @@ linebench insights <corpus|dir> [--counters a,b,c] [--yes] [--out <dir>] [--exte
     --yes                      do not ask when a tool the section needs is missing
     --out <dir>                where the session goes, default results/ here
 
-linebench report [--out <dir>]
+linebench report [--out <dir>] [--verify]
 
     Rewrites the results page from the records that are already there, with nothing measured.
+
+    --verify                   build the page and say whether the one on disk is that page,
+                               writing nothing
 
 linebench verify <run>
 

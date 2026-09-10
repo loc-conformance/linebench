@@ -56,29 +56,29 @@ them. Name the ones you want in place of `all`. What it fetched, and its sha256,
 matches and downloads again what does not. It runs from an ordinary terminal and refuses an
 elevated one, so that the files it writes belong to you; only `run` is elevated.
 Where there is no ordinary user, as on a CI runner, `--allow-elevated` lifts that refusal.
-`setup` asks the GitHub API which files a release has, and anonymous calls are limited per
+`fetch` asks the GitHub API which files a release has, and anonymous calls are limited per
 address, a limit that shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it;
 the token goes to that one call and never to a download. The workflow sets the token Actions
 provides.
 
-`setup --latest` fetches the latest release of each counter in place of the version its
+`fetch --latest` takes the latest release of each counter in place of the version its
 definition pins, for every counter or for those named by `--counters`, and records that pin
 in the manifest beside the binary. From then on that version is the one in effect for every
 command on this machine, until the definition itself catches up with it or passes it, when
 every command says the pin is set aside; `check` says which counter is pinned this way. A
-definition that comes from `--add` is left alone, with a line. A plain `setup` keeps the pin.
-To go back, remove the counter's entry from `linebench-fetched.toml` and run `setup` again.
+definition that comes from `--add` is left alone, with a line. A plain `fetch` keeps the pin.
+To go back, remove the counter's entry from `linebench-fetched.toml` and run `fetch` again.
 
 Then, on Linux and macOS:
 
 ```
-sudo linebench run
+sudo linebench run linux
 ```
 
 On Windows the same, from a terminal opened with "Run as administrator":
 
 ```
-linebench run
+linebench run linux
 ```
 
 Elevated, it sets the cpu governor to `performance` (Linux) or the power scheme to High
@@ -105,7 +105,7 @@ A flag beats an environment variable, which beats `linebench.conf`.
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | none |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | none |
-| a GitHub API token for `setup` | | `GITHUB_TOKEN`, else `GH_TOKEN` | | none |
+| a GitHub API token for `fetch` | | `GITHUB_TOKEN`, else `GH_TOKEN` | | none |
 
 The tree is the checkout of a corpus definition (the kernel as `linux`, this repository as
 `linebench`, or one you added), or any directory at all together with `--extensions`, which
@@ -114,7 +114,7 @@ Such a run is recorded as unpinned, named after the directory, and the counters'
 compared with each other; the flag is refused beside `--corpus`, since a definition says its
 own extensions.
 
-The counters directory is where `setup` puts what it fetches, with the manifest of hashes,
+The counters directory is where `fetch` puts what it brings, with the manifest of hashes,
 and of any `--latest` pin, beside the binaries and the copies of your own builds under
 `given/`; the setting is only for
 keeping them elsewhere, say under a Defender exclusion path. Results go one
@@ -132,18 +132,18 @@ With nothing set at all, every command but `report` refuses and prints the recip
 corpus and the counters on a local disk: measuring across `/mnt` from WSL, or over a network
 share, measures the mount.
 
-The counters directory belongs to `setup`. A binary in it whose hash is not the one setup
-wrote is refused, with the two ways out: run setup again, or measure your own build as an
+The counters directory belongs to `fetch`. A binary in it whose hash is not the one fetch
+wrote is refused, with the two ways out: run fetch again, or measure your own build as an
 instance, below.
 
 ## What a run measures
 
 An instance is a definition, a binary and a name in the table. By default every counter
-definition is one instance, named after itself, with the binary setup fetched, and so is every
+definition is one instance, named after itself, with the binary fetch brought, and so is every
 `[given]` entry in `linebench.conf`. `--counters` picks a subset and fixes the order:
 
 ```
-linebench run --counters mezura,scc,tokei
+linebench run linux --counters mezura,scc,tokei
 ```
 
 The control is the instance timed alone at the start and at the end of the run, and the
@@ -160,7 +160,7 @@ A build of your own is an instance too, named `<counter>@<tag>`, or by the count
 name when its definition has no `[acquisition]`, so no release stands beside it:
 
 ```
-linebench run --counters mezura,mezura@dev --given mezura@dev=D:\dev\mezura\target\release\mezura.exe
+linebench run linux --counters mezura,mezura@dev --given mezura@dev=D:\dev\mezura\target\release\mezura.exe
 ```
 
 The given binary is copied under `given/<instance>/` in the counters directory before anything
@@ -171,10 +171,10 @@ as its label. The instance runs under the counter's definition, or under its own
 flags of your build differ from the release's:
 
 ```
-linebench run --counters mezura,mezura@dev --given mezura@dev=<path> --definition mezura@dev=D:\dev\mezura\.linebench\mezura.toml
+linebench run linux --counters mezura,mezura@dev --given mezura@dev=<path> --definition mezura@dev=D:\dev\mezura\.linebench\mezura.toml
 ```
 
-Both fit in `linebench.conf`, so the dev loop is one word:
+Both fit in `linebench.conf`, so the dev loop carries no flags:
 
 ```toml
 [given."mezura@dev"]
@@ -209,7 +209,7 @@ the release instances with `--counters`.
 ## check
 
 ```
-linebench check
+linebench check linux
 ```
 
 Answers "is this machine ready to measure". It runs every instance once per table against the
@@ -234,7 +234,7 @@ the corpus:
 
 >> releases
    mezura      3.0.0 is the latest release
-   scc         the latest release is 4.1.0; the definition pins 4.0.0; setup --counters scc --latest fetches it
+   scc         the latest release is 4.1.0; the definition pins 4.0.0; fetch --counters scc --latest fetches it
    tokei       14.0.0 is the latest crates.io release
 
 all good.
@@ -268,7 +268,7 @@ they refuse a run.
 ## noise
 
 ```
-linebench noise
+linebench noise linux
 ```
 
 Answers "is this machine steady enough to benchmark right now". It samples the system-wide cpu
@@ -291,7 +291,7 @@ A real run samples the background the same way before it measures anything and r
 ## insights
 
 ```
-linebench insights
+linebench insights linux
 ```
 
 Measurements that each want their own executions over their own target, kept out of a run where
@@ -444,9 +444,9 @@ counters left out of the default set over this corpus, with WSL counting as linu
 about 90 s per run over the kernel on Windows, so a plain `run` there would be two hours of
 cloc. `check` follows the same default, so a skipped counter is checked over that corpus by
 naming it. A counter named in `--counters` runs, with a warning saying so. For one machine
-over every corpus, `skip = ["cloc"]` in `linebench.conf` does the same, and `setup` then
+over every corpus, `skip = ["cloc"]` in `linebench.conf` does the same, and `fetch` then
 leaves the counter unfetched too. The record and the page say which counters
-were left out of a run and why, whether by the corpus or because they were not set up on the
+were left out of a run and why, whether by the corpus or because they were never fetched on the
 machine. Leave `commit` blank to measure a tree as it
 stands: the run is recorded as unpinned, there is no count to declare, and the counters' file
 counts are compared with each other. `remote` is only needed to fetch.
@@ -500,6 +500,11 @@ The path is a run directory, or the `run.json` inside it.
 
 It prints what it could not read. A check that does not hold exits 1, and a file that is absent is
 a gap and does not. What it says is that every number in the record agrees with every other.
+
+The results page is a second file, built from those records, and `linebench report --verify` holds
+it against them: it builds the page from every record under `results/`, says whether the one on
+disk is that page, names the lines that differ, and writes nothing. Between the two, the numbers
+somebody reads are tied to the records, and each record is tied to its own timings.
 
 ## Reading the numbers
 

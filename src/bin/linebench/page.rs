@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use linebench::corpus::{Parity, Verdict, format_percent, shorten_hash};
 use linebench::defender::{ProcessExclusions, judge_process_exclusions};
 use linebench::fetch::Origin;
+use linebench::files::read_text;
 use linebench::insight::INSIGHTS_DIR;
 use linebench::machine::Platform;
 use linebench::machine::UNKNOWN;
@@ -16,11 +17,13 @@ use linebench::record::{
     pool_orders, propagate_ratio_stddev, read_record, shorten_version,
 };
 use linebench::record::{LOCAL_DIR, RECORD_FILE};
+use linebench::verify::compare_lines;
 
 pub const PAGE_FILE: &str = "README.md";
 const VERIFY_INVITE: &str = "Every number here comes out of a record under this folder. \
-                             `linebench verify <run directory>` reads one back and holds its \
-                             numbers against each other.";
+                             `linebench report --verify` says whether this page is the one \
+                             those records make, and `linebench verify <run directory>` reads \
+                             one of them back and holds its numbers against each other.";
 const RUN_DEPTH: usize = 3;
 const LONG_CONTEXT_VALUE: usize = 60;
 const CONTEXT: [(&str, ReadContext); 11] = [
@@ -85,8 +88,27 @@ pub fn collect_records(out_root: &Path) -> Collected {
 }
 
 pub fn write_results_page(out_root: &Path, found: &[FoundRun]) -> Result<bool, String> {
-    if found.is_empty() {
+    let lines = build_results_page(found);
+    if lines.is_empty() {
         return Ok(false);
+    }
+    let path = out_root.join(PAGE_FILE);
+    let mut text = lines.join("\n");
+    text.push('\n');
+    fs::write(&path, text)
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))?;
+    Ok(true)
+}
+
+pub fn find_page_differences(out_root: &Path, found: &[FoundRun]) -> Result<Vec<String>, String> {
+    let path = out_root.join(PAGE_FILE);
+    let carried = read_text(&path)?;
+    Ok(compare_lines(&build_results_page(found), &carried))
+}
+
+pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
+    if found.is_empty() {
+        return Vec::new();
     }
     let mut lines = vec![
         "# Benchmark results".to_string(),
@@ -132,12 +154,7 @@ pub fn write_results_page(out_root: &Path, found: &[FoundRun]) -> Result<bool, S
     }
     lines.push(String::new());
     lines.push(VERIFY_INVITE.to_string());
-    let path = out_root.join(PAGE_FILE);
-    let mut text = lines.join("\n");
-    text.push('\n');
-    fs::write(&path, text)
-        .map_err(|error| format!("{} could not be written: {error}", path.display()))?;
-    Ok(true)
+    lines
 }
 
 pub fn format_since(current: &Record, earlier: &[&Record]) -> Vec<String> {
@@ -1846,6 +1863,30 @@ mod tests {
             "{}",
             table[1]
         );
+    }
+
+    #[test]
+    fn a_page_edited_by_hand_is_named_line_by_line_and_left_where_it_is() {
+        let found = vec![FoundRun {
+            relative: "linux/windows/20260903-100000".to_string(),
+            record: build_record("20260903-100000", &[("mezura", 0.32)], "nvme0"),
+        }];
+        let out_root = env::temp_dir().join("linebench-a_page_edited_by_hand");
+        let _ = fs::remove_dir_all(&out_root);
+        fs::create_dir_all(&out_root).unwrap();
+        assert!(write_results_page(&out_root, &found).unwrap());
+        assert!(find_page_differences(&out_root, &found).unwrap().is_empty());
+        let page = out_root.join(PAGE_FILE);
+        let edited = fs::read_to_string(&page)
+            .unwrap()
+            .replacen("320 ms", "120 ms", 1);
+        fs::write(&page, &edited).unwrap();
+        let differences = find_page_differences(&out_root, &found).unwrap();
+        let held = fs::read_to_string(&page).unwrap();
+        fs::remove_dir_all(&out_root).unwrap();
+        assert_eq!(differences.len(), 1, "{differences:?}");
+        assert!(differences[0].contains("120 ms"), "{differences:?}");
+        assert_eq!(held, edited, "the page was written over while it was read");
     }
 
     fn build_record(stamp: &str, rows: &[(&str, f64)], device: &str) -> Record {

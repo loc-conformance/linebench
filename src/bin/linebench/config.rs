@@ -89,6 +89,7 @@ pub struct Options {
     pub target: Option<String>,
     pub counters: Option<Vec<String>>,
     pub every_counter: bool,
+    pub verify: bool,
     pub corpus: Option<Vec<String>>,
     pub corpus_path: Option<PathBuf>,
     pub counters_dir: Option<PathBuf>,
@@ -238,6 +239,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--allow-elevated" => options.allow_elevated = true,
             "--keep-raw" => options.keep_raw = true,
             "--latest" => options.latest = true,
+            "--verify" => options.verify = true,
             other
                 if !other.starts_with('-')
                     && !COMMANDS.contains(&other)

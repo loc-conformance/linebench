@@ -56,8 +56,8 @@ use crate::output::{
 };
 use crate::page::PAGE_FILE;
 use crate::page::{
-    Collected, FoundRun, collect_records, find_named_run, format_against, format_since,
-    write_results_page,
+    Collected, FoundRun, collect_records, find_named_run, find_page_differences, format_against,
+    format_since, write_results_page,
 };
 use crate::prep::{self, AppliedPrep};
 
@@ -587,10 +587,13 @@ pub fn run_benchmark(
     outcome
 }
 
-pub fn run_report(out: &mut dyn Write, results: &Path) -> Result<i32, String> {
+pub fn run_report(out: &mut dyn Write, results: &Path, verify: bool) -> Result<i32, String> {
     let collected = collect_records(results);
     for message in &collected.skipped {
         print_warning(out, message)?;
+    }
+    if verify {
+        return check_the_page(out, results, &collected.found);
     }
     if write_results_page(results, &collected.found)? {
         print_line(out, &format!("wrote {}", results.join(PAGE_FILE).display()))?;
@@ -1781,6 +1784,34 @@ fn collect_binaries(
             })
         })
         .collect()
+}
+
+fn check_the_page(out: &mut dyn Write, results: &Path, found: &[FoundRun]) -> Result<i32, String> {
+    let page = results.join(PAGE_FILE);
+    if found.is_empty() {
+        print_line(
+            out,
+            &format!(
+                "no run could be read under {}, so there is nothing to hold {} against",
+                results.display(),
+                page.display()
+            ),
+        )?;
+        return Ok(1);
+    }
+    let differences = find_page_differences(results, found)?;
+    if differences.is_empty() {
+        print_line(out, &format!("{} is what the records say", page.display()))?;
+        return Ok(0);
+    }
+    print_warning(
+        out,
+        &format!("{} is not what the records say", page.display()),
+    )?;
+    for line in &differences {
+        print_line(out, &format!("   {line}"))?;
+    }
+    Ok(1)
 }
 
 fn describe_exclusions(state: &DefenderState) -> String {

@@ -525,7 +525,7 @@ fn hold_against_the_times(m: &Measurement, timed: &Timings) -> Vec<String> {
     broken
 }
 
-fn compare_lines(built: &[String], found: &str) -> Vec<String> {
+pub fn compare_lines(built: &[String], found: &str) -> Vec<String> {
     let found: Vec<&str> = found
         .lines()
         .map(|line| line.trim_end_matches('\r'))
