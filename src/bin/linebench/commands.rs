@@ -101,7 +101,7 @@ pub fn run_fetch(
 ) -> Result<i32, String> {
     if is_privileged(platform) && !options.allow_elevated {
         return Err(format!(
-            "setup writes files as you, so it does not run as {}; run it from an ordinary \
+            "fetch writes files as you, so it does not run as {}; run it from an ordinary \
              terminal, or pass --allow-elevated where there is no ordinary user, as on a CI \
              runner",
             if platform == Platform::Windows {
@@ -125,8 +125,8 @@ pub fn run_fetch(
             .collect();
         if !unknown.is_empty() {
             return Err(format!(
-                "no counter definition is named {}; setup fetches counters by the name of \
-                 their definition, so a given instance is not set up here",
+                "no counter definition is named {}; the fetch command takes counters by the name \
+                 of their definition, so a given instance is not set up here",
                 unknown.join(", ")
             ));
         }

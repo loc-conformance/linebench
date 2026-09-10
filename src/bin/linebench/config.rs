@@ -82,6 +82,7 @@ pub struct Options {
     pub help: Option<String>,
     pub target: Option<String>,
     pub counters: Option<Vec<String>>,
+    pub every_counter: bool,
     pub corpus: Option<Vec<String>>,
     pub corpus_path: Option<PathBuf>,
     pub counters_dir: Option<PathBuf>,
@@ -165,7 +166,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--counters" => {
                 let first = value()?;
                 let named = read_list(flag, first, &mut rest)?;
-                options.counters = match named.iter().any(|name| name == EVERYTHING) {
+                options.every_counter = named.iter().any(|name| name == EVERYTHING);
+                options.counters = match options.every_counter {
                     true => None,
                     false => Some(named),
                 };
@@ -314,7 +316,7 @@ pub fn resolve_fetch(
 ) -> Result<FetchPlan, String> {
     let counters_dir = resolve_counters_dir(options, config, config_path, data_dir)?;
     let wanted: Vec<Corpus> = match &options.corpus {
-        None if options.counters.is_none() => {
+        None if options.counters.is_none() && !options.every_counter => {
             return Err(explain_what_fetch_takes(
                 options,
                 config,
@@ -878,6 +880,33 @@ mod tests {
             parse("run --counters mezura,").unwrap_err(),
             "empty name in --counters mezura,"
         );
+    }
+
+    #[test]
+    fn all_counters_is_an_answer_to_fetch_and_a_line_that_names_nothing_is_refused() {
+        let config = Config::default();
+        let path = PathBuf::from(CONFIG_FILE);
+        let dir = env::temp_dir().join("linebench-all_counters_is_an_answer");
+        let plan = resolve_fetch(
+            &parse("fetch --counters all --newest").unwrap(),
+            &config,
+            &path,
+            &[],
+            &[],
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(plan.corpora.is_empty(), "{plan:?}");
+        let refused = resolve_fetch(
+            &parse("fetch").unwrap(),
+            &config,
+            &path,
+            &[],
+            &[],
+            Some(&dir),
+        )
+        .unwrap_err();
+        assert!(refused.starts_with("Specify which counters"), "{refused}");
     }
 
     #[test]

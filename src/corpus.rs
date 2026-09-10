@@ -381,7 +381,7 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     }
     if !corpus.is_pinned() && !is_checkout && holds_anything_but_git(checkout) {
         return Err(format!(
-            "{shown}\nalready holds files and is not a git checkout, so the setup will not \
+            "{shown}\nalready holds files and is not a git checkout, so fetch will not \
              write over them. Empty it, point the definition elsewhere, or clear its remote to \
              measure it as it stands."
         ));

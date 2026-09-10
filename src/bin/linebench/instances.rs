@@ -189,7 +189,7 @@ fn check_given_name<'a>(name: &'a str, definition: &Definition) -> Result<Option
         Some((_, tag)) => Ok(Some(tag)),
         None if definition.acquisition.is_none() => Ok(None),
         None => Err(format!(
-            "{name} has a release that setup fetches, so a build of your own is named \
+            "{name} has a release that the fetch command takes, so a build of your own is named \
              {name}@<tag>"
         )),
     }
