@@ -396,7 +396,7 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
         print_line(
             out,
             &format!(
-                "  fetching {} from {}",
+                "  fetching {} from {}, which takes a while",
                 shorten_hash(&corpus.commit),
                 corpus.remote
             ),
@@ -404,7 +404,10 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     } else {
         print_line(
             out,
-            &format!("  cloning the default branch of {}", corpus.remote),
+            &format!(
+                "  cloning the default branch of {}, which takes a while",
+                corpus.remote
+            ),
         )?;
     }
     let wanted = if corpus.is_pinned() {

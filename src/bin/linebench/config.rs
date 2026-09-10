@@ -103,13 +103,12 @@ pub struct Options {
     pub allow_unequal: bool,
     pub allow_elevated: bool,
     pub keep_raw: bool,
-    pub newest: bool,
+    pub latest: bool,
 }
 
 #[derive(Debug)]
 pub struct FetchPlan {
     pub counters_dir: PathBuf,
-    pub skip: Vec<String>,
     pub corpora: Vec<(Corpus, PathBuf)>,
 }
 
@@ -223,7 +222,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--allow-unequal-exclusions" => options.allow_unequal = true,
             "--allow-elevated" => options.allow_elevated = true,
             "--keep-raw" => options.keep_raw = true,
-            "--newest" => options.newest = true,
+            "--latest" => options.latest = true,
             other
                 if !other.starts_with('-')
                     && !COMMANDS.contains(&other)
@@ -349,7 +348,6 @@ pub fn resolve_fetch(
         .collect::<Result<Vec<(Corpus, PathBuf)>, String>>()?;
     Ok(FetchPlan {
         counters_dir,
-        skip: config.skip.clone(),
         corpora: taken,
     })
 }
@@ -367,6 +365,14 @@ pub fn resolve_counters_dir(
         .or_else(|| config.counters.clone())
         .or_else(|| data_dir.map(|dir| dir.join(COUNTERS_DIR_NAME)))
         .ok_or_else(|| explain_the_missing_counters_dir(config_path))
+}
+
+pub fn show_path(path: &Path) -> String {
+    let shown = path.display().to_string();
+    match cfg!(windows) {
+        true => shown.replace('/', "\\"),
+        false => shown,
+    }
 }
 
 fn find_corpus<'a>(name: &str, corpora: &'a [Corpus]) -> Result<&'a Corpus, String> {
@@ -427,14 +433,6 @@ fn explain_the_homeless_corpus(name: &str) -> String {
         false => "$XDG_DATA_HOME and $HOME",
     };
     format!("{unset} is not set, so say where {name} goes with --corpus-path <dir>")
-}
-
-fn show_path(path: &Path) -> String {
-    let shown = path.display().to_string();
-    match cfg!(windows) {
-        true => shown.replace('/', "\\"),
-        false => shown,
-    }
 }
 
 fn describe_where_counters_come_from(options: &Options, config: &Config) -> String {
@@ -787,8 +785,8 @@ mod tests {
                 .contains("<instance>=<instance>")
         );
         assert!(parse("fetch --allow-elevated").unwrap().allow_elevated);
-        assert!(parse("fetch --newest").unwrap().newest);
-        assert!(!parse("fetch").unwrap().newest);
+        assert!(parse("fetch --latest").unwrap().latest);
+        assert!(!parse("fetch").unwrap().latest);
         assert_eq!(parse("run linux").unwrap().target.as_deref(), Some("linux"));
         assert_eq!(
             parse("check --corpus linux").unwrap().target.as_deref(),
@@ -888,7 +886,7 @@ mod tests {
         let path = PathBuf::from(CONFIG_FILE);
         let dir = env::temp_dir().join("linebench-all_counters_is_an_answer");
         let plan = resolve_fetch(
-            &parse("fetch --counters all --newest").unwrap(),
+            &parse("fetch --counters all --latest").unwrap(),
             &config,
             &path,
             &[],

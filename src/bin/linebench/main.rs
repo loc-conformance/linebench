@@ -18,8 +18,8 @@ use std::process;
 use linebench::corpus::Corpus;
 use linebench::counters::Definition;
 use linebench::fetch::read_manifest;
+use linebench::latest::apply_latest_pins;
 use linebench::machine::{Platform, detect_platform};
-use linebench::newest::apply_newest_pins;
 
 use crate::config::{
     Command, Config, Locations, Options, check_skip_names, find_config, find_data_dir, parse_args,
@@ -76,45 +76,25 @@ fn dispatch() -> Result<i32, String> {
             )?;
             commands::run_fetch(&mut out, &options, &plan, &ground.counters, ground.platform)
         }
-        Command::Check => {
+        Command::Check | Command::Noise | Command::Insights | Command::Run => {
             let resolved = resolve_everything(&mut out, &options)?;
-            commands::run_check(
-                &mut out,
-                &options,
-                &resolved.locations,
-                &resolved.definitions,
-                resolved.platform,
-            )
-        }
-        Command::Noise => {
-            let resolved = resolve_everything(&mut out, &options)?;
-            commands::run_noise(
-                &mut out,
-                &options,
-                &resolved.locations,
-                &resolved.definitions,
-                resolved.platform,
-            )
-        }
-        Command::Insights => {
-            let resolved = resolve_everything(&mut out, &options)?;
-            commands::run_insights(
-                &mut out,
-                &options,
-                &resolved.locations,
-                &resolved.definitions,
-                resolved.platform,
-            )
-        }
-        Command::Run => {
-            let resolved = resolve_everything(&mut out, &options)?;
-            commands::run_benchmark(
-                &mut out,
-                &options,
-                &resolved.locations,
-                &resolved.definitions,
-                resolved.platform,
-            )
+            let (options, locations) = (&options, &resolved.locations);
+            let definitions = &resolved.definitions;
+            let platform = resolved.platform;
+            let code = match command {
+                Command::Check => {
+                    commands::run_check(&mut out, options, locations, definitions, platform)
+                }
+                Command::Noise => {
+                    commands::run_noise(&mut out, options, locations, definitions, platform)
+                }
+                Command::Insights => {
+                    commands::run_insights(&mut out, options, locations, definitions, platform)
+                }
+                _ => commands::run_benchmark(&mut out, options, locations, definitions, platform),
+            }?;
+            commands::warn_about_staged_builds(&mut out, &locations.counters_dir)?;
+            Ok(code)
         }
     }
 }
@@ -174,7 +154,7 @@ fn resolve_everything(out: &mut dyn Write, options: &Options) -> Result<Resolved
         data_dir.as_deref(),
     )?;
     let manifest = read_manifest(&locations.counters_dir)?;
-    for line in apply_newest_pins(&mut definitions, &manifest) {
+    for line in apply_latest_pins(&mut definitions, &manifest) {
         print_line(out, &line)?;
     }
     Ok(Resolved {

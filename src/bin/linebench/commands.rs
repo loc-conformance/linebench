@@ -16,12 +16,17 @@ use linebench::defender::{
     CounterBinary, DefenderState, ProcessExclusions, explain_unequal_exclusions,
     find_unequal_exclusions, judge_process_exclusions, read_defender_state,
 };
-use linebench::fetch::{fetch_counter, read_manifest};
+use linebench::fetch::{GIVEN_DIR, fetch_counter, read_manifest};
 use linebench::insight::Insights;
 use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, VERSION_SET};
 use linebench::insight::{
     build_insights_path, format_floor, format_memory, format_syscalls, format_syscalls_summary,
     get_floor_set_name, write_insights,
+};
+use linebench::latest::{
+    Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
+    describe_latest, describe_pin_origin, describe_pinned_version, find_latest_release,
+    judge_latest, remember_latest,
 };
 use linebench::machine::{
     Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
@@ -31,11 +36,6 @@ use linebench::measure::{
     capture_plain_output, get_capture_name, join_command, run_phases,
 };
 use linebench::measure::{OUT_DIR, TABLES};
-use linebench::newest::{
-    Lookup, Standing, choose_counters_to_look_up, collect_newest_releases, describe_newest,
-    describe_pin_origin, describe_pinned_version, find_newest_release, judge_newest,
-    remember_newest,
-};
 use linebench::os::{capture_with_status, is_privileged};
 use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
@@ -48,7 +48,7 @@ use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 
-use crate::config::{FetchPlan, Locations, Options};
+use crate::config::{FetchPlan, Locations, Options, show_path};
 use crate::instances::build_instances;
 use crate::output::{
     Color, Output, get_report_style, paint, print_header, print_line, print_warning,
@@ -89,6 +89,9 @@ const VERDICTS: [&str; 4] = [
     "not steady",
 ];
 const COLD_CACHE_RATIO: f64 = 1.5;
+const STAGED_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
+const A_MEGABYTE: u64 = 1024 * 1024;
+const STAGED_DELETING: &str = "Delete them manually when you wish";
 const IDENTICAL: &str = "identical";
 const DIFFER: &str = "differ";
 
@@ -131,23 +134,20 @@ pub fn run_fetch(
             ));
         }
     }
-    let wanted: Vec<&Definition> = match &options.counters {
-        Some(named) => definitions
-            .iter()
-            .filter(|d| named.contains(&d.name))
-            .collect(),
-        None => definitions.iter().collect(),
-    };
     let mut manifest = read_manifest(&plan.counters_dir)?;
+    let mut definitions = definitions.to_vec();
+    let set_aside = apply_latest_pins(&mut definitions, &manifest);
+    let wanted = choose_what_to_fetch(options, &definitions);
     let arch = detect_arch();
     let mut failed = Vec::new();
-    print_header(out, "== counters")?;
-    for definition in wanted {
-        print_line(out, &paint(Color::Bold, &definition.name).to_string())?;
-        if options.counters.is_none() && plan.skip.contains(&definition.name) {
-            print_line(out, "  linebench.conf leaves it out")?;
-            continue;
+    if !wanted.is_empty() {
+        print_header(out, "== counters")?;
+        for line in set_aside {
+            print_line(out, &line)?;
         }
+    }
+    for definition in wanted.iter().copied() {
+        print_line(out, &paint(Color::Bold, &definition.name).to_string())?;
         if definition.acquisition.is_none() && options.counters.is_none() {
             print_line(
                 out,
@@ -159,23 +159,23 @@ pub fn run_fetch(
             continue;
         }
         let mut to_fetch = None;
-        let mut newest = definition.shipped_version.is_some();
-        if options.newest
+        let mut latest = definition.shipped_version.is_some();
+        if options.latest
             && let Some(how) = &definition.acquisition
         {
             if definition.added {
                 print_line(
                     out,
                     &format!(
-                        "  --newest leaves it alone, since the definition comes from {}; change \
+                        "  --latest leaves it alone, since the definition comes from {}; change \
                          the version there",
                         definition.path.display()
                     ),
                 )?;
             } else {
-                match find_newest_release(definition) {
+                match find_latest_release(definition) {
                     Ok(version) => {
-                        if let Err(refused) = remember_newest(
+                        if let Err(refused) = remember_latest(
                             &plan.counters_dir,
                             &definition.name,
                             how,
@@ -185,12 +185,12 @@ pub fn run_fetch(
                             print_warning(out, &refused)?;
                         }
                         let shipped = definition.shipped_version.as_deref();
-                        match judge_newest(how, &version) {
+                        match judge_latest(how, &version) {
                             Standing::Newer => {
                                 print_line(
                                     out,
                                     &format!(
-                                        "  the newest release is {version}; {}",
+                                        "  the latest release is {version}; {}",
                                         describe_pinned_version(how, shipped)
                                     ),
                                 )?;
@@ -200,13 +200,13 @@ pub fn run_fetch(
                                     ..how.clone()
                                 });
                                 to_fetch = Some(chosen);
-                                newest = true;
+                                latest = true;
                             }
                             Standing::Same | Standing::Behind | Standing::Differs => print_line(
                                 out,
                                 &format!(
                                     "  {}",
-                                    describe_newest(&definition.name, how, shipped, &version)
+                                    describe_latest(&definition.name, how, shipped, &version)
                                 ),
                             )?,
                         }
@@ -226,10 +226,23 @@ pub fn run_fetch(
             &arch,
             &plan.counters_dir,
             &mut manifest,
-            newest,
+            latest,
         ) {
             print_line(out, &format!("  {}", paint(Color::Red, &refused)))?;
             failed.push(definition.name.clone());
+        }
+    }
+    if !options.latest && !wanted.is_empty() {
+        let chosen = choose_counters_to_look_up(wanted.iter().copied());
+        let (lookups, warning) = collect_latest_releases(
+            &chosen,
+            &plan.counters_dir,
+            read_seconds_since_epoch(),
+            find_latest_release,
+        );
+        print_latest_releases(out, &lookups)?;
+        if let Some(warning) = warning {
+            print_warning(out, &warning)?;
         }
     }
     if !plan.corpora.is_empty() {
@@ -276,7 +289,7 @@ pub fn run_check(
     let now = read_seconds_since_epoch();
     let (checked, looked_up) = thread::scope(|scope| {
         let lookups = scope.spawn(|| {
-            collect_newest_releases(&counters, &locations.counters_dir, now, find_newest_release)
+            collect_latest_releases(&counters, &locations.counters_dir, now, find_latest_release)
         });
         let checked = check_everything(
             out,
@@ -292,7 +305,7 @@ pub fn run_check(
     let (bad, nothing_compared) = checked?;
     let (lookups, warning) =
         looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
-    print_newest_releases(out, &lookups)?;
+    print_latest_releases(out, &lookups)?;
     if let Some(warning) = warning {
         print_warning(out, &warning)?;
     }
@@ -782,6 +795,24 @@ pub fn run_insights(
     Ok(1)
 }
 
+pub fn warn_about_staged_builds(out: &mut dyn Write, counters_dir: &Path) -> Result<(), String> {
+    let staged = counters_dir.join(GIVEN_DIR);
+    let bytes = add_up_files(&staged);
+    if bytes < STAGED_LIMIT_BYTES {
+        return Ok(());
+    }
+    print_line(out, "")?;
+    print_warning(
+        out,
+        &format!(
+            "{} MB of staged builds sit under {}",
+            bytes / A_MEGABYTE,
+            show_path(&staged)
+        ),
+    )?;
+    print_line(out, STAGED_DELETING)
+}
+
 struct RunContext<'a> {
     options: &'a Options,
     locations: &'a Locations,
@@ -823,6 +854,35 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+// Counters are fetched when they are asked for by name or with all, so a line that only names a
+// corpus leaves the binaries alone.
+fn choose_what_to_fetch<'a>(
+    options: &Options,
+    definitions: &'a [Definition],
+) -> Vec<&'a Definition> {
+    match (&options.counters, options.every_counter) {
+        (Some(named), _) => definitions
+            .iter()
+            .filter(|definition| named.contains(&definition.name))
+            .collect(),
+        (None, true) => definitions.iter().collect(),
+        (None, false) => Vec::new(),
+    }
+}
+
+fn add_up_files(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => add_up_files(&entry.path()),
+            _ => entry.metadata().map(|data| data.len()).unwrap_or_default(),
+        })
+        .sum()
 }
 
 fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, String> {
@@ -1563,7 +1623,7 @@ fn create_empty_repository(scratch: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-fn print_newest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), String> {
+fn print_latest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), String> {
     if lookups.is_empty() {
         return Ok(());
     }
@@ -1574,23 +1634,23 @@ fn print_newest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), 
             continue;
         };
         let text = match &lookup.outcome {
-            Ok(newest) => {
-                let mut text = describe_newest(
+            Ok(latest) => {
+                let mut text = describe_latest(
                     &lookup.definition.name,
                     how,
                     lookup.definition.shipped_version.as_deref(),
-                    newest,
+                    latest,
                 );
                 if let Some(hours) = lookup.age_seconds.map(|age| age / 3600).filter(|h| *h > 0) {
                     text.push_str(&format!(" (looked up {hours} h ago)"));
                 }
-                match judge_newest(how, newest) {
+                match judge_latest(how, latest) {
                     Standing::Newer | Standing::Differs => paint(Color::Yellow, &text).to_string(),
                     Standing::Same | Standing::Behind => text,
                 }
             }
             Err(reason) => {
-                let mut text = format!("the newest release could not be looked up: {reason}");
+                let mut text = format!("the latest release could not be looked up: {reason}");
                 if let Some(origin) =
                     describe_pin_origin(how, lookup.definition.shipped_version.as_deref())
                 {
@@ -1718,5 +1778,55 @@ fn paint_step(step: usize, text: &str) -> String {
         1 => paint(Color::Yellow, text).to_string(),
         2 => paint(Color::Orange, text).to_string(),
         _ => paint(Color::Red, text).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_options(line: &str) -> Options {
+        let args: Vec<String> = std::iter::once("linebench")
+            .chain(line.split_whitespace())
+            .map(String::from)
+            .collect();
+        crate::config::parse_args(&args).unwrap()
+    }
+
+    #[test]
+    fn counters_are_fetched_when_they_are_asked_for_and_a_corpus_alone_leaves_them_alone() {
+        let shipped = crate::shipped::collect_definitions(&mut Vec::new(), &[])
+            .unwrap()
+            .counters;
+        let named = |line: &str| -> Vec<String> {
+            choose_what_to_fetch(&read_options(line), &shipped)
+                .iter()
+                .map(|definition| definition.name.clone())
+                .collect()
+        };
+        assert_eq!(named("fetch --counters all").len(), shipped.len());
+        assert_eq!(
+            named("fetch --counters all --corpus linux").len(),
+            shipped.len()
+        );
+        assert_eq!(named("fetch --counters scc"), ["scc"]);
+        assert!(
+            named("fetch --corpus linux").is_empty(),
+            "a corpus took counters with it"
+        );
+    }
+
+    #[test]
+    fn the_staged_builds_are_added_up_through_the_directory_each_one_sits_in() {
+        let dir = env::temp_dir().join("linebench-the_staged_builds_are_added_up");
+        let _ = fs::remove_dir_all(&dir);
+        let staged = dir.join(GIVEN_DIR).join("mezura@dev");
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(staged.join("mezura"), vec![7u8; 2048]).unwrap();
+        assert_eq!(add_up_files(&dir.join(GIVEN_DIR)), 2048);
+        let mut printed = Vec::new();
+        warn_about_staged_builds(&mut printed, &dir).unwrap();
+        assert!(printed.is_empty(), "{}", String::from_utf8_lossy(&printed));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

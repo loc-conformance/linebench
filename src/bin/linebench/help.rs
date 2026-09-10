@@ -6,7 +6,7 @@ use crate::shipped::{CORPORA, COUNTERS};
 const HELP: &str = r#"linebench: measure line counters fairly, with the machine's state as context
 
 linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus-path <dir>]
-                [--newest] [--allow-elevated] [--add <path>]
+                [--latest] [--allow-elevated] [--add <path>]
 
     Downloads what the other commands need and does nothing else. A counter arrives at the
     version its definition declares and a corpus at the commit its definition pins, so a second
@@ -21,7 +21,7 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
     --corpus a,b               the corpora to download, or all
     --counters-dir <dir>       where the binaries go
     --corpus-path <dir>        where a single corpus goes
-    --newest                   take each counter's newest release and pin it beside the binary
+    --latest                   take each counter's latest release and pin it beside the binary
     --allow-elevated           download as administrator or root, where there is no ordinary user
     --add <path>               a definition of your own, or a directory of them
 
