@@ -48,7 +48,7 @@ use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 
-use crate::config::{Locations, Options};
+use crate::config::{FetchPlan, Locations, Options};
 use crate::instances::build_instances;
 use crate::output::{
     Color, Output, get_report_style, paint, print_header, print_line, print_warning,
@@ -72,7 +72,7 @@ const TRACER_REFUSED: &str = "strace is here and it was not allowed to trace, so
                               calls cannot be measured. It needs ptrace, which a container \
                               without CAP_SYS_PTRACE and a hardened kernel.yama.ptrace_scope both \
                               refuse.";
-const TRACER_ELSEWHERE: &str = "the system calls are counted on linux alone, where strace is";
+const TRACER_ELSEWHERE: &str = "not measured here. strace runs on linux alone";
 const SYSCALLS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const MEMORY_TABLE: Table = Table::SameWork;
@@ -92,10 +92,10 @@ const COLD_CACHE_RATIO: f64 = 1.5;
 const IDENTICAL: &str = "identical";
 const DIFFER: &str = "differ";
 
-pub fn run_setup(
+pub fn run_fetch(
     out: &mut dyn Write,
     options: &Options,
-    locations: &Locations,
+    plan: &FetchPlan,
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
@@ -111,10 +111,10 @@ pub fn run_setup(
             }
         ));
     }
-    fs::create_dir_all(&locations.counters_dir).map_err(|error| {
+    fs::create_dir_all(&plan.counters_dir).map_err(|error| {
         format!(
             "{} could not be created: {error}",
-            locations.counters_dir.display()
+            plan.counters_dir.display()
         )
     })?;
     if let Some(named) = &options.counters {
@@ -138,13 +138,13 @@ pub fn run_setup(
             .collect(),
         None => definitions.iter().collect(),
     };
-    let mut manifest = read_manifest(&locations.counters_dir)?;
+    let mut manifest = read_manifest(&plan.counters_dir)?;
     let arch = detect_arch();
     let mut failed = Vec::new();
     print_header(out, "== counters")?;
     for definition in wanted {
         print_line(out, &paint(Color::Bold, &definition.name).to_string())?;
-        if options.counters.is_none() && locations.skip.contains(&definition.name) {
+        if options.counters.is_none() && plan.skip.contains(&definition.name) {
             print_line(out, "  linebench.conf leaves it out")?;
             continue;
         }
@@ -176,7 +176,7 @@ pub fn run_setup(
                 match find_newest_release(definition) {
                     Ok(version) => {
                         if let Err(refused) = remember_newest(
-                            &locations.counters_dir,
+                            &plan.counters_dir,
                             &definition.name,
                             how,
                             &version,
@@ -224,7 +224,7 @@ pub fn run_setup(
             to_fetch.as_ref().unwrap_or(definition),
             platform,
             &arch,
-            &locations.counters_dir,
+            &plan.counters_dir,
             &mut manifest,
             newest,
         ) {
@@ -232,10 +232,14 @@ pub fn run_setup(
             failed.push(definition.name.clone());
         }
     }
-    print_header(out, "== corpus")?;
-    if let Err(refused) = setup_corpus(out, &locations.corpus, &locations.checkout) {
-        print_line(out, &format!("  {}", paint(Color::Red, &refused)))?;
-        failed.push(locations.corpus.name.clone());
+    if !plan.corpora.is_empty() {
+        print_header(out, "== corpora")?;
+    }
+    for (corpus, checkout) in &plan.corpora {
+        if let Err(refused) = setup_corpus(out, corpus, checkout) {
+            print_line(out, &format!("  {}", paint(Color::Red, &refused)))?;
+            failed.push(corpus.name.clone());
+        }
     }
     print_line(out, "")?;
     if failed.is_empty() {

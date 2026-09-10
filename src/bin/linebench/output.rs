@@ -75,9 +75,13 @@ impl Write for Output {
     }
 }
 
+const TOOL_AND_SPACE: &str = "linebench ";
+const FLAG_OPENING: &str = "--";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     Bold,
+    Grey,
     Green,
     Red,
     Yellow,
@@ -107,13 +111,75 @@ pub fn print_warning(out: &mut dyn Write, message: &str) -> Result<(), String> {
     print_line(out, &format!("{WARNING_LABEL}{message}"))
 }
 
+pub fn paint_help(text: &str) -> String {
+    text.lines()
+        .map(paint_help_line)
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
 pub fn paint(color: Color, text: &str) -> ColoredString {
     match color {
         Color::Bold => text.bold(),
+        Color::Grey => text.truecolor(140, 140, 140),
         Color::Green => text.green(),
         Color::Red => text.red(),
         Color::Yellow => text.yellow(),
         Color::Orange => text.truecolor(220, 140, 60),
         Color::Blue => text.truecolor(110, 160, 220),
+    }
+}
+
+fn paint_help_line(line: &str) -> String {
+    if line.trim().is_empty() {
+        return line.to_string();
+    }
+    let signature = line.starts_with(TOOL_AND_SPACE);
+    let ground = (!signature).then_some(Color::Grey);
+    let mut runs: Vec<(Option<Color>, String)> = Vec::new();
+    for (index, chunk) in line.split_inclusive(' ').enumerate() {
+        if signature && index == 1 {
+            hold(&mut runs, Some(Color::Blue), chunk);
+            continue;
+        }
+        match find_flag(chunk) {
+            Some((start, end)) => {
+                hold(&mut runs, ground, &chunk[..start]);
+                hold(&mut runs, Some(Color::Green), &chunk[start..end]);
+                hold(&mut runs, ground, &chunk[end..]);
+            }
+            None => hold(&mut runs, ground, chunk),
+        }
+    }
+    runs.iter()
+        .map(|(color, text)| tinted(text, *color))
+        .collect()
+}
+
+fn hold(runs: &mut Vec<(Option<Color>, String)>, color: Option<Color>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    match runs.last_mut() {
+        Some((held, so_far)) if *held == color => so_far.push_str(text),
+        _ => runs.push((color, text.to_string())),
+    }
+}
+
+fn find_flag(chunk: &str) -> Option<(usize, usize)> {
+    let start = chunk.find(FLAG_OPENING)?;
+    if !chunk[..start].chars().all(|opening| opening == '[') {
+        return None;
+    }
+    let end = chunk[start..]
+        .find(|letter: char| !(letter.is_ascii_alphanumeric() || letter == '-'))
+        .map_or(chunk.len(), |offset| start + offset);
+    Some((start, end))
+}
+
+fn tinted(text: &str, color: Option<Color>) -> String {
+    match color {
+        Some(color) if !text.is_empty() => paint(color, text).to_string(),
+        _ => text.to_string(),
     }
 }

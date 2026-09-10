@@ -214,7 +214,7 @@ pub fn identify_counter(
     if !binary.is_file() {
         let how = match &definition.acquisition {
             Some(how) => format!(
-                "run setup --counters {0} to fetch {0} {1}",
+                "run fetch --counters {0} to download {0} {1}",
                 definition.name, how.version
             ),
             None => format!(
@@ -240,7 +240,7 @@ pub fn identify_counter(
         && !is_the_declared_version(&how.version, &version)
     {
         return Err(format!(
-            "{} declares {} and the binary at {} says it is \"{version}\"; run setup again",
+            "{} declares {} and the binary at {} says it is \"{version}\"; run fetch again",
             definition.path.display(),
             how.version,
             binary.display()
@@ -304,11 +304,11 @@ pub fn decide_origin(
 ) -> Result<Origin, String> {
     let Some(fetched) = fetched.filter(|fetched| fetched.sha256 == sha256) else {
         let what = match fetched {
-            Some(_) => "is not what setup fetched, its sha256 differs",
-            None => "was not fetched by setup",
+            Some(_) => "is not what fetch downloaded, its sha256 differs",
+            None => "was not downloaded by fetch",
         };
         return Err(format!(
-            "{} {what}: run setup again, or measure your own build with --given \
+            "{} {what}: run fetch again, or measure your own build with --given \
              {}@<tag>=<path>",
             binary.display(),
             definition.name
@@ -318,7 +318,7 @@ pub fn decide_origin(
         && how.version != fetched.version
     {
         return Err(format!(
-            "{} declares {} and what setup fetched is {}; run setup again",
+            "{} declares {} and what fetch downloaded is {}; run fetch again",
             definition.path.display(),
             how.version,
             fetched.version
@@ -999,19 +999,19 @@ blanks   = \"Blank\"
         };
         let refused = decide_origin(&scc, binary, Some(&behind), "abc").unwrap_err();
         assert!(
-            refused.contains("declares 4.0.0 and what setup fetched is 3.7.0; run setup again"),
+            refused.contains("declares 4.0.0 and what fetch downloaded is 3.7.0; run fetch again"),
             "{refused}"
         );
 
         let refused = decide_origin(&scc, binary, Some(&fetched), "def").unwrap_err();
         assert!(
-            refused.contains("is not what setup fetched, its sha256 differs"),
+            refused.contains("is not what fetch downloaded, its sha256 differs"),
             "{refused}"
         );
         assert!(refused.contains("--given scc@<tag>=<path>"), "{refused}");
 
         let refused = decide_origin(&scc, binary, None, "def").unwrap_err();
-        assert!(refused.contains("was not fetched by setup"), "{refused}");
+        assert!(refused.contains("was not downloaded by fetch"), "{refused}");
     }
 
     #[test]

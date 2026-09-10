@@ -273,7 +273,7 @@ pub fn read_git_state(checkout: &Path) -> GitState {
 pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
     if !checkout.is_dir() {
         return Err(format!(
-            "{} is not there: run setup to fetch {}",
+            "{} is not there: run fetch to download {}",
             checkout.display(),
             corpus.name
         ));
@@ -284,14 +284,14 @@ pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
     match read_head(checkout).as_deref() {
         Some(head) if head == corpus.commit => Ok(()),
         Some(head) => Err(format!(
-            "{} is at {} and {} pins {}: run setup, or check that commit out",
+            "{} is at {} and {} pins {}: run fetch, or check that commit out",
             checkout.display(),
             shorten_hash(head),
             corpus.name,
             shorten_hash(&corpus.commit)
         )),
         None => Err(format!(
-            "{} is not a git checkout and {} pins {}: run setup",
+            "{} is not a git checkout and {} pins {}: run fetch",
             checkout.display(),
             corpus.name,
             shorten_hash(&corpus.commit)

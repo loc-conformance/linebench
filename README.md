@@ -46,14 +46,15 @@ linux = "D:/corpora/linux"
 First time on a machine:
 
 ```
-linebench setup
+linebench fetch --counters all --corpus all
 ```
 
-`setup` fetches every counter at the version its definition declares, into the counters
-directory, and the corpus at the commit its definition pins. What it fetched, and its sha256,
-goes into `linebench-fetched.toml` beside the binaries. A second `setup` answers "already
-here" for what matches and fetches again what does not. It runs from an ordinary terminal and
-refuses an elevated one, so that the files it writes belong to you; only `run` is elevated.
+`fetch` downloads every counter at the version its definition declares, into the counters
+directory, and every corpus at the commit its definition pins, into `corpora/<name>` beside
+them. Name the ones you want in place of `all`. What it fetched, and its sha256, goes into
+`linebench-fetched.toml` beside the binaries. A second `fetch` answers "already here" for what
+matches and downloads again what does not. It runs from an ordinary terminal and refuses an
+elevated one, so that the files it writes belong to you; only `run` is elevated.
 Where there is no ordinary user, as on a CI runner, `--allow-elevated` lifts that refusal.
 `setup` asks the GitHub API which files a release has, and anonymous calls are limited per
 address, a limit that shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it;
@@ -96,9 +97,9 @@ A flag beats an environment variable, which beats `linebench.conf`.
 
 | what | flag | environment | in the conf | default |
 |---|---|---|---|---|
-| the tree that gets counted | `--corpus-path <dir>` | | `[corpora]` entry | the `[corpora]` entry of the corpus |
-| what to count in it, with no corpus definition | `--extensions rs,c` | | | |
-| which corpus definition | `--corpus <name>` | `LINEBENCH_CORPUS` | | the only `[corpora]` entry, when there is one |
+| what gets counted | the argument, a corpus name or a directory | `LINEBENCH_CORPUS` | | |
+| where a named corpus sits | `--corpus-path <dir>` | | `[corpora]` entry | `corpora/<name>` where fetch put it |
+| what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | none |
@@ -452,8 +453,8 @@ counts are compared with each other. `remote` is only needed to fetch.
 Both directories are built into the binary. A definition of your own, a counter or a corpus,
 joins them with `--add <file>` (or `add = [...]` in the conf), repeatable, and a directory of
 `.toml` files does too; one named like a built-in definition takes its place, and a line says
-so. A tree with no corpus definition is counted as it stands with `--corpus-path <dir>
---extensions rs,c`: unpinned, named after the directory, the counters' counts compared with
+so. A tree with no corpus definition is counted as it stands by naming it: `linebench run <dir>
+--extensions rs,c`, unpinned, named after the directory, the counters' counts compared with
 each other.
 
 ## Where results go

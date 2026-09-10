@@ -153,7 +153,7 @@ pub fn count_syscalls(
         && rows != calls.len()
     {
         return Err(format!(
-            "the {TRACER} table for {instance} holds {rows} rows and {} of them could be read",
+            "{} out of {rows} {TRACER} rows read for {instance}",
             calls.len()
         ));
     }

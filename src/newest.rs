@@ -171,7 +171,7 @@ pub fn apply_newest_pins(definitions: &mut [Definition], manifest: &Manifest) ->
         let (name, pin) = (&definition.name, &entry.version);
         if definition.added {
             set_aside.push(format!(
-                "{name}: the pin of {pin} from setup --newest is set aside, since the \
+                "{name}: the pin of {pin} from fetch --newest is set aside, since the \
                  definition comes from {}",
                 definition.path.display()
             ));
@@ -179,14 +179,14 @@ pub fn apply_newest_pins(definitions: &mut [Definition], manifest: &Manifest) ->
         }
         if entry.channel != how.channel {
             set_aside.push(format!(
-                "{name}: the pin of {pin} from setup --newest is set aside, since the \
+                "{name}: the pin of {pin} from fetch --newest is set aside, since the \
                  definition now fetches from another channel"
             ));
             continue;
         }
         if compare_versions(pin, &how.version) != Some(Ordering::Greater) {
             set_aside.push(format!(
-                "{name}: the definition now pins {}, so the pin of {pin} from setup --newest \
+                "{name}: the definition now pins {}, so the pin of {pin} from fetch --newest \
                  is set aside",
                 how.version
             ));
@@ -232,7 +232,7 @@ pub fn describe_newest(
     let by = describe_pinned_version(how, shipped);
     let mut text = match judge_newest(how, newest) {
         Standing::Newer => format!(
-            "the newest {release} is {newest}; {by}; setup --counters {name} --newest fetches it"
+            "the newest {release} is {newest}; {by}; fetch --counters {name} --newest fetches it"
         ),
         Standing::Same => format!("{pinned} is the newest {release}"),
         Standing::Behind => format!("{by}, ahead of the newest {release} {newest}"),
@@ -254,7 +254,7 @@ pub fn describe_pinned_version(how: &Acquisition, shipped: Option<&str>) -> Stri
 pub fn describe_pin_origin(how: &Acquisition, shipped: Option<&str>) -> Option<String> {
     shipped.map(|shipped| {
         format!(
-            "setup --newest pinned {} over the {shipped} the definition ships with",
+            "fetch --newest pinned {} over the {shipped} the definition ships with",
             how.version
         )
     })
@@ -438,7 +438,7 @@ blanks   = \"Total.blanks\"
         assert_eq!(judge_newest(how, "4.1.0"), Standing::Newer);
         assert_eq!(
             describe_newest("scc", how, None, "4.1.0"),
-            "the newest release is 4.1.0; the definition pins 4.0.0; setup --counters scc \
+            "the newest release is 4.1.0; the definition pins 4.0.0; fetch --counters scc \
              --newest fetches it"
         );
         assert_eq!(judge_newest(how, "3.9.0"), Standing::Behind);
@@ -453,13 +453,13 @@ blanks   = \"Total.blanks\"
         );
         assert_eq!(
             describe_newest("scc", how, Some("3.7.0"), "4.0.0"),
-            "4.0.0 is the newest release (setup --newest pinned 4.0.0 over the 3.7.0 the \
+            "4.0.0 is the newest release (fetch --newest pinned 4.0.0 over the 3.7.0 the \
              definition ships with)"
         );
         assert_eq!(
             describe_newest("scc", how, Some("3.7.0"), "4.2.0"),
-            "the newest release is 4.2.0; the pin in effect is 4.0.0; setup --counters scc \
-             --newest fetches it (setup --newest pinned 4.0.0 over the 3.7.0 the definition \
+            "the newest release is 4.2.0; the pin in effect is 4.0.0; fetch --counters scc \
+             --newest fetches it (fetch --newest pinned 4.0.0 over the 3.7.0 the definition \
              ships with)"
         );
         let cloc = parse_definition(CLOC, &PathBuf::from("cloc.toml")).unwrap();
@@ -470,7 +470,7 @@ blanks   = \"Total.blanks\"
         let tokei = parse_definition(TOKEI, &PathBuf::from("tokei.toml")).unwrap();
         assert_eq!(
             describe_newest("tokei", tokei.acquisition.as_ref().unwrap(), None, "15.0.0"),
-            "the newest crates.io release is 15.0.0; the definition pins 14.0.0; setup \
+            "the newest crates.io release is 15.0.0; the definition pins 14.0.0; fetch \
              --counters tokei --newest fetches it"
         );
     }
@@ -522,11 +522,11 @@ blanks   = \"Total.blanks\"
         assert_eq!(
             lines,
             [
-                "scc: the definition now pins 4.1.0, so the pin of 4.1.0 from setup --newest is \
+                "scc: the definition now pins 4.1.0, so the pin of 4.1.0 from fetch --newest is \
                  set aside",
-                "own: the pin of 4.1.0 from setup --newest is set aside, since the definition \
+                "own: the pin of 4.1.0 from fetch --newest is set aside, since the definition \
                  comes from mine/own.toml",
-                "moved: the pin of 4.1.0 from setup --newest is set aside, since the definition \
+                "moved: the pin of 4.1.0 from fetch --newest is set aside, since the definition \
                  now fetches from another channel",
             ]
         );

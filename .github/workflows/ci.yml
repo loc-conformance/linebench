@@ -69,15 +69,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./target/release/linebench setup --allow-elevated \
+          ./target/release/linebench fetch --allow-elevated \
             --counters-dir "${{ runner.temp }}/counters" \
-            --corpus linebench --corpus-path "${{ github.workspace }}"
+            --counters all
 
       - name: Run every counter over this repository and read the counts back
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./target/release/linebench check \
+          ./target/release/linebench check linebench \
             --counters-dir "${{ runner.temp }}/counters" \
-            --corpus linebench --corpus-path "${{ github.workspace }}"
+            --corpus-path "${{ github.workspace }}"

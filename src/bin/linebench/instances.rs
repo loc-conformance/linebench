@@ -74,7 +74,7 @@ pub fn build_instances(
                          corpus definition on {system}; name one with --counters"
                     )
                 } else {
-                    "no counter is set up: run setup".to_string()
+                    "no counter is downloaded yet: run fetch --counters all".to_string()
                 });
             }
             selected
