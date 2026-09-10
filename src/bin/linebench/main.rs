@@ -1,5 +1,8 @@
 #![deny(unsafe_code)]
 
+#[cfg(feature = "maintenance")]
+mod bump;
+
 mod commands;
 mod config;
 mod help;
@@ -12,6 +15,9 @@ mod shipped;
 use std::env;
 use std::fs;
 use std::io::Write;
+#[cfg(feature = "maintenance")]
+use std::path::Path;
+
 use std::path::PathBuf;
 use std::process;
 
@@ -20,6 +26,9 @@ use linebench::counters::Definition;
 use linebench::fetch::read_manifest;
 use linebench::latest::apply_latest_pins;
 use linebench::machine::{Platform, detect_platform};
+
+#[cfg(feature = "maintenance")]
+use crate::config::COUNTERS_DIR_NAME;
 
 use crate::config::{
     Command, Config, Locations, Options, check_skip_names, find_config, find_data_dir, parse_args,
@@ -60,6 +69,13 @@ fn dispatch() -> Result<i32, String> {
     };
     match command {
         Command::Version => print_line(&mut out, &format!("linebench {VERSION}")).map(|_| 0),
+        #[cfg(feature = "maintenance")]
+        Command::BumpVersions => bump::run_bump_versions(
+            &mut out,
+            Path::new(COUNTERS_DIR_NAME),
+            options.target.as_deref(),
+            options.as_json,
+        ),
         Command::Report => {
             let config = read_config(&find_config())?;
             commands::run_report(&mut out, &resolve_out(&options, &config))

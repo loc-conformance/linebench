@@ -108,15 +108,44 @@ what belongs to this machine: control, counters, out, skip, given and the corpor
 somewhere other than where fetch puts them. A --help after a command prints that command alone.
 Output to a terminal has colour and output to a file or a pipe does not."#;
 
+#[cfg(feature = "maintenance")]
+const BUMP_HELP: &str = r#"
+linebench bump-versions [<counter>] [--json]
+
+    Asks every channel what it publishes latest and, where that is ahead of the version a
+    definition declares, writes the new one into counters/<name>.toml and leaves the rest of the
+    file as it is. Named a counter, it does that for that one alone.
+
+    --json                     print only what moved, as one document
+
+    It maintains this repository's own definitions and nobody who measures needs it, so it is
+    built with --features maintenance alone. A raised version is half a change: the definitions
+    are compiled into the binary, so the binary is built again before anything measures the new
+    version, and the same-work flags are read against that release's notes by a person.
+"#;
+
 const TOOL_AND_SPACE: &str = "linebench ";
 const FLAG_OPENING: &str = "--";
+#[cfg(feature = "maintenance")]
+const CLOSING_NOTE: &str = "A flag beats an environment variable";
 const COUNTERS_HERE: &str = "{counters}";
 const CORPORA_HERE: &str = "{corpora}";
 const LISTING_OPENINGS: [&str; 2] = ["    counters   ", "    corpora    "];
 
 pub fn get_help() -> String {
-    HELP.replace(COUNTERS_HERE, &name_them(COUNTERS))
-        .replace(CORPORA_HERE, &name_them(CORPORA))
+    let whole = HELP
+        .replace(COUNTERS_HERE, &name_them(COUNTERS))
+        .replace(CORPORA_HERE, &name_them(CORPORA));
+    #[cfg(not(feature = "maintenance"))]
+    return whole;
+    #[cfg(feature = "maintenance")]
+    whole.replace(
+        CLOSING_NOTE,
+        &format!(
+            "{BUMP_HELP}
+{CLOSING_NOTE}"
+        ),
+    )
 }
 
 pub fn find_help_of(named: &str) -> String {

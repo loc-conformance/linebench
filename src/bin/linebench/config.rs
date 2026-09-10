@@ -60,6 +60,8 @@ pub enum Command {
     Insights,
     Report,
     Version,
+    #[cfg(feature = "maintenance")]
+    BumpVersions,
 }
 
 impl Command {
@@ -72,6 +74,8 @@ impl Command {
             Command::Insights => "insights",
             Command::Report => "report",
             Command::Version => "version",
+            #[cfg(feature = "maintenance")]
+            Command::BumpVersions => "bump-versions",
         }
     }
 }
@@ -104,6 +108,8 @@ pub struct Options {
     pub allow_elevated: bool,
     pub keep_raw: bool,
     pub latest: bool,
+    #[cfg(feature = "maintenance")]
+    pub as_json: bool,
 }
 
 #[derive(Debug)]
@@ -155,6 +161,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     _ => Command::Version,
                 });
             }
+            #[cfg(feature = "maintenance")]
+            "bump-versions" if options.command.is_none() => {
+                options.command = Some(Command::BumpVersions);
+            }
+            #[cfg(feature = "maintenance")]
+            "--json" => options.as_json = true,
             "--help" | "-h" => {
                 options.help = Some(match options.command {
                     Some(command) => find_help_of(command.as_str()),
