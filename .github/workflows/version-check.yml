@@ -155,7 +155,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git commit -qam "declare $COUNTER $TO"
+          git commit -q "counters/$COUNTER.toml" -m "declare $COUNTER $TO"
           git push -q origin "$BRANCH"
           flags=$(awk '/^same-work +=/ { inside = 1 } inside { print } inside && /\]/ { exit }' \
             "counters/$COUNTER.toml")
