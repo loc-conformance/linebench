@@ -1,0 +1,6 @@
+name       = "jdk"
+remote     = "https://github.com/openjdk/jdk.git"
+commit     = "b96680ca92970cd324bf3934e7a4ab6116d4b02d"
+files      = 61420
+extensions = ["java", "cpp", "cc", "hpp", "hh", "c", "h", "sh"]
+tolerance  = "1%"
