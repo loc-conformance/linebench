@@ -10,6 +10,8 @@ use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::files::read_toml;
 use linebench::os::capture_with_status;
 
+use crate::help::{find_help_of, get_help, name_every_command};
+
 pub const TOOL: &str = "linebench";
 pub const CONFIG_FILE: &str = "linebench.conf";
 pub const DATA_DIR_NAME: &str = "linebench";
@@ -20,6 +22,9 @@ pub const COUNTERS_ENV: &str = "LINEBENCH_COUNTERS";
 pub const CORPUS_ENV: &str = "LINEBENCH_CORPUS";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
+pub const COMMANDS: [&str; 7] = [
+    "run", "fetch", "check", "noise", "insights", "report", "version",
+];
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,7 +59,6 @@ pub enum Command {
     Noise,
     Insights,
     Report,
-    Help,
     Version,
 }
 
@@ -67,7 +71,6 @@ impl Command {
             Command::Noise => "noise",
             Command::Insights => "insights",
             Command::Report => "report",
-            Command::Help => "help",
             Command::Version => "version",
         }
     }
@@ -76,6 +79,7 @@ impl Command {
 #[derive(Debug, Default)]
 pub struct Options {
     pub command: Option<Command>,
+    pub help: Option<String>,
     pub target: Option<String>,
     pub counters: Option<Vec<String>>,
     pub corpus: Option<Vec<String>>,
@@ -138,7 +142,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
         };
         match flag {
-            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "help" | "version"
+            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "version"
                 if options.command.is_none() =>
             {
                 options.command = Some(match flag {
@@ -148,11 +152,15 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     "noise" => Command::Noise,
                     "insights" => Command::Insights,
                     "report" => Command::Report,
-                    "help" => Command::Help,
                     _ => Command::Version,
                 });
             }
-            "--help" | "-h" => options.command = Some(Command::Help),
+            "--help" | "-h" => {
+                options.help = Some(match options.command {
+                    Some(command) => find_help_of(command.as_str()),
+                    None => get_help(),
+                });
+            }
             "--version" | "-V" => options.command = Some(Command::Version),
             "--counters" => {
                 let first = value()?;
@@ -222,8 +230,11 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             {
                 options.target = Some(other.to_string());
             }
-            other => return Err(explain_the_unknown_argument(other)),
+            other => return Err(explain_the_unknown_argument(other, options.command)),
         }
+    }
+    if options.help.is_some() {
+        return Ok(options);
     }
     read_corpus_as_the_target(&mut options)?;
     Ok(options)
@@ -657,10 +668,6 @@ fn read_list<'a>(
     split_list(flag, &text)
 }
 
-const COMMANDS: [&str; 8] = [
-    "run", "fetch", "check", "noise", "insights", "report", "help", "version",
-];
-
 fn split_list(flag: &str, text: &str) -> Result<Vec<String>, String> {
     let names: Vec<String> = text.split(',').map(|s| s.trim().to_string()).collect();
     if names.iter().any(|name| name.is_empty()) {
@@ -669,14 +676,17 @@ fn split_list(flag: &str, text: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn explain_the_unknown_argument(other: &str) -> String {
-    if COMMANDS.contains(&other) {
-        return format!("second command: {other}");
-    }
-    if other.starts_with('-') {
-        return format!("unknown flag: {other}");
-    }
-    format!("unknown argument: {other}")
+fn explain_the_unknown_argument(other: &str, command: Option<Command>) -> String {
+    let Some(command) = command else {
+        return format!(
+            "{other} is not a command of this program\n\n{}\n",
+            name_every_command()
+        );
+    };
+    format!(
+        "{other} is not a flag of this command\n\n{}",
+        find_help_of(command.as_str())
+    )
 }
 
 fn split_assignment(flag: &str, text: &str) -> Result<(String, String), String> {
@@ -798,10 +808,17 @@ mod tests {
                 .unwrap_err()
                 .contains("the one corpus to measure")
         );
-        assert_eq!(
-            parse("run linux other").unwrap_err(),
-            "unknown argument: other"
+        let stray = parse("run linux other").unwrap_err();
+        assert!(
+            stray.starts_with(
+                "other is not a flag of this command
+
+"
+            ),
+            "{stray}"
         );
+        assert!(stray.contains("linebench run <corpus|dir>"), "{stray}");
+        assert!(!stray.contains("linebench check <corpus|dir>"), "{stray}");
         assert_eq!(
             parse("run --against 20260908-100000")
                 .unwrap()
@@ -820,15 +837,39 @@ mod tests {
                 .unwrap_err()
                 .contains("<instance>=<path>")
         );
-        assert_eq!(
-            parse("run --nonsense").unwrap_err(),
-            "unknown flag: --nonsense"
+        let misspelled = parse("run --nonsense").unwrap_err();
+        assert!(
+            misspelled.starts_with(
+                "--nonsense is not a flag of this command
+
+"
+            ),
+            "{misspelled}"
         );
-        assert_eq!(
-            parse("mezura@dev").unwrap_err(),
-            "unknown argument: mezura@dev"
+        assert!(
+            misspelled.contains("linebench run <corpus|dir>"),
+            "{misspelled}"
         );
-        assert_eq!(parse("run check").unwrap_err(), "second command: check");
+        let nameless = parse("mezura@dev").unwrap_err();
+        assert!(
+            nameless.starts_with(
+                "mezura@dev is not a command of this program
+
+"
+            ),
+            "{nameless}"
+        );
+        assert!(nameless.contains("linebench fetch ["), "{nameless}");
+        assert!(!nameless.contains("Downloads what the other"), "{nameless}");
+        let twice = parse("run check").unwrap_err();
+        assert!(
+            twice.starts_with(
+                "check is not a flag of this command
+
+"
+            ),
+            "{twice}"
+        );
         assert_eq!(
             parse("run --counters mezura,,scc").unwrap_err(),
             "empty name in --counters mezura,,scc"
@@ -837,6 +878,22 @@ mod tests {
             parse("run --counters mezura,").unwrap_err(),
             "empty name in --counters mezura,"
         );
+    }
+
+    #[test]
+    fn help_after_a_command_is_that_commands_own_and_a_bare_one_is_the_whole_of_it() {
+        let one = parse("fetch --help").unwrap().help.unwrap();
+        assert!(one.starts_with("linebench fetch ["), "{one}");
+        assert!(!one.contains("linebench check "), "{one}");
+        assert!(!one.contains("A flag beats"), "{one}");
+        let short = parse("check -h").unwrap().help.unwrap();
+        assert!(short.starts_with("linebench check "), "{short}");
+        let whole = parse("--help").unwrap().help.unwrap();
+        assert!(whole.contains("linebench check "), "{whole}");
+        assert!(whole.contains("A flag beats"), "{whole}");
+        let asked = parse("check --corpus linux,linebench --help").unwrap();
+        assert!(asked.help.is_some());
+        assert_eq!(asked.target, None);
     }
 
     #[test]

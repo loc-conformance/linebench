@@ -88,8 +88,8 @@ hand, which is what a run that is killed outright leaves you with. Unelevated it
 would have changed and asks before doing any work. `--yes` answers that question, `--no-prep`
 skips the whole thing even when elevated, and with no terminal attached it carries on.
 
-The commands are `setup`, `check`, `noise`, `run` and `report`. `linebench help` lists every
-flag.
+The commands are `fetch`, `check`, `noise`, `run`, `insights` and `report`. `linebench --help`
+lists every flag, and a `--help` after a command prints that command alone.
 
 ## Where things are
 
