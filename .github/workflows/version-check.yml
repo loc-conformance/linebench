@@ -109,6 +109,14 @@ jobs:
         if: steps.branch.outputs.already == 'no'
         run: cargo build --release
 
+      # check times the control once through hyperfine, to say the tool works before a run is
+      # paid for, so it is here for the same reason it is in ci.yml.
+      - name: Install hyperfine
+        if: steps.branch.outputs.already == 'no'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
       # Every counter is fetched, not the raised one alone, because equal work is compared between
       # counters and nothing is compared until two of them have counts.
       - name: Fetch every counter and read the counts back
