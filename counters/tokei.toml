@@ -6,7 +6,7 @@ output       = "tokei-json"
 [acquisition]
 channel = "crates-io"
 name    = "tokei"
-version = "14.0.0"
+version = "15.0.0"
 
 [run]
 args           = ["{target}"]
