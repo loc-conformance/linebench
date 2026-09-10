@@ -49,7 +49,7 @@ pub struct Fetched {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_with: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub newest: bool,
+    pub latest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +118,7 @@ pub fn fetch_counter(
     arch: &str,
     dir: &Path,
     manifest: &mut Manifest,
-    newest: bool,
+    latest: bool,
 ) -> Result<PathBuf, String> {
     let system = platform.as_system();
     let named = definition.get_binary_name(system)?;
@@ -136,8 +136,8 @@ pub fn fetch_counter(
         && target.is_file()
         && calculate_sha256(&target)? == fetched.sha256
     {
-        if fetched.newest != newest {
-            fetched.newest = newest;
+        if fetched.latest != latest {
+            fetched.latest = latest;
             write_manifest(dir, manifest)?;
         }
         print_line(
@@ -193,7 +193,7 @@ pub fn fetch_counter(
             source,
             sha256,
             built_with,
-            newest,
+            latest,
         },
     );
     write_manifest(dir, manifest)?;
@@ -967,7 +967,7 @@ blanks   = \"Blank\"
             source: "scc_Windows_x86_64.zip".to_string(),
             sha256: "abc".to_string(),
             built_with: None,
-            newest: false,
+            latest: false,
         };
         let origin = decide_origin(&scc, binary, Some(&fetched), "abc").unwrap();
         assert_eq!(
@@ -1072,7 +1072,7 @@ blanks   = \"Blank\"
                 source: "crates.io tokei 14.0.0".to_string(),
                 sha256: "abc".to_string(),
                 built_with: Some("rustc 1.97.1".to_string()),
-                newest: false,
+                latest: false,
             },
         );
         manifest.0.insert(
@@ -1083,7 +1083,7 @@ blanks   = \"Blank\"
                 source: "scc_Windows_x86_64.zip".to_string(),
                 sha256: "def".to_string(),
                 built_with: None,
-                newest: true,
+                latest: true,
             },
         );
         write_manifest(&dir, &manifest).unwrap();
@@ -1094,8 +1094,8 @@ blanks   = \"Blank\"
             written.contains("[scc]") && written.contains("channel = \"crates-io\""),
             "{written}"
         );
-        assert_eq!(written.matches("newest = true").count(), 1, "{written}");
-        assert!(!written.contains("newest = false"), "{written}");
+        assert_eq!(written.matches("latest = true").count(), 1, "{written}");
+        assert!(!written.contains("latest = false"), "{written}");
         assert_eq!(read, manifest);
     }
 

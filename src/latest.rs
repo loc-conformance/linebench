@@ -13,7 +13,7 @@ use crate::fetch::{
 };
 use crate::files::read_toml;
 
-pub const NEWEST_FILE: &str = "linebench-newest.toml";
+pub const LATEST_FILE: &str = "linebench-latest.toml";
 pub const CACHE_SECONDS: u64 = 6 * 60 * 60;
 const LOOKUP_SECONDS: u32 = 10;
 const GITHUB_API: &str = "https://api.github.com/repos";
@@ -46,7 +46,7 @@ pub fn choose_counters_to_look_up<'a>(
     chosen
 }
 
-pub fn collect_newest_releases<'a>(
+pub fn collect_latest_releases<'a>(
     definitions: &[&'a Definition],
     dir: &Path,
     now: u64,
@@ -118,7 +118,7 @@ pub fn collect_newest_releases<'a>(
     (lookups, warning)
 }
 
-pub fn find_newest_release(definition: &Definition) -> Result<String, String> {
+pub fn find_latest_release(definition: &Definition) -> Result<String, String> {
     let Some(how) = &definition.acquisition else {
         return Err(format!(
             "{} says nothing about where it is fetched from, so there is no release to look up",
@@ -145,23 +145,23 @@ pub fn compare_versions(one: &str, other: &str) -> Option<Ordering> {
     Some(one.cmp(&other))
 }
 
-pub fn judge_newest(how: &Acquisition, newest: &str) -> Standing {
-    match compare_versions(newest, &how.version) {
+pub fn judge_latest(how: &Acquisition, latest: &str) -> Standing {
+    match compare_versions(latest, &how.version) {
         Some(Ordering::Greater) => Standing::Newer,
         Some(Ordering::Equal) => Standing::Same,
         Some(Ordering::Less) => Standing::Behind,
-        None if strip_leading_v(newest) == strip_leading_v(&how.version) => Standing::Same,
+        None if strip_leading_v(latest) == strip_leading_v(&how.version) => Standing::Same,
         None => Standing::Differs,
     }
 }
 
-pub fn apply_newest_pins(definitions: &mut [Definition], manifest: &Manifest) -> Vec<String> {
+pub fn apply_latest_pins(definitions: &mut [Definition], manifest: &Manifest) -> Vec<String> {
     let mut set_aside = Vec::new();
     for definition in definitions {
         let Some(entry) = manifest
             .0
             .get(&definition.name)
-            .filter(|entry| entry.newest)
+            .filter(|entry| entry.latest)
         else {
             continue;
         };
@@ -171,7 +171,7 @@ pub fn apply_newest_pins(definitions: &mut [Definition], manifest: &Manifest) ->
         let (name, pin) = (&definition.name, &entry.version);
         if definition.added {
             set_aside.push(format!(
-                "{name}: the pin of {pin} from fetch --newest is set aside, since the \
+                "{name}: the pin of {pin} from fetch --latest is set aside, since the \
                  definition comes from {}",
                 definition.path.display()
             ));
@@ -179,14 +179,14 @@ pub fn apply_newest_pins(definitions: &mut [Definition], manifest: &Manifest) ->
         }
         if entry.channel != how.channel {
             set_aside.push(format!(
-                "{name}: the pin of {pin} from fetch --newest is set aside, since the \
+                "{name}: the pin of {pin} from fetch --latest is set aside, since the \
                  definition now fetches from another channel"
             ));
             continue;
         }
         if compare_versions(pin, &how.version) != Some(Ordering::Greater) {
             set_aside.push(format!(
-                "{name}: the definition now pins {}, so the pin of {pin} from fetch --newest \
+                "{name}: the definition now pins {}, so the pin of {pin} from fetch --latest \
                  is set aside",
                 how.version
             ));
@@ -198,7 +198,7 @@ pub fn apply_newest_pins(definitions: &mut [Definition], manifest: &Manifest) ->
     set_aside
 }
 
-pub fn remember_newest(
+pub fn remember_latest(
     dir: &Path,
     name: &str,
     how: &Acquisition,
@@ -218,11 +218,11 @@ pub fn remember_newest(
     write_cache(dir, &cache)
 }
 
-pub fn describe_newest(
+pub fn describe_latest(
     name: &str,
     how: &Acquisition,
     shipped: Option<&str>,
-    newest: &str,
+    latest: &str,
 ) -> String {
     let pinned = &how.version;
     let release = match how.channel {
@@ -230,13 +230,13 @@ pub fn describe_newest(
         Channel::GithubReleaseAsset | Channel::GithubReleaseFile => "release",
     };
     let by = describe_pinned_version(how, shipped);
-    let mut text = match judge_newest(how, newest) {
+    let mut text = match judge_latest(how, latest) {
         Standing::Newer => format!(
-            "the newest {release} is {newest}; {by}; fetch --counters {name} --newest fetches it"
+            "the latest {release} is {latest}; {by}; fetch --counters {name} --latest fetches it"
         ),
-        Standing::Same => format!("{pinned} is the newest {release}"),
-        Standing::Behind => format!("{by}, ahead of the newest {release} {newest}"),
-        Standing::Differs => format!("the newest {release} is tagged {newest}; {by}"),
+        Standing::Same => format!("{pinned} is the latest {release}"),
+        Standing::Behind => format!("{by}, ahead of the latest {release} {latest}"),
+        Standing::Differs => format!("the latest {release} is tagged {latest}; {by}"),
     };
     if let Some(origin) = describe_pin_origin(how, shipped) {
         text.push_str(&format!(" ({origin})"));
@@ -254,7 +254,7 @@ pub fn describe_pinned_version(how: &Acquisition, shipped: Option<&str>) -> Stri
 pub fn describe_pin_origin(how: &Acquisition, shipped: Option<&str>) -> Option<String> {
     shipped.map(|shipped| {
         format!(
-            "fetch --newest pinned {} over the {shipped} the definition ships with",
+            "fetch --latest pinned {} over the {shipped} the definition ships with",
             how.version
         )
     })
@@ -272,7 +272,7 @@ struct Cached {
 type Cache = BTreeMap<String, Cached>;
 
 fn read_cache(dir: &Path) -> Cache {
-    let path = dir.join(NEWEST_FILE);
+    let path = dir.join(LATEST_FILE);
     if !path.is_file() {
         return Cache::default();
     }
@@ -280,7 +280,7 @@ fn read_cache(dir: &Path) -> Cache {
 }
 
 fn write_cache(dir: &Path, cache: &Cache) -> Result<(), String> {
-    let path = dir.join(NEWEST_FILE);
+    let path = dir.join(LATEST_FILE);
     let text = toml::to_string(cache)
         .map_err(|error| format!("the release lookups could not be written out: {error}"))?;
     fs::write(&path, text)
@@ -290,7 +290,7 @@ fn write_cache(dir: &Path, cache: &Cache) -> Result<(), String> {
 fn read_github_latest(repository: &str) -> Result<String, String> {
     let url = format!("{GITHUB_API}/{repository}/releases/latest");
     let text = read_github_api_within(&url, LOOKUP_SECONDS)
-        .map_err(|message| explain_newest_refusal(repository, &[message]))?;
+        .map_err(|message| explain_latest_refusal(repository, &[message]))?;
     parse_latest_tag(repository, &text)
 }
 
@@ -324,7 +324,7 @@ fn parse_crate_version(name: &str, text: &str) -> Result<String, String> {
         .ok_or_else(|| format!("crates.io lists no stable version of {name}"))
 }
 
-fn explain_newest_refusal(repository: &str, refused: &[String]) -> String {
+fn explain_latest_refusal(repository: &str, refused: &[String]) -> String {
     if let Some(explained) = explain_github_refusal(repository, refused) {
         return explained;
     }
@@ -427,56 +427,56 @@ blanks   = \"Total.blanks\"
     }
 
     #[test]
-    fn the_newest_is_judged_against_the_pin_and_described_the_same_way() {
+    fn the_latest_is_judged_against_the_pin_and_described_the_same_way() {
         let scc = parse_definition(SCC, &PathBuf::from("scc.toml")).unwrap();
         let how = scc.acquisition.as_ref().unwrap();
-        assert_eq!(judge_newest(how, "4.0.0"), Standing::Same);
+        assert_eq!(judge_latest(how, "4.0.0"), Standing::Same);
         assert_eq!(
-            describe_newest("scc", how, None, "4.0.0"),
-            "4.0.0 is the newest release"
+            describe_latest("scc", how, None, "4.0.0"),
+            "4.0.0 is the latest release"
         );
-        assert_eq!(judge_newest(how, "4.1.0"), Standing::Newer);
+        assert_eq!(judge_latest(how, "4.1.0"), Standing::Newer);
         assert_eq!(
-            describe_newest("scc", how, None, "4.1.0"),
-            "the newest release is 4.1.0; the definition pins 4.0.0; fetch --counters scc \
-             --newest fetches it"
+            describe_latest("scc", how, None, "4.1.0"),
+            "the latest release is 4.1.0; the definition pins 4.0.0; fetch --counters scc \
+             --latest fetches it"
         );
-        assert_eq!(judge_newest(how, "3.9.0"), Standing::Behind);
+        assert_eq!(judge_latest(how, "3.9.0"), Standing::Behind);
         assert_eq!(
-            describe_newest("scc", how, None, "3.9.0"),
-            "the definition pins 4.0.0, ahead of the newest release 3.9.0"
+            describe_latest("scc", how, None, "3.9.0"),
+            "the definition pins 4.0.0, ahead of the latest release 3.9.0"
         );
-        assert_eq!(judge_newest(how, "4.1.0-rc1"), Standing::Differs);
+        assert_eq!(judge_latest(how, "4.1.0-rc1"), Standing::Differs);
         assert_eq!(
-            describe_newest("scc", how, None, "4.1.0-rc1"),
-            "the newest release is tagged 4.1.0-rc1; the definition pins 4.0.0"
+            describe_latest("scc", how, None, "4.1.0-rc1"),
+            "the latest release is tagged 4.1.0-rc1; the definition pins 4.0.0"
         );
         assert_eq!(
-            describe_newest("scc", how, Some("3.7.0"), "4.0.0"),
-            "4.0.0 is the newest release (fetch --newest pinned 4.0.0 over the 3.7.0 the \
+            describe_latest("scc", how, Some("3.7.0"), "4.0.0"),
+            "4.0.0 is the latest release (fetch --latest pinned 4.0.0 over the 3.7.0 the \
              definition ships with)"
         );
         assert_eq!(
-            describe_newest("scc", how, Some("3.7.0"), "4.2.0"),
-            "the newest release is 4.2.0; the pin in effect is 4.0.0; fetch --counters scc \
-             --newest fetches it (fetch --newest pinned 4.0.0 over the 3.7.0 the definition \
+            describe_latest("scc", how, Some("3.7.0"), "4.2.0"),
+            "the latest release is 4.2.0; the pin in effect is 4.0.0; fetch --counters scc \
+             --latest fetches it (fetch --latest pinned 4.0.0 over the 3.7.0 the definition \
              ships with)"
         );
         let cloc = parse_definition(CLOC, &PathBuf::from("cloc.toml")).unwrap();
         assert_eq!(
-            judge_newest(cloc.acquisition.as_ref().unwrap(), "v2.10"),
+            judge_latest(cloc.acquisition.as_ref().unwrap(), "v2.10"),
             Standing::Same
         );
         let tokei = parse_definition(TOKEI, &PathBuf::from("tokei.toml")).unwrap();
         assert_eq!(
-            describe_newest("tokei", tokei.acquisition.as_ref().unwrap(), None, "15.0.0"),
-            "the newest crates.io release is 15.0.0; the definition pins 14.0.0; fetch \
-             --counters tokei --newest fetches it"
+            describe_latest("tokei", tokei.acquisition.as_ref().unwrap(), None, "15.0.0"),
+            "the latest crates.io release is 15.0.0; the definition pins 14.0.0; fetch \
+             --counters tokei --latest fetches it"
         );
     }
 
     #[test]
-    fn a_newest_pin_applies_over_a_shipped_definition_it_is_ahead_of_and_nowhere_else() {
+    fn a_latest_pin_applies_over_a_shipped_definition_it_is_ahead_of_and_nowhere_else() {
         let scc = parse_definition(SCC, &PathBuf::from("scc.toml")).unwrap();
         let mut caught_up = scc.clone();
         caught_up.acquisition.as_mut().unwrap().version = "4.1.0".to_string();
@@ -489,7 +489,7 @@ blanks   = \"Total.blanks\"
         moved.acquisition.as_mut().unwrap().channel = Channel::CratesIo;
         let mut plain = parse_definition(TOKEI, &PathBuf::from("tokei.toml")).unwrap();
         plain.name = "plain".to_string();
-        let entry = |name: &str, version: &str, channel: Channel, newest: bool| {
+        let entry = |name: &str, version: &str, channel: Channel, latest: bool| {
             (
                 name.to_string(),
                 Fetched {
@@ -498,7 +498,7 @@ blanks   = \"Total.blanks\"
                     source: String::new(),
                     sha256: String::new(),
                     built_with: None,
-                    newest,
+                    latest,
                 },
             )
         };
@@ -513,20 +513,20 @@ blanks   = \"Total.blanks\"
             .collect(),
         );
         let mut pinned = scc.clone();
-        let lines = apply_newest_pins(std::slice::from_mut(&mut pinned), &manifest);
+        let lines = apply_latest_pins(std::slice::from_mut(&mut pinned), &manifest);
         assert!(lines.is_empty(), "{lines:?}");
         assert_eq!(pinned.acquisition.as_ref().unwrap().version, "4.1.0");
         assert_eq!(pinned.shipped_version.as_deref(), Some("4.0.0"));
         let mut untouched = [caught_up, own, moved, plain];
-        let lines = apply_newest_pins(&mut untouched, &manifest);
+        let lines = apply_latest_pins(&mut untouched, &manifest);
         assert_eq!(
             lines,
             [
-                "scc: the definition now pins 4.1.0, so the pin of 4.1.0 from fetch --newest is \
+                "scc: the definition now pins 4.1.0, so the pin of 4.1.0 from fetch --latest is \
                  set aside",
-                "own: the pin of 4.1.0 from fetch --newest is set aside, since the definition \
+                "own: the pin of 4.1.0 from fetch --latest is set aside, since the definition \
                  comes from mine/own.toml",
-                "moved: the pin of 4.1.0 from fetch --newest is set aside, since the definition \
+                "moved: the pin of 4.1.0 from fetch --latest is set aside, since the definition \
                  now fetches from another channel",
             ]
         );
@@ -564,14 +564,14 @@ blanks   = \"Total.blanks\"
         );
         let missing = ["curl: (22) The requested URL returned error: 404".to_string()];
         assert_eq!(
-            explain_newest_refusal("boyter/scc", &missing),
+            explain_latest_refusal("boyter/scc", &missing),
             "github lists no latest release for boyter/scc"
         );
         let limited = ["curl: (22) The requested URL returned error: 403".to_string()];
-        assert!(explain_newest_refusal("boyter/scc", &limited).contains("GITHUB_TOKEN"));
+        assert!(explain_latest_refusal("boyter/scc", &limited).contains("GITHUB_TOKEN"));
         let stalled = ["curl: (28) Operation timed out after 10001 milliseconds".to_string()];
         assert!(
-            explain_newest_refusal("boyter/scc", &stalled)
+            explain_latest_refusal("boyter/scc", &stalled)
                 .starts_with("github could not be asked what boyter/scc has released")
         );
     }
@@ -600,28 +600,28 @@ blanks   = \"Total.blanks\"
                 other => Err(format!("{other} is offline")),
             }
         };
-        let (first, warning) = collect_newest_releases(&chosen, &dir, 1_000_000, look_up);
+        let (first, warning) = collect_latest_releases(&chosen, &dir, 1_000_000, look_up);
         assert_eq!(warning, None);
         assert_eq!(first.len(), 2);
         assert_eq!(first[0].outcome.as_ref().unwrap(), "4.1.0");
         assert_eq!(first[0].age_seconds, None);
         assert_eq!(first[1].outcome.as_ref().unwrap_err(), "tokei is offline");
-        let (second, _) = collect_newest_releases(&chosen, &dir, 1_000_000 + 3_600, look_up);
+        let (second, _) = collect_latest_releases(&chosen, &dir, 1_000_000 + 3_600, look_up);
         assert_eq!(second[0].age_seconds, Some(3_600));
         assert_eq!(second[0].outcome.as_ref().unwrap(), "4.1.0");
         assert_eq!(second[1].age_seconds, None);
         let mut fork = scc.clone();
         fork.acquisition.as_mut().unwrap().name = "someone/scc".to_string();
-        let (forked, _) = collect_newest_releases(&[&fork], &dir, 1_000_000 + 3_600, look_up);
+        let (forked, _) = collect_latest_releases(&[&fork], &dir, 1_000_000 + 3_600, look_up);
         assert_eq!(forked[0].age_seconds, None);
-        let (third, _) = collect_newest_releases(&chosen, &dir, 1_000_000 + CACHE_SECONDS, look_up);
+        let (third, _) = collect_latest_releases(&chosen, &dir, 1_000_000 + CACHE_SECONDS, look_up);
         assert_eq!(third[0].age_seconds, None);
         let (_, refused) =
-            collect_newest_releases(&chosen, &dir.join("missing"), 2_000_000, look_up);
+            collect_latest_releases(&chosen, &dir.join("missing"), 2_000_000, look_up);
         assert!(refused.unwrap().contains("could not be written"));
         let how = tokei.acquisition.as_ref().unwrap();
-        remember_newest(&dir, "tokei", how, "15.0.0", 2_000_000).unwrap();
-        let (remembered, _) = collect_newest_releases(&chosen, &dir, 2_000_100, look_up);
+        remember_latest(&dir, "tokei", how, "15.0.0", 2_000_000).unwrap();
+        let (remembered, _) = collect_latest_releases(&chosen, &dir, 2_000_100, look_up);
         assert_eq!(remembered[1].age_seconds, Some(100));
         assert_eq!(remembered[1].outcome.as_ref().unwrap(), "15.0.0");
         fs::remove_dir_all(&dir).unwrap();

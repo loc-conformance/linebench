@@ -61,7 +61,7 @@ address, a limit that shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TO
 the token goes to that one call and never to a download. The workflow sets the token Actions
 provides.
 
-`setup --newest` fetches the newest release of each counter in place of the version its
+`setup --latest` fetches the latest release of each counter in place of the version its
 definition pins, for every counter or for those named by `--counters`, and records that pin
 in the manifest beside the binary. From then on that version is the one in effect for every
 command on this machine, until the definition itself catches up with it or passes it, when
@@ -115,7 +115,7 @@ compared with each other; the flag is refused beside `--corpus`, since a definit
 own extensions.
 
 The counters directory is where `setup` puts what it fetches, with the manifest of hashes,
-and of any `--newest` pin, beside the binaries and the copies of your own builds under
+and of any `--latest` pin, beside the binaries and the copies of your own builds under
 `given/`; the setting is only for
 keeping them elsewhere, say under a Defender exclusion path. Results go one
 `results/<corpus>/<system>/<stamp>/` per run, with `results/README.md` as the page over all of
@@ -123,8 +123,9 @@ them. `--add` takes a counter or a corpus `.toml`, or a directory of them, read 
 built-in ones; one named like a built-in definition takes its place, and a line says so. The
 control is the instance timed alone at both ends of the run, whose shift is read as the
 machine's own movement. `skip` leaves counters out of every default set on this machine,
-whatever the corpus: `setup` does not fetch them, `check` and `run` leave them out and say so,
-and naming one in `--counters` runs it. The token lifts the anonymous rate limit on the release
+whatever the corpus: `check` and `run` leave them out and say so, and naming one in `--counters`
+runs it. Fetching pays it no attention, since a counter has to be asked for by name or with
+`all` before it is downloaded at all. The token lifts the anonymous rate limit on the release
 lookup and goes to that one call only.
 
 With nothing set at all, every command but `report` refuses and prints the recipe. Keep the
@@ -232,14 +233,14 @@ the corpus:
    within 1.0% of the corpus
 
 >> releases
-   mezura      3.0.0 is the newest release
-   scc         the newest release is 4.1.0; the definition pins 4.0.0; setup --counters scc --newest fetches it
-   tokei       14.0.0 is the newest crates.io release
+   mezura      3.0.0 is the latest release
+   scc         the latest release is 4.1.0; the definition pins 4.0.0; setup --counters scc --latest fetches it
+   tokei       14.0.0 is the latest crates.io release
 
 all good.
 ```
 
-The `releases` lines say whether the version each definition pins is still the newest one
+The `releases` lines say whether the version each definition pins is still the latest one
 published: one lookup per counter, on the channel the definition fetches from, GitHub's
 releases or crates.io. The lookups run beside the counters, each times out after ten seconds,
 and their answers are kept for six hours beside the fetched binaries, since GitHub allows an
