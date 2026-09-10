@@ -184,10 +184,14 @@ pub fn apply_latest_pins(definitions: &mut [Definition], manifest: &Manifest) ->
             ));
             continue;
         }
-        if compare_versions(pin, &how.version) != Some(Ordering::Greater) {
+        let against_the_definition = compare_versions(pin, &how.version);
+        if against_the_definition == Some(Ordering::Equal) {
+            continue;
+        }
+        if against_the_definition != Some(Ordering::Greater) {
             set_aside.push(format!(
-                "{name}: the definition now pins {}, so the pin of {pin} from fetch --latest \
-                 is set aside",
+                "{name}: the pin of {pin} from fetch --latest is set aside, since the \
+                 definition pins {}",
                 how.version
             ));
             continue;
@@ -484,6 +488,9 @@ blanks   = \"Total.blanks\"
         own.name = "own".to_string();
         own.added = true;
         own.path = PathBuf::from("mine/own.toml");
+        let mut ahead = scc.clone();
+        ahead.name = "ahead".to_string();
+        ahead.acquisition.as_mut().unwrap().version = "4.2.0".to_string();
         let mut moved = scc.clone();
         moved.name = "moved".to_string();
         moved.acquisition.as_mut().unwrap().channel = Channel::CratesIo;
@@ -506,6 +513,7 @@ blanks   = \"Total.blanks\"
             [
                 entry("scc", "4.1.0", Channel::GithubReleaseAsset, true),
                 entry("own", "4.1.0", Channel::GithubReleaseAsset, true),
+                entry("ahead", "4.1.0", Channel::GithubReleaseAsset, true),
                 entry("moved", "4.1.0", Channel::GithubReleaseAsset, true),
                 entry("plain", "15.0.0", Channel::CratesIo, false),
             ]
@@ -517,13 +525,13 @@ blanks   = \"Total.blanks\"
         assert!(lines.is_empty(), "{lines:?}");
         assert_eq!(pinned.acquisition.as_ref().unwrap().version, "4.1.0");
         assert_eq!(pinned.shipped_version.as_deref(), Some("4.0.0"));
-        let mut untouched = [caught_up, own, moved, plain];
+        let mut untouched = [caught_up, ahead, own, moved, plain];
         let lines = apply_latest_pins(&mut untouched, &manifest);
         assert_eq!(
             lines,
             [
-                "scc: the definition now pins 4.1.0, so the pin of 4.1.0 from fetch --latest is \
-                 set aside",
+                "ahead: the pin of 4.1.0 from fetch --latest is set aside, since the definition \
+                 pins 4.2.0",
                 "own: the pin of 4.1.0 from fetch --latest is set aside, since the definition \
                  comes from mine/own.toml",
                 "moved: the pin of 4.1.0 from fetch --latest is set aside, since the definition \
@@ -533,9 +541,11 @@ blanks   = \"Total.blanks\"
         for definition in &untouched {
             assert_eq!(definition.shipped_version, None, "{}", definition.name);
         }
-        assert_eq!(untouched[1].acquisition.as_ref().unwrap().version, "4.0.0");
+        assert_eq!(untouched[0].acquisition.as_ref().unwrap().version, "4.1.0");
+        assert_eq!(untouched[1].acquisition.as_ref().unwrap().version, "4.2.0");
         assert_eq!(untouched[2].acquisition.as_ref().unwrap().version, "4.0.0");
-        assert_eq!(untouched[3].acquisition.as_ref().unwrap().version, "14.0.0");
+        assert_eq!(untouched[3].acquisition.as_ref().unwrap().version, "4.0.0");
+        assert_eq!(untouched[4].acquisition.as_ref().unwrap().version, "14.0.0");
     }
 
     #[test]

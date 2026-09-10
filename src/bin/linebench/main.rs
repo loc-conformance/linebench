@@ -34,11 +34,12 @@ use crate::config::{
     Command, Config, Locations, Options, check_skip_names, find_config, find_data_dir, parse_args,
     read_config, resolve_fetch, resolve_locations, resolve_out,
 };
-use crate::help::{get_help, paint_help};
+use crate::help::{find_help_of, get_help, paint_help};
 use crate::output::{Color, Output, enable_colors, paint, print_line};
 use crate::shipped::collect_definitions;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const NAME_THE_RUN: &str = "name the run to read";
 
 fn main() {
     enable_colors();
@@ -79,6 +80,15 @@ fn dispatch() -> Result<i32, String> {
         Command::Report => {
             let config = read_config(&find_config())?;
             commands::run_report(&mut out, &resolve_out(&options, &config))
+        }
+        Command::Verify => {
+            let Some(named) = options.target.as_deref() else {
+                return Err(format!(
+                    "{NAME_THE_RUN}\n\n{}",
+                    find_help_of(command.as_str())
+                ));
+            };
+            commands::run_verify(&mut out, &PathBuf::from(named))
         }
         Command::Fetch => {
             let ground = read_ground(&mut out, &options)?;

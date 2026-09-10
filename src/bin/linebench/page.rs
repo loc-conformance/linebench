@@ -18,6 +18,9 @@ use linebench::record::{
 use linebench::record::{LOCAL_DIR, RECORD_FILE};
 
 pub const PAGE_FILE: &str = "README.md";
+const VERIFY_INVITE: &str = "Every number here comes out of a record under this folder. \
+                             `linebench verify <run directory>` reads one back and holds its \
+                             numbers against each other.";
 const RUN_DEPTH: usize = 3;
 const LONG_CONTEXT_VALUE: usize = 60;
 const CONTEXT: [(&str, ReadContext); 11] = [
@@ -127,6 +130,8 @@ pub fn write_results_page(out_root: &Path, found: &[FoundRun]) -> Result<bool, S
     if let Some(newest) = shown.first().copied().or(found.first()) {
         lines.extend(format_methodology(&newest.record, single_order_seen));
     }
+    lines.push(String::new());
+    lines.push(VERIFY_INVITE.to_string());
     let path = out_root.join(PAGE_FILE);
     let mut text = lines.join("\n");
     text.push('\n');

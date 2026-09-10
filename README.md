@@ -201,7 +201,7 @@ claim that the work was the same does not.
 
 The tag is a column name. The bytes are identified afresh on every run by the hash and the
 version line in the record, so a stale entry cannot describe the wrong binary. A run holding
-any given instance is written under `results/local/`, which is gitignored, and the results page
+any given instance is written under `results/local/`, and the results page
 lists such runs in their own table under the release runs. An entry in the conf joins every run
 that names no `--counters`, so for a run meant for the release tables comment it out or name
 the release instances with `--counters`.
@@ -460,6 +460,12 @@ each other.
 
 ## Where results go
 
+No run of ours is published here: the spread from one machine and one operating system to the
+next is too wide for a number measured on ours to say anything about yours. The runs worth
+reading are the ones the counters publish themselves, in their own repositories, and a counter
+that publishes none is worth asking for some. When you measure, copy `results/README.md` and the
+run directories it names into a folder of your own repository, and link to it from your README.
+
 ```
 results/
 ├── README.md
@@ -483,6 +489,17 @@ checklist to fill in by hand, with the "since the last run" block under it, and 
 `--against` block when one was asked for. `out/` holds every
 counter's JSON and is deleted once the counts are read; `--keep-raw` keeps it, and then also
 captures each counter's plain output beside the JSON.
+
+## verify
+
+`linebench verify <path>` reads a run back and holds its numbers against each other: every
+measurement against itself, the columns that come off other columns, the counts against their own
+addition, equal work re-judged, and the csv files rebuilt from the record. Where the hyperfine
+exports were published too, every statistic is recomputed from the time of every single execution.
+The path is a run directory, or the `run.json` inside it.
+
+It prints what it could not read. A check that does not hold exits 1, and a file that is absent is
+a gap and does not. What it says is that every number in the record agrees with every other.
 
 ## Reading the numbers
 

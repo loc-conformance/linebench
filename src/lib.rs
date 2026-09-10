@@ -14,3 +14,4 @@ pub mod read;
 pub mod record;
 pub mod sample;
 pub mod syscalls;
+pub mod verify;

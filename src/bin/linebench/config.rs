@@ -22,8 +22,8 @@ pub const COUNTERS_ENV: &str = "LINEBENCH_COUNTERS";
 pub const CORPUS_ENV: &str = "LINEBENCH_CORPUS";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
-pub const COMMANDS: [&str; 7] = [
-    "run", "fetch", "check", "noise", "insights", "report", "version",
+pub const COMMANDS: [&str; 8] = [
+    "run", "fetch", "check", "noise", "insights", "report", "verify", "version",
 ];
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,6 +59,7 @@ pub enum Command {
     Noise,
     Insights,
     Report,
+    Verify,
     Version,
     #[cfg(feature = "maintenance")]
     BumpVersions,
@@ -73,6 +74,7 @@ impl Command {
             Command::Noise => "noise",
             Command::Insights => "insights",
             Command::Report => "report",
+            Command::Verify => "verify",
             Command::Version => "version",
             #[cfg(feature = "maintenance")]
             Command::BumpVersions => "bump-versions",
@@ -148,7 +150,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
         };
         match flag {
-            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "version"
+            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "verify" | "version"
                 if options.command.is_none() =>
             {
                 options.command = Some(match flag {
@@ -158,6 +160,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     "noise" => Command::Noise,
                     "insights" => Command::Insights,
                     "report" => Command::Report,
+                    "verify" => Command::Verify,
                     _ => Command::Version,
                 });
             }

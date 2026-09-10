@@ -17,12 +17,13 @@ use crate::measure::{CONTROL_END, CONTROL_START, FORWARD, REVERSE};
 use crate::measure::{Instance, Table, get_set_name};
 use crate::read::Counts;
 
-pub const RECORD_FORMAT: u32 = 2;
+pub const RECORD_FORMAT: u32 = 1;
 pub const LOCAL_DIR: &str = "local";
 pub const RECORD_FILE: &str = "run.json";
 pub const SUMMARY_CSV: &str = "summary.csv";
 pub const COUNTS_CSV: &str = "counts.csv";
 pub const NOTES_FILE: &str = "notes.md";
+pub const UNKNOWN_INSTANCE: &str = "unknown";
 const SECONDS_PER_DAY: u64 = 86_400;
 const SUMMARY_COLUMNS: [&str; 16] = [
     "set",
@@ -163,6 +164,14 @@ pub struct Measurement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Timings {
+    pub command: String,
+    pub times: Vec<f64>,
+    pub user_s: Option<f64>,
+    pub system_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Pooled {
     pub instance: String,
     pub mean_s: f64,
@@ -212,7 +221,7 @@ pub fn collect_measurements(
             let instance = commands
                 .get(&result.command)
                 .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
+                .unwrap_or_else(|| UNKNOWN_INSTANCE.to_string());
             let counted = Table::of_set(&set).and_then(|table| {
                 counts
                     .iter()
@@ -222,6 +231,24 @@ pub fn collect_measurements(
         }
     }
     Ok((measurements, skipped))
+}
+
+/// Every execution hyperfine timed, so a statistic in the record can be held against the times it
+/// was built from.
+pub fn read_export(path: &Path) -> Result<Vec<Timings>, String> {
+    let text = read_text(path)?;
+    let export: HyperfineExport =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(export
+        .results
+        .into_iter()
+        .map(|result| Timings {
+            command: result.command,
+            times: result.times,
+            user_s: result.user,
+            system_s: result.system,
+        })
+        .collect())
 }
 
 pub fn calculate_drift(measurements: &[Measurement]) -> Option<f64> {
@@ -514,7 +541,12 @@ pub fn read_record(path: &Path) -> Result<Record, String> {
 }
 
 pub fn write_csvs(res: &Path, record: &Record) -> Result<(), String> {
-    let mut summary = vec![SUMMARY_COLUMNS.join(",")];
+    write_lines(&res.join(SUMMARY_CSV), &build_summary_csv(record))?;
+    write_lines(&res.join(COUNTS_CSV), &build_counts_csv(record))
+}
+
+pub fn build_summary_csv(record: &Record) -> Vec<String> {
+    let mut lines = vec![SUMMARY_COLUMNS.join(",")];
     for m in &record.measurements {
         let cells = [
             m.set.clone(),
@@ -534,16 +566,13 @@ pub fn write_csvs(res: &Path, record: &Record) -> Result<(), String> {
             m.parallelism.map(|v| v.to_string()).unwrap_or_default(),
             m.lines_per_cpu_s.map(|v| v.to_string()).unwrap_or_default(),
         ];
-        summary.push(
-            cells
-                .iter()
-                .map(|cell| format_csv_field(cell))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+        lines.push(lay_out_cells(&cells));
     }
-    write_lines(&res.join(SUMMARY_CSV), &summary)?;
-    let mut counts = vec![COUNT_COLUMNS.join(",")];
+    lines
+}
+
+pub fn build_counts_csv(record: &Record) -> Vec<String> {
+    let mut lines = vec![COUNT_COLUMNS.join(",")];
     for c in &record.counts {
         let buckets: Vec<String> = c
             .buckets
@@ -559,15 +588,9 @@ pub fn write_csvs(res: &Path, record: &Record) -> Result<(), String> {
             c.comments.to_string(),
             buckets.join(" "),
         ];
-        counts.push(
-            cells
-                .iter()
-                .map(|cell| format_csv_field(cell))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+        lines.push(lay_out_cells(&cells));
     }
-    write_lines(&res.join(COUNTS_CSV), &counts)
+    lines
 }
 
 pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
@@ -763,6 +786,14 @@ fn calculate_mean_stddev(measurement: &Measurement) -> f64 {
 fn round_to(value: f64, decimals: i32) -> f64 {
     let scale = 10f64.powi(decimals);
     (value * scale).round() / scale
+}
+
+fn lay_out_cells(cells: &[String]) -> String {
+    cells
+        .iter()
+        .map(|cell| format_csv_field(cell))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn format_csv_field(cell: &str) -> String {

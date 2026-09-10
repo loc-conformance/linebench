@@ -99,6 +99,19 @@ linebench report [--out <dir>]
 
     Rewrites the results page from the records that are already there, with nothing measured.
 
+linebench verify <run>
+
+    Reads a run back and holds its numbers against each other: every measurement against itself,
+    the columns that come off other columns, the counts against their own addition, equal work
+    re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were kept
+    too, every statistic is recomputed from the time of every single execution.
+
+    The run is its directory, or the run.json inside it. A folder holding many runs is not one,
+    and the refusal says to name a run further in.
+
+    What could not be read is printed as it is. A check that does not hold exits 1, and a file
+    that is absent is a gap and does not.
+
 linebench version
 
     Prints this build's version.

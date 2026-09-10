@@ -16,7 +16,5 @@
 /archive/
 /temp/
 
-/results/**/out/
-/results/local/
-/results/insights/local/
+/results/
 /linebench.conf

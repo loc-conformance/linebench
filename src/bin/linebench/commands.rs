@@ -47,6 +47,7 @@ use linebench::record::{
 use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
+use linebench::verify::{Verification, check_run, find_run};
 
 use crate::config::{FetchPlan, Locations, Options, show_path};
 use crate::instances::build_instances;
@@ -602,6 +603,19 @@ pub fn run_report(out: &mut dyn Write, results: &Path) -> Result<i32, String> {
             results.display()
         ),
     )?;
+    Ok(1)
+}
+
+pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
+    let verification = check_run(&find_run(path)?)?;
+    print_verification(out, &verification)?;
+    let broken = verification.count_broken();
+    print_line(out, "")?;
+    if broken == 0 {
+        print_line(out, "done. nothing in this run contradicts itself")?;
+        return Ok(0);
+    }
+    print_warning(out, &format!("{broken} checks over this run do not hold"))?;
     Ok(1)
 }
 
@@ -1713,6 +1727,34 @@ fn print_parity(out: &mut dyn Write, parity: &Parity, lead: &str) -> Result<(), 
         )?;
     }
     Ok(())
+}
+
+fn print_verification(out: &mut dyn Write, verification: &Verification) -> Result<(), String> {
+    print_header(out, &format!("== verify {}", show_path(&verification.run)))?;
+    for level in verification.get_levels() {
+        if level.held.is_empty() && level.absent.is_empty() {
+            continue;
+        }
+        print_line(out, &format!("   {}", paint(Color::Bold, &level.name)))?;
+        for held in &level.held {
+            let mark = match held.holds() {
+                true => paint(Color::Green, "ok"),
+                false => paint(Color::Red, "no"),
+            };
+            print_line(out, &format!("   {mark}    {}", held.said))?;
+            for line in &held.broken {
+                print_line(out, &format!("         {line}"))?;
+            }
+        }
+        if !level.absent.is_empty() {
+            print_line(
+                out,
+                &format!("   --    absent: {}", level.absent.join(", ")),
+            )?;
+        }
+    }
+    print_line(out, "")?;
+    print_line(out, &format!("   {}", verification.describe_reach()))
 }
 
 fn collect_scrub(instances: &[Instance]) -> Vec<String> {
