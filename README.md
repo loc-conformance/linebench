@@ -47,11 +47,13 @@ First time on a machine:
 
 ```
 linebench fetch --counters all --corpus all
+linebench status
 ```
 
 `fetch` downloads every counter at the version its definition declares, into the counters
 directory, and every corpus at the commit its definition pins, into `corpora/<name>` beside
-them. Name the ones you want in place of `all`. What it fetched, and its sha256, goes into
+them. Name the ones you want in place of `all`: the three corpora take about 3 GB on disk
+together, the kernel two of them. What it fetched, and its sha256, goes into
 `linebench-fetched.toml` beside the binaries. A second `fetch` answers "already here" for what
 matches and downloads again what does not. It runs from an ordinary terminal and refuses an
 elevated one, so that the files it writes belong to you; only `run` is elevated.
@@ -60,6 +62,10 @@ Where there is no ordinary user, as on a CI runner, `--allow-elevated` lifts tha
 address, a limit that shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it;
 the token goes to that one call and never to a download. The workflow sets the token Actions
 provides.
+
+`status` then says what arrived and where each thing sits: every counter with what its channel
+publishes latest beside the version its definition pins, every corpus with the commit its
+checkout is on, and the conf, data and results directories those paths came from.
 
 `fetch --latest` takes the latest release of each counter in place of the version its
 definition pins, for every counter or for those named by `--counters`, and records that pin
@@ -107,8 +113,8 @@ A flag beats an environment variable, which beats `linebench.conf`.
 | counters left out on this machine | | | `skip = ["cloc"]` | none |
 | a GitHub API token for `fetch` | | `GITHUB_TOKEN`, else `GH_TOKEN` | | none |
 
-The tree is the checkout of a corpus definition (the kernel as `linux`, this repository as
-`linebench`, or one you added), or any directory at all together with `--extensions`, which
+The tree is the checkout of a corpus definition (the kernel as `linux`, the jdk and cpython at
+their pinned commits, or one you added), or any directory at all together with `--extensions`, which
 names the file extensions every counter is pointed at so that all of them do the same work.
 Such a run is recorded as unpinned, named after the directory, and the counters' counts are
 compared with each other; the flag is refused beside `--corpus`, since a definition says its
@@ -218,9 +224,9 @@ the corpus:
 
 ```
 == check: linux at D:/corpora/linux
-   mezura         t1  ok       63,864 files      36,036,878 lines
-   scc            t1  ok       63,724 files      36,013,098 lines
-   tokei          t1  ok       63,782 files      36,022,156 lines
+   mezura         t1  ok       63,767 files      36,017,775 lines
+   scc            t1  ok       63,767 files      36,017,775 lines
+   tokei          t1  ok       63,822 files      36,026,522 lines
    ...
 
 >> check
@@ -228,14 +234,14 @@ the corpus:
    git         ok   2.51.0.windows.1
    MS Defender ok, every counter excluded
 
-   files   corpus 63,765   mezura 63,864   scc 63,724   tokei 63,782
-   lines   mezura 36,036,878   scc 36,013,098   tokei 36,022,156
+   files   corpus 63,779   mezura 63,767   scc 63,767   tokei 63,822
+   lines   mezura 36,017,775   scc 36,017,775   tokei 36,026,522
    within 1.0% of the corpus
 
 >> releases
-   mezura      3.0.0 is the latest release
-   scc         the latest release is 4.1.0; the definition pins 4.0.0; fetch --counters scc --latest fetches it
-   tokei       14.0.0 is the latest crates.io release
+   mezura      3.1.0 is the latest release (looked up 1 h ago)
+   scc         4.1.0 is the latest release (looked up 1 h ago)
+   tokei       15.0.0 is the latest crates.io release (looked up 1 h ago)
 
 all good.
 ```
@@ -249,7 +255,7 @@ lookup that fails prints why, in yellow, and the check passes all the same. Noth
 here: the pinned version stays what the definition says until someone changes it.
 
 The `corpus` number is the reference: the file count the corpus definition declares for its
-commit, `files = 63765`, so "who is off" has an answer with two instances or with one. Lines
+commit, `files = 63779`, so "who is off" has an answer with two instances or with one. Lines
 have no such reference and are compared between instances, and so are the files of a corpus
 that declares no count. The tolerance belongs to the corpus, `tolerance = "1%"` in its
 definition, since how many odd files a tree holds is a property of the tree. Outside it a run
@@ -374,14 +380,15 @@ version-flag = "--version"
 [acquisition]
 channel = "github-release-asset"
 name    = "boyter/scc"
-version = "4.0.0"
+version = "4.1.0"
 
 [run]
 args           = ["{target}"]
 json           = ["--format", "json"]
 languages      = ["-i", "{extensions}"]
-same-work      = ["-c", "--no-cocomo", "--no-config"]
-same-work-note = "complexity and cost estimates off, no config file read"
+same-work      = ["--no-gitignore", "--no-ignore", "--no-scc-ignore", "-c", "--no-cocomo",
+                  "--no-config"]
+same-work-note = "ignore files off, complexity and cost estimates off, no config file read"
 scrub-env      = ["SCC_CONFIG_PATH"]
 
 [read]
@@ -424,8 +431,8 @@ A corpus is `corpora/<name>.toml`:
 name       = "linux"
 remote     = "https://github.com/torvalds/linux.git"
 commit     = "0ff41df1cb268fc69e703a08a57ee14ae967d0ca"
-files      = 63765
-extensions = ["c", "h", "s", "py", "pl", "rs", "sh"]
+files      = 63779
+extensions = ["c", "h", "s", "asm", "py", "pl", "pm", "rs", "sh"]
 tolerance  = "1%"
 
 [skip]
@@ -489,6 +496,14 @@ checklist to fill in by hand, with the "since the last run" block under it, and 
 `--against` block when one was asked for. `out/` holds every
 counter's JSON and is deleted once the counts are read; `--keep-raw` keeps it, and then also
 captures each counter's plain output beside the JSON.
+
+## status
+
+`linebench status` says what this machine holds and where. Every counter with the version its
+definition pins, what its channel publishes latest, and what sits in the counters directory,
+hash and all. Every corpus with the place its checkout goes and the commit that is there. Then
+the conf, the data directory and the results directory, with the paths every line above came
+from. Nothing is measured and nothing is written.
 
 ## verify
 
@@ -571,9 +586,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-CI runs the three on Linux, Windows and macOS, then fetches the four counters and runs `check`
-over this repository as an unpinned corpus, so a definition that cannot be fetched, run or read
-on one of the three systems fails the build. No timing is read there.
+CI runs the three on Linux, Windows and macOS, then fetches the four counters and the cpython
+corpus and runs `check` over it, so a definition that cannot be fetched, run or read on one of
+the three systems fails the build. No timing is read there.
 
 ## Licence
 

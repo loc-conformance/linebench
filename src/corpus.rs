@@ -28,6 +28,8 @@ pub struct Corpus {
     pub name: String,
     #[serde(skip)]
     pub path: PathBuf,
+    #[serde(skip)]
+    pub added: bool,
     #[serde(default)]
     pub remote: String,
     #[serde(default)]
@@ -54,6 +56,12 @@ impl Corpus {
             .get(system)
             .is_some_and(|names| names.iter().any(|name| name == counter))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Changes {
+    pub changed: Vec<String>,
+    pub twins: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +259,7 @@ pub fn build_corpus_of(checkout: &Path, extensions: &[String]) -> Result<Corpus,
     Ok(Corpus {
         name,
         path: checkout.to_path_buf(),
+        added: false,
         remote: String::new(),
         commit: String::new(),
         files: None,
@@ -268,6 +277,35 @@ pub fn read_git_state(checkout: &Path) -> GitState {
         _ => None,
     };
     GitState { head, clean }
+}
+
+/// A checkout on a filesystem that keeps one name of a pair differing only in case holds the
+/// other name's content, so git calls those files changed for as long as the checkout lives.
+pub fn read_changes(checkout: &Path) -> Changes {
+    let shown = checkout.to_string_lossy();
+    let changed = match capture_with_status("git", &["-C", &shown, "status", "--porcelain"]) {
+        Ok((true, listing)) => name_the_changed(&listing),
+        _ => Vec::new(),
+    };
+    if changed.is_empty() {
+        return Changes {
+            changed,
+            twins: Vec::new(),
+        };
+    }
+    let tracked = match capture_with_status(
+        "git",
+        &["-C", &shown, "ls-tree", "-r", "-z", "--name-only", "HEAD"],
+    ) {
+        Ok((true, listing)) => listing
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let twins = pick_twins(&tracked, &changed);
+    Changes { changed, twins }
 }
 
 pub fn check_commit(corpus: &Corpus, checkout: &Path) -> Result<(), String> {
@@ -518,6 +556,29 @@ fn describe_spread(
     })
 }
 
+/// A porcelain line is two marks, a space and the path, and the first line of the output reaches
+/// this trimmed of the space a mark left empty.
+fn name_the_changed(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|line| line.trim_start().split_once(' '))
+        .map(|(_, path)| path.trim_start().trim_matches('"').to_string())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+fn pick_twins(tracked: &[String], changed: &[String]) -> Vec<String> {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for name in tracked {
+        *seen.entry(name.to_lowercase()).or_default() += 1;
+    }
+    changed
+        .iter()
+        .filter(|name| seen.get(&name.to_lowercase()).is_some_and(|held| *held > 1))
+        .cloned()
+        .collect()
+}
+
 fn read_head(checkout: &Path) -> Option<String> {
     capture_output(
         "git",
@@ -637,6 +698,40 @@ mod tests {
     }
 
     #[test]
+    fn the_marks_come_off_every_porcelain_line_and_a_name_that_clashes_by_case_is_picked_out() {
+        let porcelain = concat!(
+            "M  include/uapi/linux/netfilter/xt_CONNMARK.h
+",
+            " M net/netfilter/xt_DSCP.c
+",
+            "?? a file with spaces.c
+"
+        );
+        let changed = name_the_changed(porcelain);
+        assert_eq!(
+            changed,
+            [
+                "include/uapi/linux/netfilter/xt_CONNMARK.h",
+                "net/netfilter/xt_DSCP.c",
+                "a file with spaces.c",
+            ]
+        );
+        let tracked: Vec<String> = [
+            "include/uapi/linux/netfilter/xt_CONNMARK.h",
+            "include/uapi/linux/netfilter/xt_connmark.h",
+            "net/netfilter/xt_DSCP.c",
+            "a file with spaces.c",
+        ]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+        assert_eq!(
+            pick_twins(&tracked, &changed),
+            ["include/uapi/linux/netfilter/xt_CONNMARK.h"]
+        );
+    }
+
+    #[test]
     fn the_shipped_corpora_parse_and_the_tolerance_is_a_percentage() {
         let corpora = read_corpora(Path::new(SHIPPED)).unwrap();
         let names: Vec<&str> = corpora.iter().map(|c| c.name.as_str()).collect();
@@ -650,8 +745,14 @@ mod tests {
         assert!(linux.is_pinned());
         assert_eq!(linux.tolerance, 0.01);
         assert_eq!(linux.files, Some(63779));
-        let unpinned = corpora.iter().find(|c| !c.is_pinned()).unwrap();
-        assert_eq!(unpinned.files, None);
+        let unpinned = parse_corpus(
+            "name = \"t\"
+extensions = [\"c\"]
+",
+            Path::new("t.toml"),
+        )
+        .unwrap();
+        assert!(!unpinned.is_pinned() && unpinned.files.is_none());
         let pinned = "name = \"t\"\nextensions = [\"c\"]\ncommit = \"0000000000000000000000000000000000000000\"\n";
         let undeclared = parse_corpus(pinned, Path::new("t.toml")).unwrap();
         assert!(
