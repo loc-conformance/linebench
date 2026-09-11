@@ -127,9 +127,33 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
         latest.insert(key, entry);
     }
     let mut shown: Vec<&FoundRun> = latest.into_values().collect();
-    shown.sort_by(|a, b| b.record.stamp.cmp(&a.record.stamp));
-    let mut single_order_seen = false;
+    let mut newest_of: BTreeMap<String, String> = BTreeMap::new();
     for entry in &shown {
+        let stamp = entry.record.stamp.clone();
+        newest_of
+            .entry(name_the_machine(&entry.record))
+            .and_modify(|held| {
+                if *held < stamp {
+                    held.clone_from(&stamp);
+                }
+            })
+            .or_insert(stamp);
+    }
+    shown.sort_by(|a, b| {
+        let (one, other) = (name_the_machine(&a.record), name_the_machine(&b.record));
+        newest_of[&other]
+            .cmp(&newest_of[&one])
+            .then(one.cmp(&other))
+            .then(b.record.stamp.cmp(&a.record.stamp))
+    });
+    let mut single_order_seen = false;
+    let mut said = String::new();
+    for entry in &shown {
+        let machine = name_the_machine(&entry.record);
+        if machine != said {
+            lines.extend(format_machine_heading(&entry.record));
+            said = machine;
+        }
         let earlier: Vec<&Record> = found
             .iter()
             .filter(|f| !f.is_local() && f.record.stamp < entry.record.stamp)
@@ -471,15 +495,34 @@ struct SetAside<'a> {
 
 type ReadContext = fn(&Record) -> String;
 
+/// What belongs to the machine is written once, and every corpus measured on it follows.
+fn format_machine_heading(record: &Record) -> Vec<String> {
+    let machine = &record.machine;
+    let ram = machine.ram_bytes.map_or("RAM unknown".to_string(), |b| {
+        format!("{:.0} GB usable RAM", b as f64 / 2f64.powi(30))
+    });
+    vec![
+        format!("## {}", name_the_machine(record)),
+        String::new(),
+        format!("{} threads, {ram}, {}", machine.logical_cores, machine.os),
+        String::new(),
+    ]
+}
+
+fn name_the_machine(record: &Record) -> String {
+    format!(
+        "{}, {}",
+        describe_platform(record.machine.platform),
+        record.machine.cpu
+    )
+}
+
 fn format_run_section(
     record: &Record,
     earlier: &[&Record],
     single_order_seen: &mut bool,
 ) -> Vec<String> {
     let machine = &record.machine;
-    let ram = machine.ram_bytes.map_or("RAM unknown".to_string(), |b| {
-        format!("{:.0} GB usable RAM", b as f64 / 2f64.powi(30))
-    });
     let head = record
         .corpus
         .head
@@ -487,17 +530,8 @@ fn format_run_section(
         .map(shorten_hash)
         .unwrap_or_else(|| "no commit".to_string());
     let mut lines = vec![
-        format!(
-            "## {} corpus, {}, {}",
-            record.corpus.name,
-            describe_platform(machine.platform),
-            record.stamp
-        ),
+        format!("### {} corpus, {}", record.corpus.name, record.stamp),
         String::new(),
-        format!(
-            "{}, {} threads, {ram}, {}  ",
-            machine.cpu, machine.logical_cores, machine.os
-        ),
         format!(
             "corpus at `{head}` on {}, {}  ",
             machine.corpus_fs, machine.corpus_device
@@ -1887,6 +1921,35 @@ mod tests {
         assert_eq!(differences.len(), 1, "{differences:?}");
         assert!(differences[0].contains("120 ms"), "{differences:?}");
         assert_eq!(held, edited, "the page was written over while it was read");
+    }
+
+    #[test]
+    fn every_corpus_of_one_machine_sits_under_one_heading_and_another_machine_opens_its_own() {
+        let named = |stamp: &str, corpus: &str| {
+            let mut record = build_record(stamp, &[("mezura", 0.32)], "nvme0");
+            record.corpus.name = corpus.to_string();
+            record
+        };
+        let linux = named("20260903-100000", "linux");
+        let jdk = named("20260903-110000", "jdk");
+        let mut elsewhere = named("20260903-120000", "linux");
+        elsewhere.machine.platform = Platform::Linux;
+        let found: Vec<FoundRun> = [linux, jdk, elsewhere]
+            .into_iter()
+            .map(|record| FoundRun {
+                relative: format!("{}/{}", record.corpus.name, record.stamp),
+                record,
+            })
+            .collect();
+        let page = build_results_page(&found).join(
+            "
+",
+        );
+        let counted = |what: &str| page.matches(what).count();
+        assert_eq!(counted("## Windows, a cpu"), 1, "{page}");
+        assert_eq!(counted("## Native Linux, a cpu"), 1, "{page}");
+        assert_eq!(counted("### linux corpus"), 2, "{page}");
+        assert_eq!(counted("### jdk corpus"), 1, "{page}");
     }
 
     fn build_record(stamp: &str, rows: &[(&str, f64)], device: &str) -> Record {
