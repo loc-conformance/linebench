@@ -34,6 +34,9 @@ jobs:
       - name: Build
         run: cargo build --release --verbose
 
+      - name: The library builds without the command line
+        run: cargo build --lib --no-default-features
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
