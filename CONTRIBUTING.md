@@ -84,8 +84,9 @@ it stops the run before anything is measured, naming the extension and the file 
 `files` is the number of files carrying them at that commit, required beside a commit: run
 `check` on the checkout, read what the counters answer, and write the number you trust. The
 tolerance belongs to the corpus because how many odd files a tree holds is a property of the
-tree. `[skip]` names, per system, the counters left out of the default set over this corpus,
-which is how cloc stays out of the kernel on Windows.
+tree. `[skip]` names, per system, the counters left out of the default set over this corpus:
+the kernel names cloc under windows, linux and macos alike, since a plain run holding it takes
+hours.
 
 ## Publishing a run
 

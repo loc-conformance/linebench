@@ -644,6 +644,8 @@ tolerance  = "1%"
 
 [skip]
 windows = ["cloc"]
+linux   = ["cloc"]
+macos   = ["cloc"]
 ```
 
 Only what differs between one tree and another lives here; how each counter spells these extensions
@@ -653,8 +655,8 @@ files carrying those extensions in the tree of that commit, `git ls-tree -r HEAD
 index, working tree or gitignore can move: `check` over a definition with a `commit` and no `files`
 counts them and prints the line to paste, and `run` refuses until it is there. `[skip]` names, per
 system, the counters left out of the default set over this corpus, with WSL counting as linux: cloc
-takes about 90 s per run over the kernel on Windows, so a plain `run` there would be two hours of
-cloc. Leave `commit` blank to measure a tree as it stands. `remote` is needed only to fetch.
+takes about 90 s per run over the kernel, so a plain `run` there would be hours of it on any
+system. Leave `commit` blank to measure a tree as it stands. `remote` is needed only to fetch.
 
 Both directories are built into the binary, and `--add` joins a definition of your own to them.
 
