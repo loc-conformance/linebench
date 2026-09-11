@@ -12,6 +12,26 @@ builds a counter: it fetches the release, hashes it, and writes the hash into th
 
 Today it knows cloc, mezura, scc and tokei. Adding one is a definition file.
 
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Running it](#running-it)
+- [Where things are](#where-things-are)
+- [What a run measures](#what-a-run-measures)
+- [check](#check)
+- [noise](#noise)
+- [insights](#insights)
+  - [The floor](#the-floor)
+  - [The memory](#the-memory)
+  - [Where the numbers go](#where-the-numbers-go)
+- [Counters and corpora](#counters-and-corpora)
+- [Where results go](#where-results-go)
+- [status](#status)
+- [verify](#verify)
+- [Reading the numbers](#reading-the-numbers)
+- [Tests](#tests)
+- [Licence](#licence)
+
 ## Prerequisites
 
 git, [hyperfine](https://github.com/sharkdp/hyperfine), curl or wget, and tar on PATH; every
@@ -94,8 +114,9 @@ hand, which is what a run that is killed outright leaves you with. Unelevated it
 would have changed and asks before doing any work. `--yes` answers that question, `--no-prep`
 skips the whole thing even when elevated, and with no terminal attached it carries on.
 
-The commands are `fetch`, `check`, `noise`, `run`, `insights` and `report`. `linebench --help`
-lists every flag, and a `--help` after a command prints that command alone.
+The commands are `fetch`, `status`, `check`, `noise`, `run`, `insights`, `report`, `verify` and
+`version`. `linebench --help` lists every flag, and a `--help` after a command prints that
+command alone.
 
 ## Where things are
 
@@ -301,7 +322,13 @@ linebench insights linux
 ```
 
 Measurements that each want their own executions over their own target, kept out of a run where
-they would lengthen it and disturb it.
+they would lengthen it and disturb it. What each system can answer:
+
+| insight | Linux | Windows | macOS |
+|---|---|---|---|
+| the floor | yes | yes | yes |
+| peak memory and the curve | yes, `/proc/<pid>/status` | yes, `GetProcessMemoryInfo` | no samples yet |
+| the counts of system calls | yes, `strace -c -f` | no | no |
 
 ### The floor
 
@@ -402,19 +429,20 @@ blanks   = "Blank"
 
 `args` is what gets timed and `json` is appended only for the capture that reads the counts.
 `languages` carries `{extensions}` or `{names}`; a counter that spells languages by name adds a
-`[language-names]` table from extension to its own name, matched whatever the case. A counter
-that matches an extension by its exact case says `extension-case = "exact"`, and `{extensions}`
-is then spelled as written, in lower case and in upper case, `s,S`; the default is `any`, for a
-counter that ignores case. `same-work` is what the same-work table adds, and `same-work-note`
-is what the results page prints for it. `volatile` names the fields of the counter's JSON that
-differ between two runs or two builds of it (a timestamp, the version, its own timing), in the
-`[read]` path syntax, so that `--expect-identical` can set them aside; `check` warns about one
-that sits nowhere in what the counter printed. `scrub-env` names variables removed from the
-counter's
-environment. `[read]` says where the counts sit in the counter's own JSON, and every bucket
-beyond code and comments is read by name, so one block covers a counter that prints `blanks`
-in one mode and `extra` in another. A counter whose JSON the paths cannot reach declares
-`output = "tokei-json"` and a reader written here does it.
+`[language-names]` table from extension to its own name, matched whatever the case. The shipped
+table covers what the shipped corpora name; a corpus of your own carrying another extension
+adds a line for it. A counter that matches an extension by its exact case says
+`extension-case = "exact"`, and `{extensions}` is then spelled as written, in lower case and in
+upper case, `s,S`; the default is `any`, for a counter that ignores case. `same-work` is what
+the same-work table adds, and `same-work-note` is what the results page prints for it.
+`volatile` names the fields of the counter's JSON that differ between two runs or two builds of
+it (a timestamp, the version, its own timing), in the `[read]` path syntax, so that
+`--expect-identical` can set them aside; `check` warns about one that sits nowhere in what the
+counter printed. `scrub-env` names variables removed from the counter's environment. `[read]`
+says where the counts sit in the counter's own JSON, and every bucket beyond code and comments
+is read by name, so one block covers a counter that prints `blanks` in one mode and `extra` in
+another. A counter whose JSON the paths cannot reach declares `output = "tokei-json"` and a
+reader written here does it.
 
 The channels are `github-release-asset` (the file for this system and architecture is picked by
 the words in its name, and the published checksums are checked), `github-release-file` (a file
@@ -485,9 +513,9 @@ results/
 One directory per corpus, then per platform, then per run, named by its UTC timestamp.
 Nothing is ever overwritten. `insights/` holds the insight sessions in the same shape, and the page
 walks past it. `results/README.md` is the page, rewritten after every run and
-on demand with `report`: the latest run per corpus and platform with its machine, its two
-tables and its trust checks, every run once there is more than one, the local builds apart,
-and the methodology and the terms.
+on demand with `report`: one section per machine, written once, and under it the latest run of
+every corpus measured on it with its two tables and its trust checks, then every run once there
+is more than one, the local builds apart, and the methodology and the terms.
 
 Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
 `summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`,
@@ -514,12 +542,11 @@ exports were published too, every statistic is recomputed from the time of every
 The path is a run directory, or the `run.json` inside it.
 
 It prints what it could not read. A check that does not hold exits 1, and a file that is absent is
-a gap and does not. What it says is that every number in the record agrees with every other.
+a gap and does not.
 
 The results page is a second file, built from those records, and `linebench report --verify` holds
 it against them: it builds the page from every record under `results/`, says whether the one on
-disk is that page, names the lines that differ, and writes nothing. Between the two, the numbers
-somebody reads are tied to the records, and each record is tied to its own timings.
+disk is that page, names the lines that differ, and writes nothing.
 
 ## Reading the numbers
 
