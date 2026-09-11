@@ -4,3 +4,8 @@ commit     = "34439b8a25eecd5b0da8f653fec286dadb60ba62"
 files      = 3556
 extensions = ["py", "c", "h", "html", "js", "bat", "sh", "m"]
 tolerance  = "1%"
+
+# Left out of the default set on the system named. cloc reads this tree far slower than the
+# other three on Windows, and a name in --counters runs it there anyway.
+[skip]
+windows = ["cloc"]

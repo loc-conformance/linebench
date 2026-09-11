@@ -4,3 +4,8 @@ commit     = "b96680ca92970cd324bf3934e7a4ab6116d4b02d"
 files      = 61420
 extensions = ["java", "cpp", "cc", "hpp", "hh", "c", "h", "sh"]
 tolerance  = "1%"
+
+# Left out of the default set on the system named. cloc reads this tree far slower than the
+# other three on Windows, and a name in --counters runs it there anyway.
+[skip]
+windows = ["cloc"]
