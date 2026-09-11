@@ -8,7 +8,7 @@ const HELP: &str = r#"linebench: measure line counters fairly, with the machine'
 linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus-path <dir>]
                 [--latest] [--allow-elevated] [--add <path>]
 
-    Downloads what the other commands need and does nothing else. A counter arrives at the
+    Brings down what the other commands need, and measures none of it. A counter arrives at the
     version its definition declares and a corpus at the commit its definition pins, so a second
     fetch answers "already here" for what matches and downloads again what does not.
 

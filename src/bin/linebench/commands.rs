@@ -72,6 +72,8 @@ const SYSCALLS_TABLE: Table = Table::SameWork;
 const PROBE_FILE: &str = "probe.txt";
 const SYSCALLS_SUFFIX: &str = "txt";
 const NO_DEFINITION: &str = "Binaries found that no definition names:";
+const CORPUS_COLUMN: &str = "corpus";
+const COUNT_GAP: &str = "   ";
 const VERSION_WIDTH: usize = 8;
 const LATEST_WIDTH: usize = 16;
 const STATE_WIDTH: usize = 30;
@@ -627,7 +629,13 @@ pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
     let broken = verification.count_broken();
     print_line(out, "")?;
     if broken == 0 {
-        print_line(out, "done. nothing in this run contradicts itself")?;
+        print_line(
+            out,
+            &format!(
+                "{} nothing in this run contradicts itself",
+                paint(Color::Green, "done.")
+            ),
+        )?;
         return Ok(0);
     }
     print_warning(out, &format!("{broken} checks over this run do not hold"))?;
@@ -1561,26 +1569,9 @@ fn check_everything(
     let expected: Vec<String> = instances.iter().map(|i| i.get_name().to_string()).collect();
     let parity = judge_parity(reference, &counted, &expected, locations.corpus.tolerance);
     print_line(out, "")?;
-    let files: Vec<String> = counted
-        .iter()
-        .map(|c| format!("{} {}", c.instance, format_thousands(c.files)))
-        .collect();
-    print_line(
-        out,
-        &format!(
-            "   files   {}{}",
-            reference.map_or("corpus none   ".to_string(), |r| format!(
-                "corpus {}   ",
-                format_thousands(r)
-            )),
-            files.join("   ")
-        ),
-    )?;
-    let lines: Vec<String> = counted
-        .iter()
-        .map(|c| format!("{} {}", c.instance, format_thousands(c.lines)))
-        .collect();
-    print_line(out, &format!("   lines   {}", lines.join("   ")))?;
+    let (files, lines) = lay_out_counts(&counted, reference);
+    print_line(out, &format!("   files   {files}"))?;
+    print_line(out, &format!("   lines   {lines}"))?;
     print_parity(out, &parity, "")?;
     if let Some(files) = counted_by_git {
         print_line(
@@ -1806,10 +1797,15 @@ fn print_parity(out: &mut dyn Write, parity: &Parity, lead: &str) -> Result<(), 
 
 fn print_verification(out: &mut dyn Write, verification: &Verification) -> Result<(), String> {
     print_header(out, &format!("== verify {}", show_path(&verification.run)))?;
+    let mut printed = false;
     for level in verification.get_levels() {
         if level.held.is_empty() && level.absent.is_empty() {
             continue;
         }
+        if printed {
+            print_line(out, "")?;
+        }
+        printed = true;
         print_line(out, &format!("   {}", paint(Color::Bold, &level.name)))?;
         for held in &level.held {
             let mark = match held.holds() {
@@ -1830,6 +1826,27 @@ fn print_verification(out: &mut dyn Write, verification: &Verification) -> Resul
     }
     print_line(out, "")?;
     print_line(out, &format!("   {}", verification.describe_reach()))
+}
+
+fn lay_out_counts(counted: &[Counted], reference: Option<u64>) -> (String, String) {
+    let say = |name: &str, number: u64| format!("{name} {}", format_thousands(number));
+    let mut files: Vec<String> = counted.iter().map(|c| say(&c.instance, c.files)).collect();
+    let mut lines: Vec<String> = counted.iter().map(|c| say(&c.instance, c.lines)).collect();
+    for (one, other) in files.iter_mut().zip(lines.iter_mut()) {
+        let width = one.chars().count().max(other.chars().count());
+        for cell in [&mut *one, &mut *other] {
+            let gap = width - cell.chars().count();
+            cell.push_str(&" ".repeat(gap));
+        }
+    }
+    files.push(match reference {
+        Some(reference) => say(CORPUS_COLUMN, reference),
+        None => format!("{CORPUS_COLUMN} none"),
+    });
+    (
+        files.join(COUNT_GAP).trim_end().to_string(),
+        lines.join(COUNT_GAP).trim_end().to_string(),
+    )
 }
 
 fn collect_scrub(instances: &[Instance]) -> Vec<String> {
@@ -2295,5 +2312,33 @@ mod tests {
             moved.contains("its hash is not the one fetch wrote"),
             "{moved}"
         );
+    }
+
+    #[test]
+    fn the_counter_names_stand_in_one_column_on_both_count_rows_and_the_corpus_closes_the_first() {
+        let counted = [
+            Counted {
+                instance: "mezura".to_string(),
+                files: 3557,
+                lines: 2_230_129,
+            },
+            Counted {
+                instance: "scc".to_string(),
+                files: 3556,
+                lines: 2_229_545,
+            },
+        ];
+        let (files, lines) = lay_out_counts(&counted, Some(3556));
+        for name in ["mezura", "scc"] {
+            assert_eq!(
+                files.find(name),
+                lines.find(name),
+                "{files}
+{lines}"
+            );
+        }
+        assert!(files.ends_with("corpus 3,556"), "{files}");
+        assert!(!lines.contains("corpus"), "{lines}");
+        assert!(!files.ends_with(' ') && !lines.ends_with(' '));
     }
 }

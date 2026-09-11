@@ -19,7 +19,7 @@ pub const COUNTERS_DIR_NAME: &str = "counters";
 pub const CORPORA_DIR_NAME: &str = "corpora";
 pub const EVERYTHING: &str = "all";
 pub const COUNTERS_ENV: &str = "LINEBENCH_COUNTERS";
-pub const CORPUS_ENV: &str = "LINEBENCH_CORPUS";
+pub const TARGET_ENV: &str = "LINEBENCH_TARGET";
 const THE_CONF: &str = "the conf";
 const THE_DATA_DIR: &str = "the data directory";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
@@ -660,7 +660,7 @@ enum Target {
 }
 
 fn read_target(options: &Options, corpora: &[Corpus]) -> Target {
-    let Some(target) = options.target.clone().or_else(|| read_env(CORPUS_ENV)) else {
+    let Some(target) = options.target.clone().or_else(|| read_env(TARGET_ENV)) else {
         return Target::Nothing;
     };
     match corpora.iter().find(|corpus| corpus.name == target) {
