@@ -763,7 +763,7 @@ pub fn run_insights(
     {
         return Err("stopped.".to_string());
     }
-    let target = create_empty_repository(scratch.get_path())?;
+    let target = create_floor_target(scratch.get_path())?;
     let scrub = collect_scrub(&instances);
     print_header(out, "== floor")?;
     let mut runner = Runner::new(
@@ -1705,17 +1705,10 @@ fn ask_to_go_on(out: &mut dyn Write, why: &str, yes: bool) -> Result<bool, Strin
     Ok(!matches!(answer.trim().to_lowercase().as_str(), "n" | "no"))
 }
 
-fn create_empty_repository(scratch: &Path) -> Result<PathBuf, String> {
+fn create_floor_target(scratch: &Path) -> Result<PathBuf, String> {
     let target = scratch.join(FLOOR_TARGET);
-    let path = target.to_string_lossy().into_owned();
-    let (made, _) = capture_with_status("git", &["init", "-q", &path])
-        .map_err(|unfinished| unfinished.describe("git init"))?;
-    if !made {
-        return Err(format!(
-            "git init could not make the repository the floor is measured over, in {}",
-            target.display()
-        ));
-    }
+    fs::create_dir_all(&target)
+        .map_err(|error| format!("{} could not be created: {error}", target.display()))?;
     Ok(target)
 }
 

@@ -236,45 +236,65 @@ mod tests {
 
     const SUMMARY: &str = "\
 % time     seconds  usecs/call     calls    errors syscall
------- ----------- ----------- --------- --------- ----------------
- 54.21    0.148314           2     63800           openat
- 21.09    0.057712           1     63800       241 statx
- 12.40    0.033929           8      4210           getdents64
+------ ----------- ----------- --------- --------- ------------------
+ 24.38    2.087356         294      7079           read
+ 19.67    1.683815        1114      1511        95 futex
+ 14.40    1.232824         305      4037           openat
+ 13.87    1.187355         294      4036           close
+ 12.88    1.102517         309      3557           newfstatat
+  6.62    0.566349         294      1922           fcntl
+  3.54    0.302792         313       966           getdents64
+  1.75    0.149572         311       480       479 epoll_ctl
+  1.65    0.141377         355       398           nanosleep
+  0.37    0.031990         457        70           epoll_pwait
+  0.15    0.013228         236        56           rt_sigprocmask
+  0.15    0.012507         694        18           clone
+  0.10    0.008501         500        17           tgkill
+  0.09    0.008045         473        17           getpid
+  0.09    0.008034         163        49           mmap
+  0.09    0.007542         198        38           sigaltstack
+  0.09    0.007346         198        37           gettid
+  0.06    0.004962         291        17           rt_sigreturn
+  0.03    0.002554          22       114           rt_sigaction
+  0.02    0.001853         264         7           sched_yield
+  0.00    0.000175          87         2           prlimit64
+  0.00    0.000107          53         2           sched_getaffinity
+  0.00    0.000096          48         2           pread64
+  0.00    0.000060          60         1           epoll_create1
+  0.00    0.000043          43         1           eventfd2
+  0.00    0.000036          36         1           write
+  0.00    0.000000           0         2           madvise
   0.00    0.000000           0         1           execve
------- ----------- ----------- --------- --------- ----------------
-100.00    0.273621                131811       241 total
+  0.00    0.000000           0         1         1 prctl
+  0.00    0.000000           0         1           arch_prctl
+------ ----------- ----------- --------- --------- ------------------
+100.00    8.561036         350     24440       575 total
 ";
 
     #[test]
     fn a_row_of_the_summary_is_read_by_its_columns_whether_or_not_it_carries_errors() {
         let (calls, rows) = parse_summary(SUMMARY);
-        assert_eq!(
-            calls,
-            [
-                Call {
-                    name: "openat".to_string(),
-                    calls: 63800,
-                    errors: 0
-                },
-                Call {
-                    name: "statx".to_string(),
-                    calls: 63800,
-                    errors: 241
-                },
-                Call {
-                    name: "getdents64".to_string(),
-                    calls: 4210,
-                    errors: 0
-                },
-                Call {
-                    name: "execve".to_string(),
-                    calls: 1,
-                    errors: 0
-                },
-            ]
-        );
+        let named = |name: &str| calls.iter().find(|call| call.name == name);
         assert_eq!(rows, Some(calls.len()));
-        assert_eq!(calls.iter().map(|call| call.calls).sum::<u64>(), 131_811);
+        assert_eq!(calls.len(), 30, "{calls:?}");
+        assert_eq!(
+            named("read"),
+            Some(&Call {
+                name: "read".to_string(),
+                calls: 7079,
+                errors: 0
+            })
+        );
+        assert_eq!(
+            named("epoll_ctl"),
+            Some(&Call {
+                name: "epoll_ctl".to_string(),
+                calls: 480,
+                errors: 479
+            })
+        );
+        assert_eq!(calls.iter().map(|call| call.calls).sum::<u64>(), 24_440);
+        assert_eq!(calls.iter().map(|call| call.errors).sum::<u64>(), 575);
     }
 
     #[test]
