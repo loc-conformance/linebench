@@ -127,10 +127,12 @@ jobs:
         run: |
           ./target/release/linebench fetch --allow-elevated \
             --counters-dir "${{ runner.temp }}/counters" \
-            --counters all
-          ./target/release/linebench check linebench \
+            --corpus-path "${{ runner.temp }}/cpython" \
+            --counters all --corpus cpython
+          ./target/release/linebench check cpython \
+            --counters cloc,mezura,scc,tokei \
             --counters-dir "${{ runner.temp }}/counters" \
-            --corpus-path "${{ github.workspace }}" | tee "$RUNNER_TEMP/check.txt"
+            --corpus-path "${{ runner.temp }}/cpython" | tee "$RUNNER_TEMP/check.txt"
           read=${PIPESTATUS[0]}
           if [ "$read" -eq 0 ]; then
             echo "checked=yes" >> "$GITHUB_OUTPUT"

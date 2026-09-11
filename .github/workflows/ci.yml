@@ -64,20 +64,22 @@ jobs:
           key: counters-${{ runner.os }}-${{ hashFiles('counters/**') }}
 
       # No timing is read on a shared runner.
-      - name: Fetch every counter
+      - name: Fetch every counter and the corpus
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./target/release/linebench fetch --allow-elevated \
             --counters-dir "${{ runner.temp }}/counters" \
-            --counters all
+            --corpus-path "${{ runner.temp }}/cpython" \
+            --counters all --corpus cpython
 
-      - name: Run every counter over this repository and read the counts back
+      - name: Run every counter over the corpus and read the counts back
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./target/release/linebench check linebench \
+          ./target/release/linebench check cpython \
+            --counters cloc,mezura,scc,tokei \
             --counters-dir "${{ runner.temp }}/counters" \
-            --corpus-path "${{ github.workspace }}"
+            --corpus-path "${{ runner.temp }}/cpython"
