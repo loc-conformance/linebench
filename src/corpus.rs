@@ -389,7 +389,8 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
         return print_line(
             out,
             &format!(
-                "  corpus already pinned at {}",
+                "  {} is already pinned at {}",
+                corpus.name,
                 shorten_hash(&corpus.commit)
             ),
         );
@@ -419,9 +420,10 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     }
     if !corpus.is_pinned() && !is_checkout && holds_anything_but_git(checkout) {
         return Err(format!(
-            "{shown}\nalready holds files and is not a git checkout, so fetch will not \
+            "{shown}\nalready holds files and is not a git checkout, so fetching {} will not \
              write over them. Empty it, point the definition elsewhere, or clear its remote to \
-             measure it as it stands."
+             measure it as it stands.",
+            corpus.name
         ));
     }
     fs::create_dir_all(checkout)
@@ -434,7 +436,8 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
         print_line(
             out,
             &format!(
-                "  fetching {} from {}, which takes a while",
+                "  fetching {} at {} from {}, which takes a while",
+                corpus.name,
                 shorten_hash(&corpus.commit),
                 corpus.remote
             ),
@@ -443,8 +446,8 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
         print_line(
             out,
             &format!(
-                "  cloning the default branch of {}, which takes a while",
-                corpus.remote
+                "  cloning {} from the default branch of {}, which takes a while",
+                corpus.name, corpus.remote
             ),
         )?;
     }
@@ -453,8 +456,14 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     } else {
         "HEAD"
     };
-    run_git(&["-C", &shown, "fetch", "--depth", "1", "origin", wanted])?;
-    run_git(&["-C", &shown, "checkout", "-q", "FETCH_HEAD"])
+    run_git_for(
+        &corpus.name,
+        &["-C", &shown, "fetch", "--depth", "1", "origin", wanted],
+    )?;
+    run_git_for(
+        &corpus.name,
+        &["-C", &shown, "checkout", "-q", "FETCH_HEAD"],
+    )
 }
 
 pub fn judge_parity(
@@ -611,6 +620,10 @@ fn run_git(args: &[&str]) -> Result<(), String> {
         "this failed, and the corpus cannot be set up without it:\n  git {}",
         args.join(" ")
     ))
+}
+
+fn run_git_for(name: &str, args: &[&str]) -> Result<(), String> {
+    run_git(args).map_err(|refused| refused.replacen("the corpus", name, 1))
 }
 
 fn get_default_tolerance() -> f64 {

@@ -359,10 +359,10 @@ pub fn resolve_fetch(
     let taken = wanted
         .into_iter()
         .map(|corpus| {
-            let checkout = find_checkout(&corpus.name, options, config)
-                .map(|path| match under {
-                    true => path.join(&corpus.name),
-                    false => path,
+            let checkout = find_corpus_home(&corpus.name, options, config)
+                .map(|home| match home.shared && under {
+                    true => home.path.join(&corpus.name),
+                    false => home.path,
                 })
                 .or_else(|| place_for_corpus(&corpus.name, data_dir))
                 .ok_or_else(|| explain_the_homeless_corpus(&corpus.name))?;
@@ -449,10 +449,22 @@ fn find_corpus<'a>(name: &str, corpora: &'a [Corpus]) -> Result<&'a Corpus, Stri
 }
 
 fn find_checkout(name: &str, options: &Options, config: &Config) -> Option<PathBuf> {
-    options
-        .corpus_path
-        .clone()
-        .or_else(|| config.corpora.get(name).cloned())
+    find_corpus_home(name, options, config).map(|home| home.path)
+}
+
+struct Home {
+    path: PathBuf,
+    shared: bool,
+}
+
+fn find_corpus_home(name: &str, options: &Options, config: &Config) -> Option<Home> {
+    if let Some(path) = options.corpus_path.clone() {
+        return Some(Home { path, shared: true });
+    }
+    config.corpora.get(name).cloned().map(|path| Home {
+        path,
+        shared: false,
+    })
 }
 
 fn place_for_corpus(name: &str, data_dir: Option<&Path>) -> Option<PathBuf> {
@@ -1191,6 +1203,67 @@ mod tests {
         assert!(config.corpora.contains_key("linux"));
         assert!(config.given.is_empty() && config.add.is_empty() && config.skip.is_empty());
         assert!(config.counters.is_none() && config.out.is_none());
+    }
+
+    #[test]
+    fn a_conf_entry_names_one_checkout_and_only_a_shared_corpus_path_gets_a_directory_each() {
+        let config: Config = toml::from_str(
+            "[corpora]\nlinux = \"D:/bench/linux\"\ncpython = \"D:/bench/cpython\"\n",
+        )
+        .unwrap();
+        let corpora: Vec<Corpus> = ["linux", "cpython", "jdk"]
+            .iter()
+            .map(|name| {
+                linebench::corpus::parse_corpus(
+                    &format!("name = \"{name}\"\nextensions = [\"c\"]\n"),
+                    Path::new(&format!("{name}.toml")),
+                )
+                .unwrap()
+            })
+            .collect();
+        let conf = Path::new("linebench.conf");
+        let data = Some(Path::new("D:/data/linebench"));
+        let counters = Vec::new();
+        let plan = |line: &str| {
+            let options = parse(line).unwrap();
+            resolve_fetch(&options, &config, conf, &corpora, &counters, data)
+                .unwrap()
+                .corpora
+                .into_iter()
+                .map(|(corpus, checkout)| (corpus.name, checkout))
+                .collect::<Vec<(String, PathBuf)>>()
+        };
+
+        // The conf names the checkout itself, whether one corpus is asked for or three.
+        assert_eq!(
+            plan("fetch --corpus linux"),
+            [("linux".to_string(), PathBuf::from("D:/bench/linux"))]
+        );
+        assert_eq!(
+            plan("fetch --corpus all"),
+            [
+                ("linux".to_string(), PathBuf::from("D:/bench/linux")),
+                ("cpython".to_string(), PathBuf::from("D:/bench/cpython")),
+                // jdk has no conf entry, so it falls to the data directory
+                (
+                    "jdk".to_string(),
+                    PathBuf::from("D:/data/linebench/corpora/jdk")
+                ),
+            ]
+        );
+
+        // --corpus-path is one path standing in for all of them, so they cannot share it.
+        assert_eq!(
+            plan("fetch --corpus linux --corpus-path D:/shared"),
+            [("linux".to_string(), PathBuf::from("D:/shared"))]
+        );
+        assert_eq!(
+            plan("fetch --corpus linux,cpython --corpus-path D:/shared"),
+            [
+                ("linux".to_string(), PathBuf::from("D:/shared/linux")),
+                ("cpython".to_string(), PathBuf::from("D:/shared/cpython")),
+            ]
+        );
     }
 
     fn parse(line: &str) -> Result<Options, String> {
