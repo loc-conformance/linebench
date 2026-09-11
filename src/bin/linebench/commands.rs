@@ -18,7 +18,9 @@ use linebench::defender::{
 };
 use linebench::fetch::{GIVEN_DIR, Manifest, calculate_sha256, fetch_counter, read_manifest};
 use linebench::insight::Insights;
-use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, VERSION_SET};
+use linebench::insight::{
+    FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, SYSCALLS_HEADING, VERSION_SET,
+};
 use linebench::insight::{
     build_insights_path, format_floor, format_memory, format_syscalls, format_syscalls_summary,
     get_floor_set_name, write_insights,
@@ -850,7 +852,7 @@ pub fn run_insights(
         }
         print_line(out, "")?;
         for line in format_syscalls(&syscalls, get_report_style()) {
-            print_line(out, &line)?;
+            print_line(out, &paint_table_line(&line))?;
         }
     }
     let insights = Insights {
@@ -2141,7 +2143,7 @@ fn describe_exclusions(state: &DefenderState) -> String {
 
 fn paint_table_line(line: &str) -> String {
     let trimmed = line.trim_start();
-    if trimmed.starts_with("instance") {
+    if trimmed.starts_with("instance") || trimmed.starts_with(SYSCALLS_HEADING) {
         return format!("   {}", paint(Color::Blue, trimmed));
     }
     if trimmed == "Same work" || trimmed == "Out of the box" {

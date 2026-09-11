@@ -10,7 +10,7 @@ use crate::os::{Unfinished, capture_output, capture_with_status};
 
 pub const TRACER: &str = "strace";
 pub const OTHER_FAMILY: &str = "other";
-pub const FAMILIES: [(&str, &[&str]); 6] = [
+pub const FAMILIES: [(&str, &[&str]); 7] = [
     ("directories", &["getdents64", "getdents"]),
     ("opening", &["openat", "openat2", "open", "close"]),
     (
@@ -47,14 +47,28 @@ pub const FAMILIES: [(&str, &[&str]); 6] = [
         &[
             "clone",
             "clone3",
-            "futex",
-            "sched_yield",
             "sched_getaffinity",
             "set_robust_list",
             "rseq",
             "membarrier",
             "gettid",
             "tgkill",
+        ],
+    ),
+    (
+        "waiting",
+        &[
+            "clock_nanosleep",
+            "nanosleep",
+            "futex",
+            "sched_yield",
+            "poll",
+            "ppoll",
+            "select",
+            "pselect6",
+            "epoll_wait",
+            "epoll_pwait",
+            "epoll_pwait2",
         ],
     ),
 ];

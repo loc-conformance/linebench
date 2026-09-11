@@ -24,6 +24,7 @@ pub const VERSION_SET: &str = "floor-version";
 pub const INSIGHTS_DIR: &str = "insights";
 pub const INSIGHTS_FILE: &str = "insights.json";
 pub const INSIGHTS_FORMAT: u32 = 1;
+pub const SYSCALLS_HEADING: &str = "family / call";
 const FLOOR_PREFIX: &str = "floor-";
 const VERSION_HEADING: &str = "--version";
 const FIRST_HEADINGS: [&str; 2] = ["instance", VERSION_HEADING];
@@ -59,7 +60,6 @@ const SHADES: [[u8; 3]; 8] = [
     [232, 64, 47],
     [238, 78, 224],
 ];
-const SYSCALLS_HEADING: &str = "family / call";
 const SYSCALLS_HEADINGS: [&str; 4] = ["instance", "syscalls", "per file", "errors"];
 const MEMBER_INDENT: &str = "  ";
 const REST_LABEL: &str = "rest";
@@ -257,8 +257,7 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
         .iter()
         .map(|counts| counts.instance.clone())
         .collect();
-    let mut table: Vec<(bool, String, Vec<String>)> =
-        vec![(false, SYSCALLS_HEADING.to_string(), names)];
+    let mut table: Vec<(String, Vec<String>)> = vec![(SYSCALLS_HEADING.to_string(), names)];
     for family in FAMILIES
         .map(|(family, _)| family)
         .into_iter()
@@ -272,7 +271,6 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
             continue;
         }
         table.push((
-            true,
             family.to_string(),
             totals.iter().copied().map(describe_count).collect(),
         ));
@@ -287,7 +285,7 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
                         .map_or(String::new(), |call| format_thousands(call.calls))
                 })
                 .collect();
-            table.push((false, format!("{MEMBER_INDENT}{name}"), cells));
+            table.push((format!("{MEMBER_INDENT}{name}"), cells));
         }
         if !hidden.is_empty() && !shown.is_empty() {
             let cells = counted
@@ -295,26 +293,23 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
                 .map(|counts| describe_count(add_up_family(counts, family, &shown)))
                 .collect();
             table.push((
-                false,
                 format!("{MEMBER_INDENT}{REST_LABEL} ({})", hidden.len()),
                 cells,
             ));
         }
     }
-    let gutter = measure_gutter("", table.iter().map(|(_, label, _)| label.as_str()));
+    let gutter = measure_gutter("", table.iter().map(|(label, _)| label.as_str()));
     let rows: Vec<Vec<String>> = table
         .iter()
         .skip(1)
-        .map(|(_, _, cells)| cells.clone())
+        .map(|(_, cells)| cells.clone())
         .collect();
-    let widths = measure_columns(&table[0].2, &rows);
+    let widths = measure_columns(&table[0].1, &rows);
     table
         .into_iter()
-        .map(|(heavy, label, cells)| {
+        .map(|(label, cells)| {
             let line = lay_out_numbers(&label, &cells, gutter, &widths);
-            if heavy {
-                accent(&line, style)
-            } else if label.starts_with(MEMBER_INDENT) {
+            if label.starts_with(MEMBER_INDENT) {
                 fade(&line, style)
             } else {
                 line
@@ -547,13 +542,6 @@ fn measure_columns(headings: &[String], rows: &[Vec<String>]) -> Vec<usize> {
                 + COLUMN_GAP
         })
         .collect()
-}
-
-fn accent(text: &str, style: Style) -> String {
-    if style != Style::Colored {
-        return text.to_string();
-    }
-    format!("\u{1b}[1m{text}\u{1b}[0m")
 }
 
 fn fade(text: &str, style: Style) -> String {
