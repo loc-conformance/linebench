@@ -95,6 +95,12 @@ linebench insights <corpus|dir> [--counters a,b,c] [--yes] [--out <dir>] [--exte
     --yes                      do not ask when a tool the section needs is missing
     --out <dir>                where the session goes, default results/ here
 
+linebench status [--counters-dir <dir>] [--add <path>]
+
+    Says what this machine holds. Every counter with the version its definition pins, what its
+    channel publishes latest, and what sits in the counters directory. Every corpus with the
+    place its checkout goes and the commit that is there. Then the paths all of that came from.
+
 linebench report [--out <dir>] [--verify]
 
     Rewrites the results page from the records that are already there, with nothing measured.

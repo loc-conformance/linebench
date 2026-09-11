@@ -20,10 +20,12 @@ pub const CORPORA_DIR_NAME: &str = "corpora";
 pub const EVERYTHING: &str = "all";
 pub const COUNTERS_ENV: &str = "LINEBENCH_COUNTERS";
 pub const CORPUS_ENV: &str = "LINEBENCH_CORPUS";
+const THE_CONF: &str = "the conf";
+const THE_DATA_DIR: &str = "the data directory";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
-pub const COMMANDS: [&str; 8] = [
-    "run", "fetch", "check", "noise", "insights", "report", "verify", "version",
+pub const COMMANDS: [&str; 9] = [
+    "run", "fetch", "check", "noise", "insights", "report", "status", "verify", "version",
 ];
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,6 +61,7 @@ pub enum Command {
     Noise,
     Insights,
     Report,
+    Status,
     Verify,
     Version,
     #[cfg(feature = "maintenance")]
@@ -74,6 +77,7 @@ impl Command {
             Command::Noise => "noise",
             Command::Insights => "insights",
             Command::Report => "report",
+            Command::Status => "status",
             Command::Verify => "verify",
             Command::Version => "version",
             #[cfg(feature = "maintenance")]
@@ -151,7 +155,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
         };
         match flag {
-            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "verify" | "version"
+            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "status" | "verify"
+            | "version"
                 if options.command.is_none() =>
             {
                 options.command = Some(match flag {
@@ -161,6 +166,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     "noise" => Command::Noise,
                     "insights" => Command::Insights,
                     "report" => Command::Report,
+                    "status" => Command::Status,
                     "verify" => Command::Verify,
                     _ => Command::Version,
                 });
@@ -369,19 +375,57 @@ pub fn resolve_fetch(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chosen {
+    pub path: PathBuf,
+    pub said_by: String,
+}
+
+pub fn choose_counters_dir(
+    options: &Options,
+    config: &Config,
+    config_path: &Path,
+    data_dir: Option<&Path>,
+) -> Result<Chosen, String> {
+    let said = |path: PathBuf, said_by: &str| Chosen {
+        path,
+        said_by: said_by.to_string(),
+    };
+    if let Some(path) = options.counters_dir.clone() {
+        return Ok(said(path, "--counters-dir"));
+    }
+    if let Some(path) = read_env(COUNTERS_ENV) {
+        return Ok(said(PathBuf::from(path), COUNTERS_ENV));
+    }
+    if let Some(path) = config.counters.clone() {
+        return Ok(said(path, THE_CONF));
+    }
+    match data_dir.map(|dir| dir.join(COUNTERS_DIR_NAME)) {
+        Some(path) => Ok(said(path, THE_DATA_DIR)),
+        None => Err(explain_the_missing_counters_dir(config_path)),
+    }
+}
+
+pub fn choose_corpus_home(name: &str, config: &Config, data_dir: Option<&Path>) -> Option<Chosen> {
+    if let Some(path) = config.corpora.get(name).cloned() {
+        return Some(Chosen {
+            path,
+            said_by: THE_CONF.to_string(),
+        });
+    }
+    place_for_corpus(name, data_dir).map(|path| Chosen {
+        path,
+        said_by: THE_DATA_DIR.to_string(),
+    })
+}
+
 pub fn resolve_counters_dir(
     options: &Options,
     config: &Config,
     config_path: &Path,
     data_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    options
-        .counters_dir
-        .clone()
-        .or_else(|| read_env(COUNTERS_ENV).map(PathBuf::from))
-        .or_else(|| config.counters.clone())
-        .or_else(|| data_dir.map(|dir| dir.join(COUNTERS_DIR_NAME)))
-        .ok_or_else(|| explain_the_missing_counters_dir(config_path))
+    Ok(choose_counters_dir(options, config, config_path, data_dir)?.path)
 }
 
 pub fn show_path(path: &Path) -> String {

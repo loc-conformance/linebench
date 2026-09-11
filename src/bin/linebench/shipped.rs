@@ -51,7 +51,8 @@ pub fn collect_definitions(out: &mut dyn Write, added: &[PathBuf]) -> Result<Def
                     None => counters.push(definition),
                 }
             } else if has(CORPUS_KEY) {
-                let corpus = parse_corpus(&text, &file)?;
+                let mut corpus = parse_corpus(&text, &file)?;
+                corpus.added = true;
                 match corpora.iter().position(|c| c.name == corpus.name) {
                     Some(at) => {
                         print_line(

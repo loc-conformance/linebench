@@ -81,6 +81,10 @@ fn dispatch() -> Result<i32, String> {
             let config = read_config(&find_config())?;
             commands::run_report(&mut out, &resolve_out(&options, &config), options.verify)
         }
+        Command::Status => {
+            let ground = read_ground(&mut out, &options)?;
+            commands::run_status(&mut out, &options, &ground)
+        }
         Command::Verify => {
             let Some(named) = options.target.as_deref() else {
                 return Err(format!(

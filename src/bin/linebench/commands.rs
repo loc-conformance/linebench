@@ -8,15 +8,15 @@ use std::time::Duration;
 use serde_json::Value;
 
 use linebench::corpus::{
-    Counted, Parity, Verdict, check_commit, check_declares_files, count_tracked_files,
-    describe_empty_count, judge_parity, read_git_state, setup_corpus,
+    Corpus, Counted, Parity, Verdict, check_commit, check_declares_files, count_tracked_files,
+    describe_empty_count, judge_parity, read_changes, read_git_state, setup_corpus, shorten_hash,
 };
 use linebench::counters::{Acquisition, Definition};
 use linebench::defender::{
     CounterBinary, DefenderState, ProcessExclusions, explain_unequal_exclusions,
     find_unequal_exclusions, judge_process_exclusions, read_defender_state,
 };
-use linebench::fetch::{GIVEN_DIR, fetch_counter, read_manifest};
+use linebench::fetch::{GIVEN_DIR, Manifest, calculate_sha256, fetch_counter, read_manifest};
 use linebench::insight::Insights;
 use linebench::insight::{FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, VERSION_SET};
 use linebench::insight::{
@@ -49,7 +49,10 @@ use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 use linebench::verify::{Verification, check_run, find_run};
 
-use crate::config::{FetchPlan, Locations, Options, show_path};
+use crate::config::{
+    Chosen, FetchPlan, Locations, Options, choose_corpus_home, choose_counters_dir, resolve_out,
+    show_path,
+};
 use crate::instances::build_instances;
 use crate::output::{
     Color, Output, get_report_style, paint, print_header, print_line, print_warning,
@@ -66,6 +69,13 @@ const FLOOR_TARGET: &str = "floor";
 const SYSCALLS_TABLE: Table = Table::SameWork;
 const PROBE_FILE: &str = "probe.txt";
 const SYSCALLS_SUFFIX: &str = "txt";
+const NO_DEFINITION: &str = "Binaries found that no definition names:";
+const VERSION_WIDTH: usize = 8;
+const LATEST_WIDTH: usize = 16;
+const STATE_WIDTH: usize = 30;
+const TAIL_WIDTH: usize = 24;
+const A_QUIET_GIVEN: u64 = 50 * 1024 * 1024;
+const A_LOUD_GIVEN: u64 = 200 * 1024 * 1024;
 const TRACER_MISSING: &str = "strace is not present on the system, or is not in the PATH, so \
                               the system calls cannot be measured. It is recommended to \
                               download it first.";
@@ -620,6 +630,73 @@ pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
     }
     print_warning(out, &format!("{broken} checks over this run do not hold"))?;
     Ok(1)
+}
+
+pub fn run_status(
+    out: &mut dyn Write,
+    options: &Options,
+    ground: &crate::Ground,
+) -> Result<i32, String> {
+    let counters_dir = choose_counters_dir(
+        options,
+        &ground.config,
+        &ground.config_path,
+        ground.data_dir.as_deref(),
+    )?;
+    let manifest = read_manifest(&counters_dir.path)?;
+    let asked = choose_counters_to_look_up(ground.counters.iter());
+    let now = read_seconds_since_epoch();
+    thread::scope(|scope| {
+        let looking = scope.spawn(|| {
+            collect_latest_releases(&asked, &counters_dir.path, now, find_latest_release)
+        });
+        print_header(out, "== corpora")?;
+        for corpus in &ground.corpora {
+            print_line(out, &describe_corpus(corpus, ground))?;
+        }
+        let own = describe_own_definitions(ground);
+        if !own.is_empty() {
+            print_header(out, "== definitions of your own")?;
+            for line in own {
+                print_line(out, &line)?;
+            }
+        }
+        print_header(out, "== where these come from")?;
+        for line in describe_places(options, ground) {
+            print_line(out, &line)?;
+        }
+        let (lookups, warning) = looking.join().unwrap_or_default();
+        print_header(out, "== counters")?;
+        print_line(out, &describe_home(&counters_dir))?;
+        print_line(out, "")?;
+        for definition in &ground.counters {
+            let line = describe_counter(
+                definition,
+                &manifest,
+                &lookups,
+                &counters_dir.path,
+                ground.platform,
+            );
+            print_line(out, &line)?;
+        }
+        if let Some(line) = describe_given(&counters_dir.path) {
+            print_line(out, "")?;
+            print_line(out, &line)?;
+        }
+        let strays = describe_strays(&manifest, &ground.counters);
+        if !strays.is_empty() {
+            print_line(out, "")?;
+            for line in strays {
+                print_line(out, &line)?;
+            }
+        }
+        if let Some(warning) = warning
+            && counters_dir.path.is_dir()
+        {
+            print_warning(out, &warning)?;
+        }
+        Ok(0)
+    })
 }
 
 pub fn run_insights(
@@ -1814,6 +1891,242 @@ fn check_the_page(out: &mut dyn Write, results: &Path, found: &[FoundRun]) -> Re
     Ok(1)
 }
 
+fn describe_home(chosen: &Chosen) -> String {
+    format!(
+        "   {}   {}",
+        show_path(&chosen.path),
+        paint(Color::Grey, &format!("from {}", chosen.said_by))
+    )
+}
+
+fn describe_counter(
+    definition: &Definition,
+    manifest: &Manifest,
+    lookups: &[Lookup],
+    dir: &Path,
+    platform: Platform,
+) -> String {
+    let declared = match &definition.acquisition {
+        Some(how) => how.version.clone(),
+        None => String::new(),
+    };
+    let latest = lookups
+        .iter()
+        .find(|lookup| lookup.definition.name == definition.name)
+        .and_then(|lookup| lookup.outcome.as_ref().ok().cloned());
+    let painted = match &latest {
+        Some(found) if *found == declared => paint(Color::Green, &declared).to_string(),
+        Some(_) => paint(Color::Yellow, &declared).to_string(),
+        None => declared.clone(),
+    };
+    let (beside, plain) = match &latest {
+        Some(found) => {
+            let said = format!("latest {found}");
+            (said.clone(), said)
+        }
+        None => (String::new(), String::new()),
+    };
+    format!(
+        "   {:<10} {} {} {}",
+        definition.name,
+        hold_width(&painted, &declared, VERSION_WIDTH),
+        hold_width(&beside, &plain, LATEST_WIDTH),
+        describe_binary(definition, manifest, dir, platform)
+    )
+}
+
+fn describe_binary(
+    definition: &Definition,
+    manifest: &Manifest,
+    dir: &Path,
+    platform: Platform,
+) -> String {
+    let Ok(named) = definition.get_binary_name(platform.as_system()) else {
+        return paint(Color::Grey, "nothing is published for this system").to_string();
+    };
+    let binary = dir.join(named);
+    let name = &definition.name;
+    if !binary.is_file() {
+        let said = match definition.acquisition.is_some() {
+            true => format!("not here, fetch --counters {name}"),
+            false => format!("not here, and --given {name}=<path> measures a build of it"),
+        };
+        return paint(Color::Yellow, &said).to_string();
+    }
+    let Some(fetched) = manifest.0.get(name) else {
+        return paint(Color::Yellow, "here, and the manifest says nothing of it").to_string();
+    };
+    let sha256 = match calculate_sha256(&binary) {
+        Ok(sha256) => sha256,
+        Err(refused) => return paint(Color::Red, &refused).to_string(),
+    };
+    if sha256 != fetched.sha256 {
+        return paint(Color::Red, "here, and its hash is not the one fetch wrote").to_string();
+    }
+    let declared = definition
+        .acquisition
+        .as_ref()
+        .map(|how| how.version.clone());
+    if declared.is_some_and(|declared| declared != fetched.version) {
+        let said = format!(
+            "here at {}, fetch --counters {name} brings the pin",
+            fetched.version
+        );
+        return paint(Color::Yellow, &said).to_string();
+    }
+    match fetched.latest {
+        true => "here, hash matches, pinned by fetch --latest".to_string(),
+        false => "here, hash matches".to_string(),
+    }
+}
+
+fn describe_strays(manifest: &Manifest, counters: &[Definition]) -> Vec<String> {
+    let strays: Vec<&String> = manifest
+        .0
+        .keys()
+        .filter(|name| !counters.iter().any(|definition| definition.name == **name))
+        .collect();
+    if strays.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("   {NO_DEFINITION}")];
+    lines.extend(strays.iter().map(|name| format!("      {name}")));
+    lines
+}
+
+fn describe_given(dir: &Path) -> Option<String> {
+    let bytes = add_up_files(&dir.join(GIVEN_DIR));
+    if bytes == 0 {
+        return None;
+    }
+    let size = match bytes < A_MEGABYTE {
+        true => "under 1 MB".to_string(),
+        false => format!("{} MB", bytes / A_MEGABYTE),
+    };
+    let painted = match bytes {
+        bytes if bytes <= A_QUIET_GIVEN => paint(Color::Green, &size),
+        bytes if bytes <= A_LOUD_GIVEN => paint(Color::Yellow, &size),
+        _ => paint(Color::Red, &size),
+    };
+    Some(format!(
+        "   {GIVEN_DIR:<10} {painted} of builds staged by --given"
+    ))
+}
+
+fn describe_corpus(corpus: &Corpus, ground: &crate::Ground) -> String {
+    let name = &corpus.name;
+    let Some(home) = choose_corpus_home(name, &ground.config, ground.data_dir.as_deref()) else {
+        let said = paint(Color::Yellow, "no place on this machine to keep it");
+        return format!("   {name:<10} {said}");
+    };
+    let (state, plain) = describe_checkout(corpus, &home.path);
+    let tail = match home.path.is_dir() {
+        true => format!("from {}", home.said_by),
+        false => format!("fetch --corpus {name}"),
+    };
+    format!(
+        "   {name:<10} {} {} {}",
+        hold_width(&state, &plain, STATE_WIDTH),
+        hold_width(&paint(Color::Grey, &tail).to_string(), &tail, TAIL_WIDTH),
+        show_path(&home.path)
+    )
+}
+
+fn describe_checkout(corpus: &Corpus, checkout: &Path) -> (String, String) {
+    let painted = |color: Color, said: String| (paint(color, &said).to_string(), said);
+    if !checkout.is_dir() {
+        return painted(Color::Yellow, "not there".to_string());
+    }
+    let state = read_git_state(checkout);
+    let Some(head) = state.head else {
+        return painted(
+            Color::Yellow,
+            "there, and it is no git checkout".to_string(),
+        );
+    };
+    let (dirt, held) = match state.clean {
+        Some(false) => describe_changes(checkout),
+        _ => (String::new(), true),
+    };
+    if corpus.commit.is_empty() {
+        let said = format!("on {}{dirt}, unpinned", shorten_hash(&head));
+        return match held {
+            true => (said.clone(), said),
+            false => painted(Color::Yellow, said),
+        };
+    }
+    if head != corpus.commit {
+        let said = format!(
+            "on {}, and it pins {}",
+            shorten_hash(&head),
+            shorten_hash(&corpus.commit)
+        );
+        return painted(Color::Yellow, said);
+    }
+    let said = format!("on {}{dirt}", shorten_hash(&head));
+    match held {
+        true => (said.clone(), said),
+        false => painted(Color::Yellow, said),
+    }
+}
+
+/// A file whose name differs from another only in case cannot sit beside it on this filesystem,
+/// so git calls it changed for as long as the checkout lives, and that is no edit of anybody's.
+fn describe_changes(checkout: &Path) -> (String, bool) {
+    let changes = read_changes(checkout);
+    let changed = changes.changed.len();
+    if changed == 0 {
+        return (String::new(), true);
+    }
+    if changed == changes.twins.len() {
+        return (format!(", {changed} name clashes"), true);
+    }
+    (format!(", {changed} changed"), false)
+}
+
+fn describe_own_definitions(ground: &crate::Ground) -> Vec<String> {
+    let mut lines = Vec::new();
+    for definition in ground.counters.iter().filter(|d| d.added) {
+        lines.push(format!(
+            "   {:<10} {}",
+            definition.name,
+            show_path(&definition.path)
+        ));
+    }
+    for corpus in ground.corpora.iter().filter(|c| c.added) {
+        lines.push(format!(
+            "   {:<10} {}",
+            corpus.name,
+            show_path(&corpus.path)
+        ));
+    }
+    lines
+}
+
+fn describe_places(options: &Options, ground: &crate::Ground) -> Vec<String> {
+    let said = |what: &str, path: String| format!("   {what:<10} {path}");
+    let conf = match ground.config_path.is_file() {
+        true => show_path(&ground.config_path),
+        false => format!("{}, which is not there", show_path(&ground.config_path)),
+    };
+    let mut lines = vec![said("conf", conf)];
+    if let Some(dir) = &ground.data_dir {
+        lines.push(said("data", show_path(dir)));
+    }
+    let results = resolve_out(options, &ground.config);
+    let results = match results.is_absolute() {
+        true => results,
+        false => env::current_dir().unwrap_or_default().join(results),
+    };
+    lines.push(said("results", show_path(&results)));
+    lines
+}
+
+fn hold_width(painted: &str, plain: &str, width: usize) -> String {
+    let gap = width.saturating_sub(plain.chars().count());
+    format!("{painted}{}", " ".repeat(gap))
+}
+
 fn describe_exclusions(state: &DefenderState) -> String {
     match judge_process_exclusions(state) {
         ProcessExclusions::NoCounters => "no counters".to_string(),
@@ -1856,6 +2169,11 @@ fn paint_step(step: usize, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use linebench::counters::Channel;
+    use linebench::fetch::Fetched;
+
     use super::*;
 
     fn read_options(line: &str) -> Options {
@@ -1901,5 +2219,86 @@ mod tests {
         warn_about_staged_builds(&mut printed, &dir).unwrap();
         assert!(printed.is_empty(), "{}", String::from_utf8_lossy(&printed));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_staged_build_is_named_by_its_size_and_an_empty_given_says_nothing() {
+        let dir = env::temp_dir().join("linebench-a_staged_build_is_named_by_its_size");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(GIVEN_DIR)).unwrap();
+        assert_eq!(describe_given(&dir), None, "an empty given spoke");
+        let staged = dir.join(GIVEN_DIR).join("mezura@dev");
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(staged.join("small"), vec![7u8; 64]).unwrap();
+        let little = describe_given(&dir).unwrap();
+        fs::write(staged.join("mezura"), vec![7u8; 3 * A_MEGABYTE as usize]).unwrap();
+        let said = describe_given(&dir).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(little.contains("under 1 MB"), "{little}");
+        assert!(said.contains("3 MB"), "{said}");
+    }
+
+    #[test]
+    fn a_name_the_manifest_holds_and_no_definition_carries_is_named() {
+        let counters = crate::shipped::collect_definitions(&mut Vec::new(), &[])
+            .unwrap()
+            .counters;
+        let fetched = |version: &str| Fetched {
+            channel: Channel::CratesIo,
+            version: version.to_string(),
+            source: String::new(),
+            sha256: String::new(),
+            built_with: None,
+            latest: false,
+        };
+        let mut manifest = Manifest(BTreeMap::new());
+        manifest.0.insert("scc".to_string(), fetched("4.1.0"));
+        assert!(describe_strays(&manifest, &counters).is_empty());
+        manifest
+            .0
+            .insert("oldcounter".to_string(), fetched("1.2.3"));
+        let said = describe_strays(&manifest, &counters);
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].contains(NO_DEFINITION), "{said:?}");
+        assert!(said[1].contains("oldcounter"), "{said:?}");
+    }
+
+    #[test]
+    fn a_binary_whose_hash_is_not_the_one_fetch_wrote_says_so() {
+        let dir = env::temp_dir().join("linebench-a_binary_whose_hash_is_not_the_one");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let definition = crate::shipped::collect_definitions(&mut Vec::new(), &[])
+            .unwrap()
+            .counters
+            .into_iter()
+            .find(|definition| definition.name == "scc")
+            .unwrap();
+        let platform = Platform::Windows;
+        let binary = dir.join(definition.get_binary_name(platform.as_system()).unwrap());
+        fs::write(&binary, b"a build").unwrap();
+        let mut manifest = Manifest(BTreeMap::new());
+        let fetched = Fetched {
+            channel: Channel::GithubReleaseAsset,
+            version: definition.acquisition.as_ref().unwrap().version.clone(),
+            source: String::new(),
+            sha256: calculate_sha256(&binary).unwrap(),
+            built_with: None,
+            latest: false,
+        };
+        manifest.0.insert("scc".to_string(), fetched.clone());
+        let held = describe_binary(&definition, &manifest, &dir, platform);
+        let wrong = Fetched {
+            sha256: "f".repeat(64),
+            ..fetched
+        };
+        manifest.0.insert("scc".to_string(), wrong);
+        let moved = describe_binary(&definition, &manifest, &dir, platform);
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(held.contains("here, hash matches"), "{held}");
+        assert!(
+            moved.contains("its hash is not the one fetch wrote"),
+            "{moved}"
+        );
     }
 }
