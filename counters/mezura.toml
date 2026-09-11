@@ -6,18 +6,19 @@ volatile     = ["generated_at", "mezura_version", "performance"]
 [acquisition]
 channel = "github-release-asset"
 name    = "subamanis/mezura"
-version = "3.1.0"
+version = "3.1.1"
 
 [run]
 args           = ["{target}"]
 json           = ["--output", "json"]
 languages      = ["--languages", "{extensions}"]
-same-work      = ["--no-gitignore", "--no-ignore-files", "--no-local", "--no-default-config",
+same-work      = ["--no-gitignore", "--no-ignore-files", "--search-in-dotted",
+                  "--no-local", "--no-default-config",
                   "--hide", "keywords",
                   "--count-minified", "--count-generated", "--count-not-code",
                   "--counting", "region",
                   "--no-shebang"]
-same-work-note = "ignore files off, no default and no project settings read, shebang lines unread, keyword counting off, minified, generated and non code files counted, region counting model, content identification left on since scc has no way to turn its own off"
+same-work-note = "ignore files off, dotted directories entered, no default and no project settings read, shebang lines unread, keyword counting off, minified, generated and non code files counted, region counting model, content identification left on since scc has no way to turn its own off"
 scrub-env      = ["MEZURA_PHASE_TIMING", "CLICOLOR_FORCE"]
 
 [read]

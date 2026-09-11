@@ -12,8 +12,8 @@ version = "15.0.0"
 args           = ["{target}"]
 json           = ["--output", "json"]
 languages      = ["-t", "{names}"]
-same-work      = ["--no-ignore"]
-same-work-note = "ignore files off, nothing else beyond the counting to turn off"
+same-work      = ["--no-ignore", "--hidden"]
+same-work-note = "ignore files off, hidden files and directories counted, which is everything tokei has beyond the counting"
 scrub-env      = ["RAYON_NUM_THREADS"]
 
 [language-names]
