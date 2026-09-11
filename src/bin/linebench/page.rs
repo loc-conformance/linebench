@@ -113,8 +113,10 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
     let mut lines = vec![
         "# Benchmark results".to_string(),
         String::new(),
-        "Written by `linebench report` after every run, not edited by hand. What every term \
-         means and how this was measured: the two sections at the bottom."
+        "Written by `linebench report` after every run, not edited by hand. One section per \
+         machine, and under it the newest run over each corpus. Older runs are listed in the \
+         \"Every run\" table further down. What every term means and how this was \
+         measured: the last two sections."
             .to_string(),
         String::new(),
     ];
@@ -122,7 +124,7 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
     for entry in found.iter().rev().filter(|f| !f.is_local()) {
         let key = (
             entry.record.corpus.name.clone(),
-            entry.record.machine.platform.as_str().to_string(),
+            name_the_machine(&entry.record),
         );
         latest.insert(key, entry);
     }
@@ -774,7 +776,7 @@ fn format_every_run(release: &[&FoundRun]) -> Vec<String> {
     let mut lines = vec![
         "## Every run".to_string(),
         String::new(),
-        "Same-work times, the sections above show only the latest run per platform. A column whose runs measured different versions of the counter says which beside each time. Commits, machine state and everything else: inside each run's directory.".to_string(),
+        "Same-work times, the sections above show only the newest run per machine and corpus. A column whose runs measured different versions of the counter says which beside each time. Commits, machine state and everything else: inside each run's directory.".to_string(),
         String::new(),
         format!("| run | platform | corpus | {} | machine steadiness |", columns.join(" | ")),
         format!("|---|---|---|{}---|", "---|".repeat(columns.len())),
@@ -820,7 +822,7 @@ fn format_local_runs(local: &[&FoundRun]) -> Vec<String> {
     let mut lines = vec![
         "## Local builds".to_string(),
         String::new(),
-        "Runs holding a build that was given by hand rather than fetched. They compare one build with another on one machine and say nothing about the released counters.".to_string(),
+        "Runs holding a build that was given by hand, with no fetch behind it. They compare one build with another on one machine and say nothing about the released counters.".to_string(),
         String::new(),
         "| run | platform | corpus | same-work times | machine steadiness |".to_string(),
         "|---|---|---|---|---|".to_string(),
@@ -1950,6 +1952,27 @@ mod tests {
         assert_eq!(counted("## Native Linux, a cpu"), 1, "{page}");
         assert_eq!(counted("### linux corpus"), 2, "{page}");
         assert_eq!(counted("### jdk corpus"), 1, "{page}");
+    }
+
+    #[test]
+    fn two_machines_of_one_platform_each_keep_their_run_over_the_same_corpus() {
+        let mut here = build_record("20260903-100000", &[("mezura", 0.32)], "nvme0");
+        here.corpus.name = "linux".to_string();
+        let mut there = build_record("20260903-120000", &[("mezura", 0.41)], "nvme0");
+        there.corpus.name = "linux".to_string();
+        there.machine.cpu = "another cpu".to_string();
+        let found: Vec<FoundRun> = [here, there]
+            .into_iter()
+            .map(|record| FoundRun {
+                relative: format!("{}/{}", record.corpus.name, record.stamp),
+                record,
+            })
+            .collect();
+        let page = build_results_page(&found).join("\n");
+        let counted = |what: &str| page.matches(what).count();
+        assert_eq!(counted("## Windows, a cpu"), 1, "{page}");
+        assert_eq!(counted("## Windows, another cpu"), 1, "{page}");
+        assert_eq!(counted("### linux corpus"), 2, "{page}");
     }
 
     fn build_record(stamp: &str, rows: &[(&str, f64)], device: &str) -> Record {
