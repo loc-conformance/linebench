@@ -15,6 +15,7 @@ pub const LINUX: &str = "linux";
 pub const MACOS: &str = "macos";
 pub const WSL: &str = "wsl";
 pub const UNKNOWN: &str = "unknown";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BACKGROUND_SAMPLE_SECONDS: u64 = 6;
 const SETTLE_BEFORE_SAMPLE_SECONDS: u64 = 1;
 const WINDOWS_HIGH_PERFORMANCE: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
@@ -72,6 +73,8 @@ pub struct Machine {
     pub corpus_fs: String,
     pub corpus_device: String,
     pub global_gitignore: String,
+    #[serde(default)]
+    pub linebench: String,
     pub hyperfine: String,
 }
 
@@ -186,6 +189,7 @@ pub fn collect_machine(platform: Platform, corpus: &Path) -> Machine {
         corpus_device: read_device_of(platform, corpus),
         global_gitignore: capture_output("git", &["config", "--get", "core.excludesFile"])
             .unwrap_or_else(|| "none".to_string()),
+        linebench: VERSION.to_string(),
         hyperfine: capture_output("hyperfine", &["--version"])
             .unwrap_or_else(|| "missing".to_string()),
     }

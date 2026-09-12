@@ -24,14 +24,18 @@ const VERIFY_INVITE: &str = "Every number here comes out of a record under this 
                              `linebench report --verify` says whether this page is the one \
                              those records make, and `linebench verify <run directory>` reads \
                              one of them back and holds its numbers against each other.";
+const LOCAL_NOTE: &str = "Runs holding an instance given by hand, a build of your own or a \
+                          release carrying arguments of its own. They compare one build with \
+                          another on this machine and say nothing about the released counters.";
 const RUN_DEPTH: usize = 3;
 const LONG_CONTEXT_VALUE: usize = 60;
-const CONTEXT: [(&str, ReadContext); 11] = [
+const CONTEXT: [(&str, ReadContext); 12] = [
     ("power", |r| r.machine.cpu_scaling.clone()),
     ("prepared", |r| describe_list(&r.prepared)),
     ("background", |r| format_busy(r.background_busy_percent)),
     ("antivirus", describe_exclusions),
     ("realtime", |r| r.defender.realtime.clone()),
+    ("linebench", |r| r.machine.linebench.clone()),
     ("hyperfine", |r| r.machine.hyperfine.clone()),
     ("kernel", |r| r.machine.kernel.clone()),
     ("os", |r| r.machine.os.clone()),
@@ -115,70 +119,31 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
         String::new(),
         "Written by `linebench report` after every run, not edited by hand. One section per \
          machine, and under it the newest run over each corpus. Older runs are listed in the \
-         \"Every run\" table further down. What every term means and how this was \
-         measured: the last two sections."
+         \"Every run\" table further down. A run holding a build or arguments of your own is kept \
+         apart, under its own headings. What every term means and how this was measured: the last \
+         two sections."
             .to_string(),
         String::new(),
     ];
-    let mut latest: BTreeMap<(String, String), &FoundRun> = BTreeMap::new();
-    for entry in found.iter().rev().filter(|f| !f.is_local()) {
-        let key = (
-            entry.record.corpus.name.clone(),
-            name_the_machine(&entry.record),
-        );
-        latest.insert(key, entry);
-    }
-    let mut shown: Vec<&FoundRun> = latest.into_values().collect();
-    let mut newest_of: BTreeMap<String, String> = BTreeMap::new();
-    for entry in &shown {
-        let stamp = entry.record.stamp.clone();
-        newest_of
-            .entry(name_the_machine(&entry.record))
-            .and_modify(|held| {
-                if *held < stamp {
-                    held.clone_from(&stamp);
-                }
-            })
-            .or_insert(stamp);
-    }
-    shown.sort_by(|a, b| {
-        let (one, other) = (name_the_machine(&a.record), name_the_machine(&b.record));
-        newest_of[&other]
-            .cmp(&newest_of[&one])
-            .then(one.cmp(&other))
-            .then(b.record.stamp.cmp(&a.record.stamp))
-    });
     let mut single_order_seen = false;
-    let mut said = String::new();
-    for entry in &shown {
-        let machine = name_the_machine(&entry.record);
-        if machine != said {
-            lines.extend(format_machine_heading(&entry.record));
-            said = machine;
-        }
-        let earlier: Vec<&Record> = found
-            .iter()
-            .filter(|f| !f.is_local() && f.record.stamp < entry.record.stamp)
-            .map(|f| &f.record)
-            .collect();
-        lines.extend(format_run_section(
-            &entry.record,
-            &earlier,
-            &mut single_order_seen,
-        ));
-    }
-    let release: Vec<&FoundRun> = found.iter().filter(|f| !f.is_local()).collect();
-    if release.len() > shown.len() {
-        lines.extend(format_every_run(&release));
-    }
-    let local: Vec<&FoundRun> = found.iter().filter(|f| f.is_local()).collect();
-    if !local.is_empty() {
-        lines.extend(format_local_runs(&local));
-    }
-    if let Some(newest) = shown.first().copied().or(found.first()) {
+    lines.extend(format_family(
+        found,
+        Family::Release,
+        &mut single_order_seen,
+    ));
+    lines.extend(format_family(found, Family::Local, &mut single_order_seen));
+    let newest = found
+        .iter()
+        .filter(|entry| !entry.is_local())
+        .max_by(|one, other| one.record.stamp.cmp(&other.record.stamp))
+        .or_else(|| {
+            found
+                .iter()
+                .max_by(|one, other| one.record.stamp.cmp(&other.record.stamp))
+        });
+    if let Some(newest) = newest {
         lines.extend(format_methodology(&newest.record, single_order_seen));
     }
-    lines.push(String::new());
     lines.push(VERIFY_INVITE.to_string());
     lines
 }
@@ -422,6 +387,32 @@ enum Block {
     Against(String),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Family {
+    Release,
+    Local,
+}
+
+impl Family {
+    fn has(self, run: &FoundRun) -> bool {
+        run.is_local() == (self == Family::Local)
+    }
+
+    fn title_the_machine(self, record: &Record) -> String {
+        match self {
+            Family::Release => name_the_machine(record),
+            Family::Local => format!("Local builds, {}", name_the_machine(record)),
+        }
+    }
+
+    fn get_every_run_heading(self) -> &'static str {
+        match self {
+            Family::Release => "## Every run",
+            Family::Local => "## Every local run",
+        }
+    }
+}
+
 impl Block {
     fn get_heading(&self) -> &'static str {
         match self {
@@ -497,18 +488,87 @@ struct SetAside<'a> {
 
 type ReadContext = fn(&Record) -> String;
 
+/// The newest run per machine and corpus in full, the rest in one table under them.
+fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut bool) -> Vec<String> {
+    let mut runs: Vec<&FoundRun> = found.iter().filter(|entry| family.has(entry)).collect();
+    if runs.is_empty() {
+        return Vec::new();
+    }
+    runs.sort_by(|one, other| other.record.stamp.cmp(&one.record.stamp));
+    let anchors: Vec<&FoundRun> = match family {
+        Family::Release => runs.clone(),
+        Family::Local => found.iter().collect(),
+    };
+    let mut latest: BTreeMap<(String, String), &FoundRun> = BTreeMap::new();
+    for entry in runs.iter().rev() {
+        let key = (
+            entry.record.corpus.name.clone(),
+            name_the_machine(&entry.record),
+        );
+        latest.insert(key, entry);
+    }
+    let mut shown: Vec<&FoundRun> = latest.into_values().collect();
+    let mut newest_of: BTreeMap<String, String> = BTreeMap::new();
+    for entry in &shown {
+        let stamp = entry.record.stamp.clone();
+        newest_of
+            .entry(name_the_machine(&entry.record))
+            .and_modify(|held| {
+                if *held < stamp {
+                    held.clone_from(&stamp);
+                }
+            })
+            .or_insert(stamp);
+    }
+    shown.sort_by(|a, b| {
+        let (one, other) = (name_the_machine(&a.record), name_the_machine(&b.record));
+        newest_of[&other]
+            .cmp(&newest_of[&one])
+            .then(one.cmp(&other))
+            .then(b.record.stamp.cmp(&a.record.stamp))
+    });
+    let mut lines = Vec::new();
+    let mut said = String::new();
+    for entry in &shown {
+        let machine = name_the_machine(&entry.record);
+        if machine != said {
+            lines.extend(format_machine_heading(&entry.record, family));
+            said = machine;
+        }
+        let earlier: Vec<&Record> = anchors
+            .iter()
+            .filter(|f| f.record.stamp < entry.record.stamp)
+            .map(|f| &f.record)
+            .collect();
+        lines.extend(format_run_section(
+            &entry.record,
+            &earlier,
+            single_order_seen,
+        ));
+    }
+    if runs.len() > shown.len() {
+        lines.extend(format_every_run(&runs, family));
+    }
+    lines
+}
+
 /// What belongs to the machine is written once, and every corpus measured on it follows.
-fn format_machine_heading(record: &Record) -> Vec<String> {
+fn format_machine_heading(record: &Record, family: Family) -> Vec<String> {
     let machine = &record.machine;
     let ram = machine.ram_bytes.map_or("RAM unknown".to_string(), |b| {
         format!("{:.0} GB usable RAM", b as f64 / 2f64.powi(30))
     });
-    vec![
-        format!("## {}", name_the_machine(record)),
+    let mut lines = vec![
+        format!("## {}", family.title_the_machine(record)),
         String::new(),
         format!("{} threads, {ram}, {}", machine.logical_cores, machine.os),
         String::new(),
-    ]
+    ];
+    if family == Family::Local {
+        lines.push(LOCAL_NOTE.to_string());
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn name_the_machine(record: &Record) -> String {
@@ -534,11 +594,21 @@ fn format_run_section(
     let mut lines = vec![
         format!("### {} corpus, {}", record.corpus.name, record.stamp),
         String::new(),
-        format!(
-            "corpus at `{head}` on {}, {}  ",
-            machine.corpus_fs, machine.corpus_device
-        ),
     ];
+    let mut measured: Vec<String> = Vec::new();
+    if let Some(when) = format_utc_minute(&record.date) {
+        measured.push(format!("measured {when}"));
+    }
+    if !machine.linebench.is_empty() {
+        measured.push(format!("by linebench {}", machine.linebench));
+    }
+    if !measured.is_empty() {
+        lines.push(format!("{}  ", measured.join(" ")));
+    }
+    lines.push(format!(
+        "corpus at `{head}` on {}, {}  ",
+        machine.corpus_fs, machine.corpus_device
+    ));
     if !record.corpus.pinned {
         lines.push("not pinned, measured as it stands  ".to_string());
     }
@@ -751,16 +821,16 @@ fn format_run_section(
     lines
 }
 
-fn format_every_run(release: &[&FoundRun]) -> Vec<String> {
+fn format_every_run(runs: &[&FoundRun], family: Family) -> Vec<String> {
     let mut instances: BTreeSet<String> = BTreeSet::new();
-    for entry in release {
+    for entry in runs {
         for row in collect_table_rows(&entry.record.measurements, Table::SameWork).0 {
             instances.insert(row.instance);
         }
     }
     let columns: Vec<String> = instances.into_iter().collect();
     let mut versions: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
-    for entry in release {
+    for entry in runs {
         for instance in &entry.record.instances {
             versions
                 .entry(instance.identity.instance.as_str())
@@ -774,14 +844,14 @@ fn format_every_run(release: &[&FoundRun]) -> Vec<String> {
         .map(|(instance, _)| *instance)
         .collect();
     let mut lines = vec![
-        "## Every run".to_string(),
+        family.get_every_run_heading().to_string(),
         String::new(),
         "Same-work times, the sections above show only the newest run per machine and corpus. A column whose runs measured different versions of the counter says which beside each time. Commits, machine state and everything else: inside each run's directory.".to_string(),
         String::new(),
         format!("| run | platform | corpus | {} | machine steadiness |", columns.join(" | ")),
         format!("|---|---|---|{}---|", "---|".repeat(columns.len())),
     ];
-    for entry in release {
+    for entry in runs {
         let (rows, _) = collect_table_rows(&entry.record.measurements, Table::SameWork);
         let mut cells = vec![
             format!("[{}]({}/)", entry.record.stamp, entry.relative),
@@ -813,44 +883,6 @@ fn format_every_run(release: &[&FoundRun]) -> Vec<String> {
                 .unwrap_or_default(),
         );
         lines.push(format!("| {} |", cells.join(" | ")));
-    }
-    lines.push(String::new());
-    lines
-}
-
-fn format_local_runs(local: &[&FoundRun]) -> Vec<String> {
-    let mut lines = vec![
-        "## Local builds".to_string(),
-        String::new(),
-        "Runs holding a build that was given by hand, with no fetch behind it. They compare one build with another on one machine and say nothing about the released counters.".to_string(),
-        String::new(),
-        "| run | platform | corpus | same-work times | machine steadiness |".to_string(),
-        "|---|---|---|---|---|".to_string(),
-    ];
-    for entry in local {
-        let (rows, _) = collect_table_rows(&entry.record.measurements, Table::SameWork);
-        let times: Vec<String> = rows
-            .iter()
-            .map(|r| {
-                let mark = match find_instance_record(&entry.record, &r.instance)
-                    .map(|i| &i.identity.origin)
-                {
-                    Some(Origin::Given { label }) => format!(" (local build {label})"),
-                    _ => String::new(),
-                };
-                format!("{} {}{mark}", r.instance, format_wall(r.mean_s, 0.0))
-            })
-            .collect();
-        lines.push(format!(
-            "| {} | {} | {} | {} | {} |",
-            entry.record.stamp,
-            describe_platform(entry.record.machine.platform),
-            entry.record.corpus.name,
-            times.join(", "),
-            calculate_drift(&entry.record.measurements)
-                .map(|d| format_percent(d - 1.0))
-                .unwrap_or_default()
-        ));
     }
     lines.push(String::new());
     lines
@@ -1182,6 +1214,12 @@ fn format_change(then: f64, now: f64) -> String {
     }
     let change = (now / then - 1.0) * 100.0;
     format!("{change:+.1}%")
+}
+
+fn format_utc_minute(date: &str) -> Option<String> {
+    let (day, clock) = date.split_once('T')?;
+    let (hour_minute, _) = clock.strip_suffix('Z')?.rsplit_once(':')?;
+    Some(format!("{day} {hour_minute} UTC"))
 }
 
 fn format_versions(record: &Record) -> String {
@@ -1866,7 +1904,54 @@ mod tests {
             ),
             "{page}"
         );
-        assert!(page.contains("## Local builds"), "{page}");
+        assert!(page.contains("## Local builds, Windows, a cpu"), "{page}");
+    }
+
+    #[test]
+    fn a_local_run_is_written_out_in_full_under_its_own_machine_heading() {
+        let release = build_record(
+            "20260901-100000",
+            &[("mezura", 0.30), ("scc", 0.50)],
+            "nvme0",
+        );
+        let mut local = build_record(
+            "20260902-100000",
+            &[("mezura", 0.31), ("scc", 0.52)],
+            "nvme0",
+        );
+        local.instances[0].identity.origin = Origin::Given {
+            label: "dev".to_string(),
+        };
+        let found: Vec<FoundRun> = [local, release]
+            .into_iter()
+            .map(|record| FoundRun {
+                relative: format!("linux/windows/{}", record.stamp),
+                record,
+            })
+            .collect();
+        let page = build_results_page(&found).join("\n");
+        let (release_part, local_part) = page
+            .split_once("## Local builds, Windows, a cpu")
+            .expect("a section of its own for the local run");
+        assert!(release_part.contains("### linux corpus, 20260901-100000"));
+        assert!(!release_part.contains("20260902-100000"), "{release_part}");
+        assert!(
+            local_part.contains("### linux corpus, 20260902-100000"),
+            "{local_part}"
+        );
+        assert!(
+            local_part.contains("measured 2026-09-02 10:00 UTC by linebench 0.1.0"),
+            "{local_part}"
+        );
+        assert!(local_part.contains("#### Same work"), "{local_part}");
+        assert!(local_part.contains("#### Out of the box"), "{local_part}");
+        assert!(local_part.contains("| mezura | 310 ms"), "{local_part}");
+        assert!(local_part.contains("| mezura | 372 ms"), "{local_part}");
+        assert!(local_part.contains("| scc | 520 ms"), "{local_part}");
+        assert!(
+            local_part.contains("Trust checks for this run:"),
+            "{local_part}"
+        );
     }
 
     #[test]
@@ -1887,7 +1972,7 @@ mod tests {
             relative: format!("linux/windows/{}", record.stamp),
             record,
         });
-        let lines = format_every_run(&runs.iter().collect::<Vec<_>>());
+        let lines = format_every_run(&runs.iter().collect::<Vec<_>>(), Family::Release);
         let table: Vec<&String> = lines.iter().filter(|l| l.starts_with("| [")).collect();
         assert!(
             table[0].contains("| 320 ms (1.0.0) | 550 ms |"),
@@ -2000,9 +2085,15 @@ mod tests {
             .collect();
         let mut measurements = Vec::new();
         for (name, mean) in rows {
-            for order in [FORWARD, REVERSE] {
-                let set = get_set_name(Table::SameWork, order);
-                measurements.push(build_measurement(&set, name, *mean));
+            for table in TABLES {
+                let mean = match table {
+                    Table::SameWork => *mean,
+                    Table::OutOfTheBox => *mean * 1.2,
+                };
+                for order in [FORWARD, REVERSE] {
+                    let set = get_set_name(table, order);
+                    measurements.push(build_measurement(&set, name, mean));
+                }
             }
         }
         let (control, control_mean) = rows[0];
@@ -2012,7 +2103,7 @@ mod tests {
         Record {
             format: RECORD_FORMAT,
             stamp: stamp.to_string(),
-            date: String::new(),
+            date: build_date(stamp),
             machine: Machine {
                 platform: Platform::Windows,
                 arch: "x86_64".to_string(),
@@ -2025,6 +2116,7 @@ mod tests {
                 corpus_fs: "ext4".to_string(),
                 corpus_device: device.to_string(),
                 global_gitignore: "none".to_string(),
+                linebench: "0.1.0".to_string(),
                 hyperfine: "hyperfine 1.20.0".to_string(),
             },
             defender: DefenderState {
@@ -2060,6 +2152,38 @@ mod tests {
             capture_failures: Vec::new(),
             identity_checks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_run_whose_record_carries_no_readable_date_says_nothing_about_when_it_ran() {
+        assert_eq!(
+            format_utc_minute("2026-09-12T05:51:38Z").as_deref(),
+            Some("2026-09-12 05:51 UTC")
+        );
+        assert_eq!(format_utc_minute(""), None);
+        assert_eq!(format_utc_minute("2026-09-12"), None);
+        assert_eq!(format_utc_minute("2026-09-12T05:51:38"), None);
+        let mut record = build_record("20260902-100000", &[("mezura", 0.30)], "nvme0");
+        record.date = String::new();
+        record.machine.linebench = String::new();
+        let section = format_run_section(&record, &[], &mut false);
+        assert!(
+            section.iter().all(|line| !line.starts_with("measured")),
+            "{section:?}"
+        );
+    }
+
+    fn build_date(stamp: &str) -> String {
+        let (day, clock) = stamp.split_once('-').expect("a stamp of day and clock");
+        format!(
+            "{}-{}-{}T{}:{}:{}Z",
+            &day[0..4],
+            &day[4..6],
+            &day[6..8],
+            &clock[0..2],
+            &clock[2..4],
+            &clock[4..6]
+        )
     }
 
     fn build_measurement(set: &str, instance: &str, mean_s: f64) -> Measurement {

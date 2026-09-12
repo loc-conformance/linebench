@@ -25,7 +25,7 @@ use linebench::corpus::Corpus;
 use linebench::counters::Definition;
 use linebench::fetch::read_manifest;
 use linebench::latest::apply_latest_pins;
-use linebench::machine::{Platform, detect_platform};
+use linebench::machine::{Platform, VERSION, detect_platform};
 
 #[cfg(feature = "maintenance")]
 use crate::config::COUNTERS_DIR_NAME;
@@ -38,7 +38,6 @@ use crate::help::{find_help_of, get_help, paint_help};
 use crate::output::{Color, Output, enable_colors, paint, print_line};
 use crate::shipped::collect_definitions;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NAME_THE_RUN: &str = "name the run to read";
 
 fn main() {

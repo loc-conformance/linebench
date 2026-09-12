@@ -114,7 +114,7 @@ network share, measures the mount.
 ```
 linebench fetch --counters all --corpus all
 linebench fetch --counters tokei
-linebench fetch --corpus linux --corpus-path /data/linux
+linebench fetch --corpus all --corpus-path /data/corpora
 ```
 
 Brings the binaries and the checkouts down to this machine. Each counter comes at the version its
@@ -434,8 +434,8 @@ own the instance runs the release binary, so a `[given]` entry holding only `arg
 release with those arguments beside the release as it is. Arguments make an instance of their own,
 so the name carries a tag.
 
-A run holding any given instance is written under `results/local/` and the page lists such runs in
-their own table under the release runs. A `[given]` entry in the conf joins every run that names no
+A run holding any given instance is written under `results/local/` and the page gives such runs
+headings of their own, under the release ones, with the same sections. A `[given]` entry in the conf joins every run that names no
 `--counters`, so for a run meant for the release tables comment it out or name the release
 instances with `--counters`.
 
@@ -530,8 +530,8 @@ results/
 One directory per corpus, then per platform, then per run, named by its UTC timestamp. Nothing is
 ever overwritten. `results/README.md` is the page, rewritten after every run and on demand with
 `report`: one section per machine, and under it the newest run over each corpus with its two tables
-and its trust checks, then every run once there is more than one, the local builds apart, and the
-methodology and the terms.
+and its trust checks, then every run once there is more than one, the local builds under headings of
+their own, and the methodology and the terms.
 
 Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
 `summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`, hyperfine's
@@ -546,7 +546,7 @@ A flag beats an environment variable, which beats `linebench.conf` in the data d
 | what | flag | environment | in the conf | default |
 |---|---|---|---|---|
 | what gets counted | the argument, a corpus name or a directory | `LINEBENCH_TARGET` | | |
-| where a named corpus sits | `--corpus-path <dir>` | | `[corpora]` entry | `corpora/<name>` where fetch put it |
+| where the corpora sit | `--corpus-path <dir>`, a directory each under it, or one corpus's own checkout | | a `[corpora]` entry, the checkout itself | `corpora/<name>` in the data directory |
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
