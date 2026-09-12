@@ -1332,10 +1332,17 @@ mod tests {
         assert_eq!(plain, here.join(DEFAULT_OUT));
         let named = parse("run linux --out mine").unwrap();
         assert_eq!(resolve_out(&named, &Config::default()), here.join("mine"));
-        let elsewhere = parse("run linux --out D:/elsewhere").unwrap();
+        // A drive letter is absolute only on windows. Anywhere else the same text names a folder
+        // under the working directory.
+        let absolute = if cfg!(windows) {
+            "D:/elsewhere"
+        } else {
+            "/elsewhere"
+        };
+        let elsewhere = parse(&format!("run linux --out {absolute}")).unwrap();
         assert_eq!(
             resolve_out(&elsewhere, &Config::default()),
-            PathBuf::from("D:/elsewhere")
+            PathBuf::from(absolute)
         );
     }
 
