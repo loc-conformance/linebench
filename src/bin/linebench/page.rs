@@ -34,7 +34,10 @@ const CONTEXT: [(&str, ReadContext); 12] = [
     ("background", |r| format_busy(r.background_busy_percent)),
     ("antivirus", describe_exclusions),
     ("realtime", |r| r.defender.realtime.clone()),
-    ("linebench", |r| r.machine.linebench.clone()),
+    ("linebench", |r| match r.machine.linebench.is_empty() {
+        true => UNKNOWN.to_string(),
+        false => r.machine.linebench.clone(),
+    }),
     ("hyperfine", |r| r.machine.hyperfine.clone()),
     ("kernel", |r| r.machine.kernel.clone()),
     ("os", |r| r.machine.os.clone()),
@@ -1779,6 +1782,20 @@ mod tests {
             since
                 .iter()
                 .any(|line| line.starts_with("since 20260904-130000")),
+            "{since:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_recorded_before_the_version_was_kept_is_named_unknown_beside_the_one_that_has_it() {
+        let mut then = build_record("20260901-100000", &[("mezura", 0.30)], "nvme0");
+        then.machine.linebench = String::new();
+        let now = build_record("20260902-100000", &[("mezura", 0.31)], "nvme0");
+        let since = format_since(&now, &[&then]);
+        assert!(
+            since
+                .iter()
+                .any(|line| line.contains("linebench") && line.contains("unknown -> 0.1.0")),
             "{since:?}"
         );
     }

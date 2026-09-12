@@ -231,7 +231,13 @@ pub fn format_floor(measurements: &[Measurement], instances: &[(String, String)]
     let headings: Vec<String> = FIRST_HEADINGS
         .iter()
         .map(|heading| (*heading).to_string())
-        .chain(TABLES.map(|table| format!("ready {}", table.as_str())))
+        .chain(TABLES.map(|table| {
+            format!(
+                "ready {} ({})",
+                table.as_str(),
+                table.describe().to_lowercase()
+            )
+        }))
         .collect();
     let mut rows: Vec<Vec<String>> = Vec::new();
     for (instance, command) in instances {

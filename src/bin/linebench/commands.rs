@@ -887,10 +887,14 @@ pub fn run_insights(
         syscalls,
     };
     write_insights(&res, &insights)?;
-    write_insights_page(&res, &insights, &versions)?;
+    let mut written = vec![INSIGHTS_FILE];
+    match write_insights_page(&res, &insights, &versions) {
+        Ok(()) => written.push(INSIGHTS_PAGE),
+        Err(refused) => print_warning(out, &format!("the page could not be written: {refused}"))?,
+    }
     print_line(out, "")?;
-    for written in [INSIGHTS_FILE, INSIGHTS_PAGE] {
-        print_line(out, &format!("   wrote {}", res.join(written).display()))?;
+    for file in written {
+        print_line(out, &format!("   wrote {}", res.join(file).display()))?;
     }
     if runner.failures.is_empty() {
         return Ok(0);
