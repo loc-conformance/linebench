@@ -19,11 +19,12 @@ use linebench::defender::{
 use linebench::fetch::{GIVEN_DIR, Manifest, calculate_sha256, fetch_counter, read_manifest};
 use linebench::insight::Insights;
 use linebench::insight::{
-    FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, SYSCALLS_HEADING, VERSION_SET,
+    FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, INSIGHTS_PAGE, SYSCALLS_HEADING,
+    VERSION_SET,
 };
 use linebench::insight::{
     build_insights_path, format_floor, format_memory, format_syscalls, format_syscalls_summary,
-    get_floor_set_name, write_insights,
+    get_floor_set_name, write_insights, write_insights_page,
 };
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
@@ -87,7 +88,8 @@ const TRACER_REFUSED: &str = "strace is here and it was not allowed to trace, so
                               calls cannot be measured. It needs ptrace, which a container \
                               without CAP_SYS_PTRACE and a hardened kernel.yama.ptrace_scope both \
                               refuse.";
-const TRACER_ELSEWHERE: &str = "not measured here. strace runs on linux alone";
+const TRACER_ELSEWHERE: &str =
+    "strace runs on linux alone, so the system calls cannot be measured here.";
 const SYSCALLS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const MEMORY_TABLE: Table = Table::SameWork;
@@ -881,14 +883,15 @@ pub fn run_insights(
             Tracing::Ready(version) => Some(version),
             _ => None,
         },
+        unmeasured: unmeasured.map(str::to_string),
         syscalls,
     };
     write_insights(&res, &insights)?;
+    write_insights_page(&res, &insights, &versions)?;
     print_line(out, "")?;
-    print_line(
-        out,
-        &format!("   wrote {}", res.join(INSIGHTS_FILE).display()),
-    )?;
+    for written in [INSIGHTS_FILE, INSIGHTS_PAGE] {
+        print_line(out, &format!("   wrote {}", res.join(written).display()))?;
+    }
     if runner.failures.is_empty() {
         return Ok(0);
     }
@@ -1631,6 +1634,7 @@ fn build_corpus_record(locations: &Locations) -> CorpusRecord {
         head: git.head,
         clean: git.clean,
         extensions: locations.corpus.extensions.clone(),
+        files: locations.corpus.files,
     }
 }
 

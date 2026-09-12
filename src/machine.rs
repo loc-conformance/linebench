@@ -55,6 +55,15 @@ impl Platform {
         }
     }
 
+    pub fn describe(self) -> &'static str {
+        match self {
+            Platform::Windows => "Windows",
+            Platform::Linux => "Native Linux",
+            Platform::Wsl => "WSL2",
+            Platform::Macos => "macOS",
+        }
+    }
+
     pub fn is_linux(self) -> bool {
         matches!(self, Platform::Linux | Platform::Wsl)
     }
@@ -76,6 +85,15 @@ pub struct Machine {
     #[serde(default)]
     pub linebench: String,
     pub hyperfine: String,
+}
+
+impl Machine {
+    pub fn describe(&self) -> String {
+        let ram = self.ram_bytes.map_or("RAM unknown".to_string(), |bytes| {
+            format!("{:.0} GB usable RAM", bytes as f64 / 2f64.powi(30))
+        });
+        format!("{} threads, {ram}, {}", self.logical_cores, self.os)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

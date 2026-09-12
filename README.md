@@ -312,10 +312,11 @@ values, each the highest of its slice.
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
 needs is missing.
 
-A session lands in `results/insights/<corpus>/<system>/<stamp>/insights.json` with the hyperfine
-exports beside it. It carries its own machine block, the antivirus state, the corpus with its
-commit and the instances measured, so it stands on its own. An `--args` instance or a build of
-yours sends the session under `results/insights/local/`.
+A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
+machine block, the antivirus state, the corpus with its commit and the instances measured, so it
+stands on its own, and the hyperfine exports sit beside it. `insights.md` is the same session for a
+reader: the machine, the corpus and the three tables above as they were printed. An `--args`
+instance or a build of yours sends the session under `results/insights/local/`.
 
 ### report
 
@@ -537,7 +538,8 @@ Inside a run directory: `run.json`, the record, self-contained and the one that 
 `summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`, hyperfine's
 own output; `transcript.txt`, everything the run printed; `notes.md`, the checklist to fill in by
 hand, with the since block under it. `out/` holds every counter's JSON and is deleted once the
-counts are read.
+counts are read. Inside an insights directory: `insights.json`, the session, `insights.md`, the
+same session to read, and hyperfine's own output for the floor phase.
 
 ## Settings
 

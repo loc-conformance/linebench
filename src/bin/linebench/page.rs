@@ -4,17 +4,16 @@ use std::path::{Path, PathBuf};
 
 use linebench::corpus::{Parity, Verdict, format_percent, shorten_hash};
 use linebench::defender::{ProcessExclusions, judge_process_exclusions};
-use linebench::fetch::Origin;
 use linebench::files::read_text;
 use linebench::insight::INSIGHTS_DIR;
-use linebench::machine::Platform;
 use linebench::machine::UNKNOWN;
 use linebench::measure::Table;
 use linebench::measure::{CONTROL_END, CONTROL_START, TABLES};
 use linebench::record::{
     InstanceRecord, Pooled, Record, calculate_drift, collect_table_rows,
-    describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_wall,
-    pool_orders, propagate_ratio_stddev, read_record, shorten_version,
+    describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_utc_minute,
+    format_versions, format_wall, pool_orders, propagate_ratio_stddev, read_record,
+    shorten_version,
 };
 use linebench::record::{LOCAL_DIR, RECORD_FILE};
 use linebench::verify::compare_lines;
@@ -117,7 +116,8 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
     let mut lines = vec![
         "# Benchmark results".to_string(),
         String::new(),
-        "Written by `linebench report` after every run, not edited by hand. One section per \
+        "Written by `linebench report` after every run, and rewritten whole each time. One \
+         section per \
          machine, and under it the newest run over each corpus. Older runs are listed in the \
          \"Every run\" table further down. A run holding a build or arguments of your own is kept \
          apart, under its own headings. What every term means and how this was measured: the last \
@@ -163,7 +163,7 @@ pub fn format_against(current: &Record, named: &Record, earlier: &[&Record]) -> 
         reasons.push("recorded after this run".to_string());
     }
     if named.machine.platform != current.machine.platform {
-        reasons.push(format!("on {}", describe_platform(named.machine.platform)));
+        reasons.push(format!("on {}", named.machine.platform.describe()));
     }
     if named.corpus.name != current.corpus.name {
         reasons.push(format!("over the {} corpus", named.corpus.name));
@@ -554,14 +554,10 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
 
 /// What belongs to the machine is written once, and every corpus measured on it follows.
 fn format_machine_heading(record: &Record, family: Family) -> Vec<String> {
-    let machine = &record.machine;
-    let ram = machine.ram_bytes.map_or("RAM unknown".to_string(), |b| {
-        format!("{:.0} GB usable RAM", b as f64 / 2f64.powi(30))
-    });
     let mut lines = vec![
         format!("## {}", family.title_the_machine(record)),
         String::new(),
-        format!("{} threads, {ram}, {}", machine.logical_cores, machine.os),
+        record.machine.describe(),
         String::new(),
     ];
     if family == Family::Local {
@@ -574,7 +570,7 @@ fn format_machine_heading(record: &Record, family: Family) -> Vec<String> {
 fn name_the_machine(record: &Record) -> String {
     format!(
         "{}, {}",
-        describe_platform(record.machine.platform),
+        record.machine.platform.describe(),
         record.machine.cpu
     )
 }
@@ -612,7 +608,7 @@ fn format_run_section(
     if !record.corpus.pinned {
         lines.push("not pinned, measured as it stands  ".to_string());
     }
-    lines.push(format!("{}  ", format_versions(record)));
+    lines.push(format!("{}  ", format_versions(&record.instances)));
     let runs = record.settings.runs;
     lines.push(format!(
         "{} warmups, {} timed runs per command ({runs} in the first pass + {runs} in the reverse pass), {} s of pause before each command",
@@ -855,7 +851,7 @@ fn format_every_run(runs: &[&FoundRun], family: Family) -> Vec<String> {
         let (rows, _) = collect_table_rows(&entry.record.measurements, Table::SameWork);
         let mut cells = vec![
             format!("[{}]({}/)", entry.record.stamp, entry.relative),
-            describe_platform(entry.record.machine.platform).to_string(),
+            entry.record.machine.platform.describe().to_string(),
             entry.record.corpus.name.clone(),
         ];
         for column in &columns {
@@ -1216,45 +1212,8 @@ fn format_change(then: f64, now: f64) -> String {
     format!("{change:+.1}%")
 }
 
-fn format_utc_minute(date: &str) -> Option<String> {
-    let (day, clock) = date.split_once('T')?;
-    let (hour_minute, _) = clock.strip_suffix('Z')?.rsplit_once(':')?;
-    Some(format!("{day} {hour_minute} UTC"))
-}
-
-fn format_versions(record: &Record) -> String {
-    record
-        .instances
-        .iter()
-        .map(|i| match &i.identity.origin {
-            Origin::Given { label } => {
-                format!(
-                    "{} {} (local build {label})",
-                    i.identity.instance,
-                    shorten_version(&i.identity.version)
-                )
-            }
-            _ => format!(
-                "{} {}",
-                i.identity.instance,
-                shorten_version(&i.identity.version)
-            ),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn format_millions(value: f64) -> String {
     format!("{:.1}M", value / 1e6)
-}
-
-fn describe_platform(platform: Platform) -> &'static str {
-    match platform {
-        Platform::Windows => "Windows",
-        Platform::Linux => "Native Linux",
-        Platform::Wsl => "WSL2",
-        Platform::Macos => "macOS",
-    }
 }
 
 fn describe_exclusions(record: &Record) -> String {
@@ -1337,7 +1296,9 @@ mod tests {
     use linebench::counters::Channel;
     use linebench::defender::DefenderState;
     use linebench::fetch::Identity;
+    use linebench::fetch::Origin;
     use linebench::machine::Machine;
+    use linebench::machine::Platform;
     use linebench::measure::{FORWARD, REVERSE, get_set_name};
     use linebench::record::RECORD_FORMAT;
     use linebench::record::{CorpusRecord, Measurement, RunSettings};
@@ -2133,6 +2094,7 @@ mod tests {
                 clean: Some(true),
                 pinned: true,
                 extensions: vec!["c".to_string(), "h".to_string()],
+                files: Some(100),
             },
             settings: RunSettings {
                 warmup: 3,

@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::corpus::shorten_hash;
 use crate::defender::DefenderState;
 use crate::machine::{Machine, Platform};
 use crate::measure::TABLES;
 use crate::measure::{Style, Table};
 use crate::record::LOCAL_DIR;
-use crate::record::format_thousands;
 use crate::record::{CorpusRecord, InstanceRecord, Measurement};
+use crate::record::{format_thousands, format_utc_minute, format_versions};
 use crate::sample::Curve;
 use crate::sample::LEAST_SAMPLES;
 use crate::sample::fold_into_columns;
@@ -23,8 +24,18 @@ pub const FLOOR_RUNS: u32 = 30;
 pub const VERSION_SET: &str = "floor-version";
 pub const INSIGHTS_DIR: &str = "insights";
 pub const INSIGHTS_FILE: &str = "insights.json";
+pub const INSIGHTS_PAGE: &str = "insights.md";
 pub const INSIGHTS_FORMAT: u32 = 1;
 pub const SYSCALLS_HEADING: &str = "family / call";
+const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends. What a run cannot \
+                          measure about itself, since watching a process closely enough disturbs \
+                          the times it would report. The tables are the ones the command printed, \
+                          kept as they were laid out.";
+const FLOOR_MEANS: &str = "What a counter costs before it has counted anything.";
+const MEMORY_MEANS: &str = "What each counter held while it counted, sampled while it ran. The \
+                            axis under each curve is the wall time of that run.";
+const SYSCALLS_MEANS: &str = "What each counter asked of the kernel, counted by the tracer.";
+const NO_SYSCALLS: &str = "The system calls were not counted in this session.";
 const FLOOR_PREFIX: &str = "floor-";
 const VERSION_HEADING: &str = "--version";
 const FIRST_HEADINGS: [&str; 2] = ["instance", VERSION_HEADING];
@@ -81,6 +92,8 @@ pub struct Insights {
     pub floor: Vec<Measurement>,
     pub curves: Vec<Curve>,
     pub tracer: Option<String>,
+    #[serde(default)]
+    pub unmeasured: Option<String>,
     pub syscalls: Vec<Syscalls>,
 }
 
@@ -104,6 +117,85 @@ pub fn write_insights(res: &Path, insights: &Insights) -> Result<(), String> {
         .map_err(|error| format!("the insights could not be written out: {error}"))?;
     fs::write(&path, text)
         .map_err(|error| format!("{} could not be written: {error}", path.display()))
+}
+
+pub fn write_insights_page(
+    res: &Path,
+    insights: &Insights,
+    versions: &[(String, String)],
+) -> Result<(), String> {
+    let path = res.join(INSIGHTS_PAGE);
+    let mut text = build_insights_page(insights, versions).join("\n");
+    text.push('\n');
+    fs::write(&path, text)
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
+}
+
+pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -> Vec<String> {
+    let machine = &insights.machine;
+    let head = insights
+        .corpus
+        .head
+        .as_deref()
+        .map(shorten_hash)
+        .unwrap_or_else(|| "no commit".to_string());
+    let mut lines = vec![
+        "# Insights".to_string(),
+        String::new(),
+        PAGE_INTRO.to_string(),
+        String::new(),
+        format!("## {}, {}", machine.platform.describe(), machine.cpu),
+        String::new(),
+        machine.describe(),
+        String::new(),
+    ];
+    let mut measured = Vec::new();
+    if let Some(when) = format_utc_minute(&insights.date) {
+        measured.push(format!("measured {when}"));
+    }
+    if !machine.linebench.is_empty() {
+        measured.push(format!("by linebench {}", machine.linebench));
+    }
+    if !measured.is_empty() {
+        lines.push(format!("{}  ", measured.join(" ")));
+    }
+    lines.push(format!(
+        "{} corpus at `{head}` on {}, {}  ",
+        insights.corpus.name, machine.corpus_fs, machine.corpus_device
+    ));
+    lines.push(format_versions(&insights.instances));
+    lines.push(String::new());
+    lines.extend(wrap_in_fence(
+        "Floor",
+        FLOOR_MEANS,
+        format_floor(&insights.floor, versions),
+    ));
+    lines.extend(wrap_in_fence(
+        "Memory",
+        MEMORY_MEANS,
+        format_memory(&insights.curves, Style::Hidden),
+    ));
+    let mut counted = format_syscalls_summary(&insights.syscalls, insights.corpus.files);
+    if !counted.is_empty() {
+        counted.push(String::new());
+        counted.extend(format_syscalls(&insights.syscalls, Style::Hidden));
+    }
+    match counted.is_empty() {
+        true => lines.extend([
+            "## System calls".to_string(),
+            String::new(),
+            insights
+                .unmeasured
+                .clone()
+                .unwrap_or_else(|| NO_SYSCALLS.to_string()),
+            String::new(),
+        ]),
+        false => lines.extend(wrap_in_fence("System calls", SYSCALLS_MEANS, counted)),
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
 }
 
 pub fn get_floor_set_name(table: Table) -> String {
@@ -316,6 +408,24 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The tables are laid out for a terminal, so the page keeps them in a fence as they are.
+fn wrap_in_fence(heading: &str, means: &str, body: Vec<String>) -> Vec<String> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        format!("## {heading}"),
+        String::new(),
+        means.to_string(),
+        String::new(),
+        "```".to_string(),
+    ];
+    lines.extend(body.into_iter().skip_while(String::is_empty));
+    lines.push("```".to_string());
+    lines.push(String::new());
+    lines
 }
 
 fn get_label(top: u64, index: usize) -> String {
@@ -581,6 +691,10 @@ fn measure_widths(headings: &[String], rows: &[Vec<String>]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::fetch::{Identity, Origin};
+
     use super::*;
 
     const TOKEI_COMMAND: &str = "tokei --version";
@@ -657,6 +771,67 @@ mod tests {
         }
     }
 
+    fn build_insights(syscalls: Vec<Syscalls>) -> Insights {
+        Insights {
+            format: INSIGHTS_FORMAT,
+            stamp: "20260911-005944".to_string(),
+            date: "2026-09-11T00:59:44Z".to_string(),
+            machine: Machine {
+                platform: Platform::Linux,
+                arch: "x86_64".to_string(),
+                os: "Debian GNU/Linux 13".to_string(),
+                kernel: "6.12".to_string(),
+                cpu: "a cpu".to_string(),
+                logical_cores: 16,
+                ram_bytes: None,
+                cpu_scaling: "performance".to_string(),
+                corpus_fs: "ext4".to_string(),
+                corpus_device: "nvme0".to_string(),
+                global_gitignore: "none".to_string(),
+                linebench: "0.1.0".to_string(),
+                hyperfine: "hyperfine 1.19.0".to_string(),
+            },
+            defender: DefenderState {
+                realtime: "not applicable".to_string(),
+                counters: BTreeMap::new(),
+            },
+            unequal_exclusions: None,
+            corpus: CorpusRecord {
+                name: "linux".to_string(),
+                checkout: PathBuf::from("/bench/linux"),
+                commit: "0".repeat(40),
+                head: Some("0".repeat(40)),
+                clean: Some(true),
+                pinned: true,
+                extensions: vec!["c".to_string()],
+                files: Some(100),
+            },
+            instances: vec![InstanceRecord {
+                identity: Identity {
+                    instance: "tokei".to_string(),
+                    counter: "tokei".to_string(),
+                    binary: PathBuf::from("/tools/tokei"),
+                    sha256: "0".repeat(64),
+                    version: "tokei 15.0.0".to_string(),
+                    origin: Origin::Built {
+                        version: "15.0.0".to_string(),
+                        built_with: "rustc".to_string(),
+                    },
+                },
+                languages: Vec::new(),
+                same_work: Vec::new(),
+                same_work_note: String::new(),
+                scrub_env: Vec::new(),
+                args: Vec::new(),
+            }],
+            floor: build_floor(),
+            curves: vec![build_curve("tokei", 30 * MEGABYTE)],
+            tracer: None,
+            unmeasured: Some("strace runs on linux alone".to_string()),
+            syscalls,
+        }
+    }
+
     fn read_colors(lines: &[String]) -> Vec<[u8; 3]> {
         lines
             .iter()
@@ -667,6 +842,44 @@ mod tests {
                 Some([channels.next()?, channels.next()?, channels.next()?])
             })
             .collect()
+    }
+
+    #[test]
+    fn the_page_closes_every_fence_and_writes_none_around_a_table_that_was_never_measured() {
+        let bare = build_insights_page(&build_insights(Vec::new()), &only_tokei()).join("\n");
+        assert_eq!(bare.matches("```").count(), 4, "{bare}");
+        assert!(
+            bare.contains("measured 2026-09-11 00:59 UTC by linebench 0.1.0"),
+            "{bare}"
+        );
+        assert!(
+            bare.contains("linux corpus at `000000000` on ext4"),
+            "{bare}"
+        );
+        assert!(bare.contains("tokei 15.0.0"), "{bare}");
+        assert!(
+            bare.contains("## Floor") && bare.contains("## Memory"),
+            "{bare}"
+        );
+        assert!(
+            bare.contains("## System calls\n\nstrace runs on linux alone"),
+            "{bare}"
+        );
+        let mut silent = build_insights(Vec::new());
+        silent.unmeasured = None;
+        let silent = build_insights_page(&silent, &only_tokei()).join("\n");
+        assert!(
+            silent.contains(&format!("## System calls\n\n{NO_SYSCALLS}")),
+            "{silent}"
+        );
+        let counted = build_insights_page(
+            &build_insights(vec![build_syscalls("tokei", &[("openat", 10)])]),
+            &only_tokei(),
+        )
+        .join("\n");
+        assert_eq!(counted.matches("```").count(), 6, "{counted}");
+        assert!(counted.contains("opening"), "{counted}");
+        assert!(!counted.contains(NO_SYSCALLS), "{counted}");
     }
 
     #[test]

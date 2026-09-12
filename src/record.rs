@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::corpus::{Parity, describe_empty_count, shorten_hash};
 use crate::defender::{DefenderState, ProcessExclusions, judge_process_exclusions};
 use crate::fetch::Identity;
+use crate::fetch::Origin;
 use crate::files::read_text;
 use crate::machine::Machine;
 use crate::measure::{CONTROL_END, CONTROL_START, FORWARD, REVERSE};
@@ -80,6 +81,8 @@ pub struct CorpusRecord {
     pub pinned: bool,
     #[serde(default)]
     pub extensions: Vec<String>,
+    #[serde(default)]
+    pub files: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +464,29 @@ pub fn format_relative(relative: f64, stddev: f64) -> String {
     } else {
         format!("{relative:.2}x")
     }
+}
+
+pub fn format_utc_minute(date: &str) -> Option<String> {
+    let (day, clock) = date.split_once('T')?;
+    let (hour_minute, _) = clock.strip_suffix('Z')?.rsplit_once(':')?;
+    Some(format!("{day} {hour_minute} UTC"))
+}
+
+pub fn format_versions(instances: &[InstanceRecord]) -> String {
+    instances
+        .iter()
+        .map(|instance| {
+            let version = shorten_version(&instance.identity.version);
+            match &instance.identity.origin {
+                Origin::Given { label } => format!(
+                    "{} {version} (local build {label})",
+                    instance.identity.instance
+                ),
+                _ => format!("{} {version}", instance.identity.instance),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(", ")
 }
 
 pub fn shorten_version(printed: &str) -> String {
