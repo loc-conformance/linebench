@@ -7,7 +7,7 @@ rust-version = "1.88"
 description = "A benchmark harness for line-of-code counters: every counter on equal work, with the machine's state recorded beside every number"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/loc-conformance/linebench"
-keywords = ["lines-of-code", "loc", "benchmark", "hyperfine"]
+keywords = ["benchmark", "performance", "hyperfine", "lines-of-code", "loc"]
 categories = ["development-tools::profiling", "development-tools"]
 exclude = [".github"]
 
