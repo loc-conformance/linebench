@@ -160,6 +160,8 @@ paths at the top are where every line below them came from.
 ```
 linebench check linux
 linebench check cpython --counters cloc,mezura,scc,tokei
+linebench check linux,cpython
+linebench check all
 ```
 
 Answers "is this machine ready to measure". Every instance runs once per table against the real
@@ -181,6 +183,9 @@ The `releases` lines say whether the version each definition pins is still the n
 one lookup per counter on the channel it fetches from. Answers are kept six hours beside the
 binaries. A lookup that fails prints why, in yellow, and the check passes all the same. Nothing is
 fetched here.
+
+A list, `linux,cpython`, or `all` for every corpus this machine holds, is checked one corpus at a
+time, each under a heading of its own.
 
 ### noise
 
@@ -212,6 +217,8 @@ sudo linebench run linux
 linebench run linux --counters mezura,scc,tokei
 linebench run cpython --runs 20 --warmup 5 --settle 5
 linebench run linux --against 20260904-130000
+sudo linebench run linux,cpython
+sudo linebench run all
 ```
 
 The measurement. What it prints is [Reading the numbers](#reading-the-numbers), where it lands
@@ -228,6 +235,14 @@ elevated, and with no terminal attached it carries on.
 `--runs`, `--warmup` and `--settle` are hyperfine's, per command. `--against <stamp>` adds a
 second comparison block read against that one run. `--keep-raw` holds on to each counter's JSON
 and plain output, which a plain run deletes once the counts are read.
+
+Several corpora in one command, `linebench run linux,cpython` or `linebench run all`, are measured
+one after the other in the same process. The machine is prepared once and put back when the last
+one ends, each corpus keeps its own run directory and its own record, and every summary is printed
+again together at the end. `all` is every corpus definition with a checkout on this machine, and
+the ones missing are named in a line of their own. A corpus that fails is named and the rest carry
+on, and the exit code is 2 when one of them did. `--against` takes one corpus, since a stamp
+belongs to one.
 
 An instance is a definition, a binary and a name in the table. By default every counter definition
 is one instance, named after itself, and so is every `[given]` entry in the conf. `--counters`
@@ -378,6 +393,9 @@ linebench run myproject --add ./myproject.toml
 Leave `commit` and `files` out to measure the tree as it stands. With `remote` and `commit` filled
 in, `fetch --corpus myproject` clones it at that commit and every command refuses a checkout that
 sits anywhere else.
+
+A definition also puts it among the rest: `linebench run linux,myproject --add ./myproject.toml`
+measures both in one go, and `all` takes it along once `add` in the conf names the file.
 
 ### A counter of your own
 

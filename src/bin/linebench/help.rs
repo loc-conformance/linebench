@@ -29,7 +29,7 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
     The counters land in the counters directory and a corpus in corpora/<name> next to it, which
     is where every later command looks for it with nothing said.
 
-linebench check <corpus|dir> [--extensions rs,c] [--counters a,b,c] [--corpus-path <dir>]
+linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--corpus-path <dir>]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
                 [--expect-identical a=b] [--counters-dir <dir>] [--add <path>]
 
@@ -37,8 +37,9 @@ linebench check <corpus|dir> [--extensions rs,c] [--counters a,b,c] [--corpus-pa
     holds them against each other and against the count the corpus definition declares. Nothing
     is timed, so it answers whether a run would mean anything before the run is paid for.
 
-    The target is a corpus definition by name, counted where fetch put it, or a directory of
-    your own, which takes --extensions to say what counts in it.
+    The target is a corpus definition by name, counted where fetch put it, several of them
+    separated by commas, all for every corpus this machine holds, or a directory of your own,
+    which takes --extensions to say what counts in it. A list is checked one corpus at a time.
 
     --extensions rs,c          what to count in a directory of your own
     --counters a,b,c           the instances, in the order they are timed
@@ -62,8 +63,8 @@ linebench noise <corpus|dir> [--control <instance>] [--runs <n>] [--settle <s>] 
     --settle <s>               seconds of quiet before each one
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
-linebench run <corpus|dir> [--counters a,b,c] [--control <instance>] [--warmup <n>] [--runs <n>]
-                [--settle <s>] [--against <stamp>] [--no-prep] [--yes] [--keep-raw]
+linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--warmup <n>]
+                [--runs <n>] [--settle <s>] [--against <stamp>] [--no-prep] [--yes] [--keep-raw]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
                 [--corpus-path <dir>]
 
@@ -71,6 +72,12 @@ linebench run <corpus|dir> [--counters a,b,c] [--control <instance>] [--warmup <
     the work equal and once with none, and writes the record, the csv files, the notes and the
     results page. The control is timed alone at both ends, and how far its two answers sit apart
     is the drift the record carries, which is the run's own claim about whether it replicates.
+
+    Several corpora, run linux,cpython or run all, are measured one after the other in one
+    process. The machine is prepared once, each corpus keeps its own run directory and its own
+    record, and every summary is printed again together at the end. A corpus that fails is named
+    and the rest carry on. all is every corpus definition with a checkout on this machine, and
+    the ones missing are named in a line of their own.
 
     --counters a,b,c           the instances, in the order they are timed
     --control <instance>       the instance timed alone at both ends
