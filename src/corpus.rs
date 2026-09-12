@@ -429,8 +429,11 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     fs::create_dir_all(checkout)
         .map_err(|error| format!("{shown} could not be created: {error}"))?;
     if !checkout.join(GIT_DIR).exists() {
-        run_git(&["init", "-q", &shown])?;
-        run_git(&["-C", &shown, "remote", "add", "origin", &corpus.remote])?;
+        run_git(&corpus.name, &["init", "-q", &shown])?;
+        run_git(
+            &corpus.name,
+            &["-C", &shown, "remote", "add", "origin", &corpus.remote],
+        )?;
     }
     if corpus.is_pinned() {
         print_line(
@@ -456,11 +459,11 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     } else {
         "HEAD"
     };
-    run_git_for(
+    run_git(
         &corpus.name,
         &["-C", &shown, "fetch", "--depth", "1", "origin", wanted],
     )?;
-    run_git_for(
+    run_git(
         &corpus.name,
         &["-C", &shown, "checkout", "-q", "FETCH_HEAD"],
     )
@@ -608,7 +611,7 @@ fn holds_anything_but_git(dir: &Path) -> bool {
         .is_ok_and(|entries| entries.flatten().any(|entry| entry.file_name() != GIT_DIR))
 }
 
-fn run_git(args: &[&str]) -> Result<(), String> {
+fn run_git(name: &str, args: &[&str]) -> Result<(), String> {
     let ran = Command::new("git")
         .args(args)
         .status()
@@ -617,13 +620,9 @@ fn run_git(args: &[&str]) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "this failed, and the corpus cannot be set up without it:\n  git {}",
+        "this failed, and {name} cannot be set up without it:\n  git {}",
         args.join(" ")
     ))
-}
-
-fn run_git_for(name: &str, args: &[&str]) -> Result<(), String> {
-    run_git(args).map_err(|refused| refused.replacen("the corpus", name, 1))
 }
 
 fn get_default_tolerance() -> f64 {
@@ -663,28 +662,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).unwrap();
         let shown = dir.to_string_lossy().into_owned();
-        run_git(&["init", "-q", &shown]).unwrap();
+        run_git("t", &["init", "-q", &shown]).unwrap();
         for name in ["a.rs", "sub/B.RS", "c.txt", "d"] {
             fs::write(dir.join(name), "x").unwrap();
         }
-        run_git(&["-C", &shown, "add", "-A"]).unwrap();
-        run_git(&[
-            "-C",
-            &shown,
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            "i",
-        ])
+        run_git("t", &["-C", &shown, "add", "-A"]).unwrap();
+        run_git(
+            "t",
+            &[
+                "-C",
+                &shown,
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "i",
+            ],
+        )
         .unwrap();
         fs::write(dir.join("e.rs"), "x").unwrap();
         fs::write(dir.join("staged.rs"), "x").unwrap();
-        run_git(&["-C", &shown, "add", "staged.rs"]).unwrap();
+        run_git("t", &["-C", &shown, "add", "staged.rs"]).unwrap();
         let rs = ["rs".to_string()];
         let both = ["txt".to_string(), "rs".to_string()];
         assert_eq!(count_tracked_files(&dir, &rs).unwrap(), 2);
