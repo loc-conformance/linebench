@@ -56,7 +56,7 @@ use crate::config::{
     Chosen, FetchPlan, Locations, Options, choose_corpus_home, choose_counters_dir, resolve_out,
     show_path,
 };
-use crate::instances::build_instances;
+use crate::instances::{ChosenInstances, build_instances};
 use crate::output::{
     Color, Output, get_report_style, paint, print_header, print_line, print_warning,
 };
@@ -286,76 +286,28 @@ pub fn run_fetch(
 pub fn run_check(
     out: &mut dyn Write,
     options: &Options,
-    locations: &Locations,
+    locations: &[Locations],
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
-    check_commit(&locations.corpus, &locations.checkout)?;
-    let chosen = build_instances(out, definitions, locations, options, platform)?;
-    let (instances, control) = (chosen.instances, chosen.control);
-    print_header(
-        out,
-        &format!(
-            "== check: {} at {}",
-            locations.corpus.name,
-            locations.checkout.display()
-        ),
-    )?;
-    let scratch = Scratch::create("check")?;
-    let counters = choose_counters_to_look_up(instances.iter().map(|i| &i.definition));
-    let now = read_seconds_since_epoch();
-    let (checked, looked_up) = thread::scope(|scope| {
-        let lookups = scope.spawn(|| {
-            collect_latest_releases(&counters, &locations.counters_dir, now, find_latest_release)
-        });
-        let checked = check_everything(
-            out,
-            options,
-            locations,
-            &instances,
-            control,
-            platform,
-            scratch.get_path(),
-        );
-        (checked, lookups.join())
-    });
-    let (bad, nothing_compared) = checked?;
-    let (lookups, warning) =
-        looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
-    print_latest_releases(out, &lookups)?;
-    if let Some(warning) = warning {
-        print_warning(out, &warning)?;
+    let mut code = 0;
+    for one in locations {
+        code = code.max(check_corpus(out, options, one, definitions, platform)?);
     }
-    print_line(out, "")?;
-    if bad.is_empty() {
-        let verdict = if nothing_compared {
-            "all good, though equal work was not compared."
-        } else {
-            "all good."
-        };
-        print_line(out, &paint(Color::Green, verdict).to_string())?;
-        return Ok(0);
-    }
-    print_line(
-        out,
-        &paint(
-            Color::Red,
-            &format!("{} checks failed: {}", bad.len(), bad.join(", ")),
-        )
-        .to_string(),
-    )?;
-    Ok(1)
+    Ok(code)
 }
 
 pub fn run_noise(
     out: &mut dyn Write,
     options: &Options,
-    locations: &Locations,
+    locations: &[Locations],
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
+    let locations = find_the_one_corpus("noise", locations)?;
     check_commit(&locations.corpus, &locations.checkout)?;
-    let chosen = build_instances(out, definitions, locations, options, platform)?;
+    let chosen = build_instances(definitions, locations, options, platform)?;
+    print_how_the_counters_were_chosen(out, &chosen)?;
     let (instances, control) = (chosen.instances, chosen.control);
     let scratch = Scratch::create("noise")?;
     print_header(out, "== noise")?;
@@ -503,41 +455,19 @@ fn judge_noise(
 pub fn run_benchmark(
     out: &mut Output,
     options: &Options,
-    locations: &Locations,
+    locations: &[Locations],
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
     let privileged = is_privileged(platform);
-    check_commit(&locations.corpus, &locations.checkout)?;
-    check_declares_files(&locations.corpus)?;
-    let chosen = build_instances(out, definitions, locations, options, platform)?;
-    let (instances, control) = (chosen.instances, chosen.control);
-    check_identical_pairs(&options.expect_identical, &instances)?;
-    let is_local = instances.iter().any(Instance::is_an_experiment);
-    let collected = collect_records(&locations.out);
-    let against = match &options.against {
-        Some(stamp) => Some(find_named_run(&collected, stamp, &locations.out, is_local)?),
-        None => None,
-    };
-    let binaries = collect_binaries(&instances, platform)?;
-    let defender = read_defender_state(platform, privileged, &binaries);
-    let unequal = match find_unequal_exclusions(&defender) {
-        Some(unequal) if !options.allow_unequal => {
-            return Err(explain_unequal_exclusions(&unequal));
-        }
-        Some(unequal) => {
-            print_warning(
-                out,
-                &format!("measuring with unequal MS Defender exclusions: {unequal}"),
-            )?;
-            print_warning(
-                out,
-                "the results may not be representative of real performance",
-            )?;
-            Some(unequal)
-        }
-        None => None,
-    };
+    let batch = locations.len() > 1;
+    if options.against.is_some() && batch {
+        return Err(format!(
+            "--against names a run of one corpus, and {} were named",
+            name_every_corpus(locations)
+        ));
+    }
+    let ready = check_before_measuring(options, locations, definitions, platform, privileged)?;
     let plan = if options.no_prep {
         Vec::new()
     } else {
@@ -552,55 +482,30 @@ pub fn run_benchmark(
     let prepared = applied
         .as_ref()
         .map_or_else(Vec::new, AppliedPrep::get_applied_steps);
-    let settings = Settings {
-        warmup: options.warmup.unwrap_or(Settings::default().warmup),
-        runs: options.runs.unwrap_or(Settings::default().runs),
-        settle: options.settle.unwrap_or(Settings::default().settle),
-    };
-    let now = read_seconds_since_epoch();
-    let stamp = format_utc_stamp(now);
-    let mut res = locations.out.clone();
-    if is_local {
-        res = res.join(LOCAL_DIR);
+    let mut code = 0;
+    let mut done = Vec::new();
+    let mut failures = Vec::new();
+    for (one, picked) in locations.iter().zip(ready) {
+        match measure_corpus(out, options, one, picked, platform, &prepared) {
+            Ok(measured) => {
+                code = code.max(measured.code);
+                done.push(measured);
+            }
+            Err(refused) if !batch => return Err(refused),
+            Err(refused) => {
+                let said = format!("{}: {refused}", one.corpus.name);
+                print_warning(out, &said)?;
+                out.forget_what_was_printed();
+                failures.push(said);
+                code = 2;
+            }
+        }
     }
-    let res = res
-        .join(&locations.corpus.name)
-        .join(platform.as_str())
-        .join(&stamp);
-    if res.exists() {
-        return Err(format!(
-            "{} is already there, refusing to write over it",
-            res.display()
-        ));
-    }
-    fs::create_dir_all(res.join(OUT_DIR))
-        .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
-    out.start_transcript(&res.join(TRANSCRIPT_FILE))?;
-    let context = RunContext {
-        options,
-        locations,
-        instances: &instances,
-        control,
-        platform,
-        defender,
-        unequal,
-        prepared,
-        settings,
-        stamp: &stamp,
-        now,
-        res: &res,
-        is_local,
-        left_out: chosen.left_out,
-        collected,
-        against,
-    };
-    let outcome = measure_and_record(out, context);
-    if let Err(refused) = &outcome {
-        out.write_to_transcript(&format!("ERROR: {refused}"));
-    }
-    out.stop_transcript();
     drop(applied);
-    outcome
+    if batch {
+        print_every_summary(out, &done, &failures)?;
+    }
+    Ok(code)
 }
 
 pub fn run_report(out: &mut dyn Write, results: &Path, verify: bool) -> Result<i32, String> {
@@ -714,12 +619,14 @@ pub fn run_status(
 pub fn run_insights(
     out: &mut dyn Write,
     options: &Options,
-    locations: &Locations,
+    locations: &[Locations],
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
+    let locations = find_the_one_corpus("insights", locations)?;
     check_commit(&locations.corpus, &locations.checkout)?;
-    let chosen = build_instances(out, definitions, locations, options, platform)?;
+    let chosen = build_instances(definitions, locations, options, platform)?;
+    print_how_the_counters_were_chosen(out, &chosen)?;
     let instances = chosen.instances;
     let defender = read_defender_state(
         platform,
@@ -943,6 +850,18 @@ struct RunContext<'a> {
     against: Option<String>,
 }
 
+struct Ready {
+    chosen: ChosenInstances,
+    defender: DefenderState,
+    unequal: Option<String>,
+}
+
+struct Measured {
+    code: i32,
+    record: Record,
+    res: PathBuf,
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -996,7 +915,221 @@ fn add_up_files(dir: &Path) -> u64 {
         .sum()
 }
 
-fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, String> {
+fn find_the_one_corpus<'a>(
+    command: &str,
+    locations: &'a [Locations],
+) -> Result<&'a Locations, String> {
+    match locations {
+        [one] => Ok(one),
+        many => Err(format!(
+            "{command} takes one corpus at a time, and {} were named",
+            name_every_corpus(many)
+        )),
+    }
+}
+
+fn name_every_corpus(locations: &[Locations]) -> String {
+    locations
+        .iter()
+        .map(|one| one.corpus.name.as_str())
+        .collect::<Vec<&str>>()
+        .join(", ")
+}
+
+// Everything that can refuse a corpus before any of them is measured.
+fn check_before_measuring(
+    options: &Options,
+    locations: &[Locations],
+    definitions: &[Definition],
+    platform: Platform,
+    privileged: bool,
+) -> Result<Vec<Ready>, String> {
+    let mut ready = Vec::new();
+    for one in locations {
+        let picked = check_the_corpus_is_ready(options, one, definitions, platform, privileged)
+            .map_err(|refused| match locations.len() {
+                1 => refused,
+                _ => format!("{}: {refused}", one.corpus.name),
+            })?;
+        ready.push(picked);
+    }
+    Ok(ready)
+}
+
+fn check_the_corpus_is_ready(
+    options: &Options,
+    locations: &Locations,
+    definitions: &[Definition],
+    platform: Platform,
+    privileged: bool,
+) -> Result<Ready, String> {
+    check_commit(&locations.corpus, &locations.checkout)?;
+    check_declares_files(&locations.corpus)?;
+    let chosen = build_instances(definitions, locations, options, platform)?;
+    check_identical_pairs(&options.expect_identical, &chosen.instances)?;
+    let binaries = collect_binaries(&chosen.instances, platform)?;
+    let defender = read_defender_state(platform, privileged, &binaries);
+    let unequal = find_unequal_exclusions(&defender);
+    if let Some(unequal) = &unequal
+        && !options.allow_unequal
+    {
+        return Err(explain_unequal_exclusions(unequal));
+    }
+    Ok(Ready {
+        chosen,
+        defender,
+        unequal,
+    })
+}
+
+fn check_corpus(
+    out: &mut dyn Write,
+    options: &Options,
+    locations: &Locations,
+    definitions: &[Definition],
+    platform: Platform,
+) -> Result<i32, String> {
+    check_commit(&locations.corpus, &locations.checkout)?;
+    let chosen = build_instances(definitions, locations, options, platform)?;
+    print_how_the_counters_were_chosen(out, &chosen)?;
+    let (instances, control) = (chosen.instances, chosen.control);
+    print_header(
+        out,
+        &format!(
+            "== check: {} at {}",
+            locations.corpus.name,
+            locations.checkout.display()
+        ),
+    )?;
+    let scratch = Scratch::create("check")?;
+    let counters = choose_counters_to_look_up(instances.iter().map(|i| &i.definition));
+    let now = read_seconds_since_epoch();
+    let (checked, looked_up) = thread::scope(|scope| {
+        let lookups = scope.spawn(|| {
+            collect_latest_releases(&counters, &locations.counters_dir, now, find_latest_release)
+        });
+        let checked = check_everything(
+            out,
+            options,
+            locations,
+            &instances,
+            control,
+            platform,
+            scratch.get_path(),
+        );
+        (checked, lookups.join())
+    });
+    let (bad, nothing_compared) = checked?;
+    let (lookups, warning) =
+        looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
+    print_latest_releases(out, &lookups)?;
+    if let Some(warning) = warning {
+        print_warning(out, &warning)?;
+    }
+    print_line(out, "")?;
+    if bad.is_empty() {
+        let verdict = if nothing_compared {
+            "all good, though equal work was not compared."
+        } else {
+            "all good."
+        };
+        print_line(out, &paint(Color::Green, verdict).to_string())?;
+        return Ok(0);
+    }
+    print_line(
+        out,
+        &paint(
+            Color::Red,
+            &format!("{} checks failed: {}", bad.len(), bad.join(", ")),
+        )
+        .to_string(),
+    )?;
+    Ok(1)
+}
+
+fn measure_corpus(
+    out: &mut Output,
+    options: &Options,
+    locations: &Locations,
+    ready: Ready,
+    platform: Platform,
+    prepared: &[String],
+) -> Result<Measured, String> {
+    let Ready {
+        chosen,
+        defender,
+        unequal,
+    } = ready;
+    print_how_the_counters_were_chosen(out, &chosen)?;
+    if let Some(unequal) = &unequal {
+        print_warning(
+            out,
+            &format!("measuring with unequal MS Defender exclusions: {unequal}"),
+        )?;
+        print_warning(
+            out,
+            "the results may not be representative of real performance",
+        )?;
+    }
+    let (instances, control) = (chosen.instances, chosen.control);
+    let is_local = instances.iter().any(Instance::is_an_experiment);
+    let collected = collect_records(&locations.out);
+    let against = match &options.against {
+        Some(stamp) => Some(find_named_run(&collected, stamp, &locations.out, is_local)?),
+        None => None,
+    };
+    let settings = Settings {
+        warmup: options.warmup.unwrap_or(Settings::default().warmup),
+        runs: options.runs.unwrap_or(Settings::default().runs),
+        settle: options.settle.unwrap_or(Settings::default().settle),
+    };
+    let now = read_seconds_since_epoch();
+    let stamp = format_utc_stamp(now);
+    let mut res = locations.out.clone();
+    if is_local {
+        res = res.join(LOCAL_DIR);
+    }
+    let res = res
+        .join(&locations.corpus.name)
+        .join(platform.as_str())
+        .join(&stamp);
+    if res.exists() {
+        return Err(format!(
+            "{} is already there, refusing to write over it",
+            res.display()
+        ));
+    }
+    fs::create_dir_all(res.join(OUT_DIR))
+        .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
+    out.start_transcript(&res.join(TRANSCRIPT_FILE))?;
+    let context = RunContext {
+        options,
+        locations,
+        instances: &instances,
+        control,
+        platform,
+        defender,
+        unequal,
+        prepared: prepared.to_vec(),
+        settings,
+        stamp: &stamp,
+        now,
+        res: &res,
+        is_local,
+        left_out: chosen.left_out,
+        collected,
+        against,
+    };
+    let outcome = measure_and_record(out, context);
+    if let Err(refused) = &outcome {
+        out.write_to_transcript(&format!("ERROR: {refused}"));
+    }
+    out.stop_transcript();
+    let (code, record) = outcome?;
+    Ok(Measured { code, record, res })
+}
+
+fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<(i32, Record), String> {
     let RunContext {
         options,
         locations,
@@ -1155,22 +1288,9 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
                 res.join(OUT_DIR).display()
             ),
         )?;
-        return Ok(1);
+        return Ok((1, record));
     }
-    print_line(
-        out,
-        &format!(
-            "   drift         {}",
-            calculate_drift(&record.measurements).map_or("n/a".to_string(), |d| d.to_string())
-        ),
-    )?;
-    for line in format_summary_tables(&record.measurements) {
-        print_line(out, &paint_table_line(&line))?;
-    }
-    if let Some(parity) = &record.parity {
-        print_line(out, "")?;
-        print_parity(out, parity, "equal work    ")?;
-    }
+    print_the_summary(out, &record)?;
     for message in &collected.skipped {
         print_warning(out, message)?;
     }
@@ -1270,18 +1390,19 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<i32, S
             ),
         )?;
     }
-    let differing: Vec<&String> = record
+    let differing: Vec<String> = record
         .identity_checks
         .iter()
         .filter(|line| line.starts_with(DIFFER))
+        .cloned()
         .collect();
     if differing.is_empty() {
-        return Ok(0);
+        return Ok((0, record));
     }
-    for line in differing {
+    for line in &differing {
         print_warning(out, &format!("expected identical, and they {line}"))?;
     }
-    Ok(1)
+    Ok((1, record))
 }
 
 fn check_identical_pairs(pairs: &[(String, String)], instances: &[Instance]) -> Result<(), String> {
@@ -1709,6 +1830,62 @@ fn create_floor_target(scratch: &Path) -> Result<PathBuf, String> {
     fs::create_dir_all(&target)
         .map_err(|error| format!("{} could not be created: {error}", target.display()))?;
     Ok(target)
+}
+
+fn print_the_summary(out: &mut dyn Write, record: &Record) -> Result<(), String> {
+    print_line(
+        out,
+        &format!(
+            "   drift         {}",
+            calculate_drift(&record.measurements).map_or("n/a".to_string(), |d| d.to_string())
+        ),
+    )?;
+    for line in format_summary_tables(&record.measurements) {
+        print_line(out, &paint_table_line(&line))?;
+    }
+    let Some(parity) = &record.parity else {
+        return Ok(());
+    };
+    print_line(out, "")?;
+    print_parity(out, parity, "equal work    ")
+}
+
+fn print_every_summary(
+    out: &mut dyn Write,
+    done: &[Measured],
+    failures: &[String],
+) -> Result<(), String> {
+    print_header(out, "== every summary")?;
+    for measured in done {
+        print_line(out, "")?;
+        print_line(
+            out,
+            &format!(
+                "   {} in {}",
+                measured.record.corpus.name,
+                measured.res.display()
+            ),
+        )?;
+        print_the_summary(out, &measured.record)?;
+    }
+    for failure in failures {
+        print_line(out, "")?;
+        print_warning(out, failure)?;
+    }
+    Ok(())
+}
+
+fn print_how_the_counters_were_chosen(
+    out: &mut dyn Write,
+    chosen: &ChosenInstances,
+) -> Result<(), String> {
+    for line in &chosen.left_out {
+        print_line(out, line)?;
+    }
+    for warning in &chosen.warnings {
+        print_warning(out, warning)?;
+    }
+    Ok(())
 }
 
 fn print_latest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), String> {
@@ -2198,6 +2375,33 @@ mod tests {
             .map(String::from)
             .collect();
         crate::config::parse_args(&args).unwrap()
+    }
+
+    #[test]
+    fn a_command_that_takes_one_corpus_names_the_ones_it_was_handed() {
+        let of = |name: &str| Locations {
+            counters_dir: PathBuf::from("D:/c"),
+            corpus: linebench::corpus::parse_corpus(
+                &format!("name = \"{name}\"\nextensions = [\"c\"]\n"),
+                Path::new(&format!("{name}.toml")),
+            )
+            .unwrap(),
+            checkout: PathBuf::from("D:/x"),
+            out: PathBuf::from("D:/out"),
+            given: BTreeMap::new(),
+            control: None,
+            skip: Vec::new(),
+        };
+        let one = [of("linux")];
+        assert_eq!(
+            find_the_one_corpus("noise", &one).unwrap().corpus.name,
+            "linux"
+        );
+        let two = [of("linux"), of("jdk")];
+        assert_eq!(
+            find_the_one_corpus("insights", &two).unwrap_err(),
+            "insights takes one corpus at a time, and linux, jdk were named"
+        );
     }
 
     #[test]

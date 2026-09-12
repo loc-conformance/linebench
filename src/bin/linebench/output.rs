@@ -39,6 +39,11 @@ impl Output {
     pub fn stop_transcript(&mut self) {
         self.transcript = None;
     }
+
+    // What was said about a run that is over belongs to no transcript that opens after it.
+    pub fn forget_what_was_printed(&mut self) {
+        self.printed_before.clear();
+    }
 }
 
 impl Write for Output {

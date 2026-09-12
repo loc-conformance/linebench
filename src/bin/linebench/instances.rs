@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::Path;
 
 use linebench::corpus::Corpus;
@@ -9,25 +8,25 @@ use linebench::machine::Platform;
 use linebench::measure::Instance;
 
 use crate::config::{Locations, Options};
-use crate::output::{print_line, print_warning};
 
-pub struct Chosen {
+pub struct ChosenInstances {
     pub instances: Vec<Instance>,
     pub control: usize,
     pub left_out: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 pub fn build_instances(
-    out: &mut dyn Write,
     definitions: &[Definition],
     locations: &Locations,
     options: &Options,
     platform: Platform,
-) -> Result<Chosen, String> {
+) -> Result<ChosenInstances, String> {
     let manifest = read_manifest(&locations.counters_dir)?;
     let system = platform.as_system();
     let corpus = &locations.corpus;
     let mut left_out = Vec::new();
+    let mut warnings = Vec::new();
     let selected: Vec<String> = match &options.counters {
         Some(named) => {
             if named.is_empty() {
@@ -35,14 +34,11 @@ pub fn build_instances(
             }
             for name in named {
                 if corpus.skips(system, name) {
-                    print_warning(
-                        out,
-                        &format!(
-                            "{name} runs because --counters names it. The {} \
-                             definition leaves it out on {system}",
-                            corpus.name
-                        ),
-                    )?;
+                    warnings.push(format!(
+                        "{name} runs because --counters names it. The {} definition leaves it \
+                         out on {system}",
+                        corpus.name
+                    ));
                 }
             }
             named.clone()
@@ -55,9 +51,6 @@ pub fn build_instances(
                 corpus,
                 &locations.skip,
             )?;
-            for entry in &reasons {
-                print_line(out, entry)?;
-            }
             left_out = reasons;
             let selected: Vec<String> = set_up
                 .into_iter()
@@ -164,23 +157,21 @@ pub fn build_instances(
         (None, Some(named)) => match find_control(named) {
             Some(found) => found,
             None => {
-                print_warning(
-                    out,
-                    &format!(
-                        "the control {named} from linebench.conf is not in this run, so {} stands \
-                         in as the control",
-                        instances[0].get_name()
-                    ),
-                )?;
+                warnings.push(format!(
+                    "the control {named} from linebench.conf is not in this run, so {} stands in \
+                     as the control",
+                    instances[0].get_name()
+                ));
                 0
             }
         },
         (None, None) => 0,
     };
-    Ok(Chosen {
+    Ok(ChosenInstances {
         instances,
         control,
         left_out,
+        warnings,
     })
 }
 

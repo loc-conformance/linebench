@@ -122,7 +122,7 @@ fn dispatch() -> Result<i32, String> {
                 }
                 _ => commands::run_benchmark(&mut out, options, locations, definitions, platform),
             }?;
-            commands::warn_about_staged_builds(&mut out, &locations.counters_dir)?;
+            commands::warn_about_staged_builds(&mut out, &resolved.counters_dir)?;
             Ok(code)
         }
     }
@@ -130,7 +130,8 @@ fn dispatch() -> Result<i32, String> {
 
 struct Resolved {
     platform: Platform,
-    locations: Locations,
+    counters_dir: PathBuf,
+    locations: Vec<Locations>,
     definitions: Vec<Definition>,
 }
 
@@ -175,20 +176,24 @@ fn resolve_everything(out: &mut dyn Write, options: &Options) -> Result<Resolved
         corpora,
     } = ground;
     let mut definitions = counters;
-    let locations = resolve_locations(
+    let wanted = resolve_locations(
         options,
         &config,
         &config_path,
         &corpora,
         data_dir.as_deref(),
     )?;
-    let manifest = read_manifest(&locations.counters_dir)?;
+    for line in &wanted.left_behind {
+        print_line(out, line)?;
+    }
+    let manifest = read_manifest(&wanted.counters_dir)?;
     for line in apply_latest_pins(&mut definitions, &manifest) {
         print_line(out, &line)?;
     }
     Ok(Resolved {
         platform,
-        locations,
+        counters_dir: wanted.counters_dir,
+        locations: wanted.locations,
         definitions,
     })
 }

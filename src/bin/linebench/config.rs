@@ -126,6 +126,13 @@ pub struct FetchPlan {
 }
 
 #[derive(Debug)]
+pub struct Wanted {
+    pub counters_dir: PathBuf,
+    pub locations: Vec<Locations>,
+    pub left_behind: Vec<String>,
+}
+
+#[derive(Debug)]
 pub struct Locations {
     pub counters_dir: PathBuf,
     pub corpus: Corpus,
@@ -252,7 +259,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     && options.command.is_some()
                     && options.target.is_none() =>
             {
-                options.target = Some(other.to_string());
+                options.target = Some(read_words(other, &mut rest));
             }
             other => return Err(explain_the_unknown_argument(other, options.command)),
         }
@@ -271,16 +278,16 @@ fn read_corpus_as_the_target(options: &mut Options) -> Result<(), String> {
     let Some(named) = options.corpus.take() else {
         return Ok(());
     };
-    match named.as_slice() {
-        [name] => options.target.get_or_insert(name.clone()),
-        many => {
-            return Err(format!(
-                "name the one corpus to measure, and --corpus names {}",
-                many.join(", ")
-            ));
+    let named = named.join(",");
+    match &options.target {
+        Some(typed) if *typed != named => Err(format!(
+            "name what to count once: {typed} was typed and --corpus names {named}"
+        )),
+        _ => {
+            options.target = Some(named);
+            Ok(())
         }
-    };
-    Ok(())
+    }
 }
 
 pub fn find_config() -> PathBuf {
@@ -360,14 +367,7 @@ pub fn resolve_fetch(
             .map(|name| find_corpus(name, corpora).cloned())
             .collect::<Result<Vec<Corpus>, String>>()?,
     };
-    if let Some(dir) = &options.corpus_path
-        && wanted.len() > 1
-        && let Some(held) = wanted
-            .iter()
-            .find(|corpus| is_the_checkout_of(dir, &corpus.name))
-    {
-        return Err(explain_the_crowded_checkout(dir, &held.name));
-    }
+    check_the_crowded_checkout(options, &wanted)?;
     let taken = wanted
         .into_iter()
         .map(|corpus| {
@@ -474,6 +474,17 @@ fn is_the_checkout_of(dir: &Path, name: &str) -> bool {
         .is_some_and(|last| last.eq_ignore_ascii_case(name))
 }
 
+fn find_a_checkout_that_is_here(
+    name: &str,
+    options: &Options,
+    config: &Config,
+    data_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    find_checkout(name, options, config)
+        .or_else(|| place_for_corpus(name, data_dir))
+        .filter(|path| path.is_dir())
+}
+
 fn place_for_corpus(name: &str, data_dir: Option<&Path>) -> Option<PathBuf> {
     data_dir.map(|dir| dir.join(CORPORA_DIR_NAME).join(name))
 }
@@ -514,9 +525,22 @@ fn explain_the_crowded_checkout(dir: &Path, name: &str) -> String {
         .map(|path| format!(", {}", show_path(path)))
         .unwrap_or_default();
     format!(
-        "--corpus-path {} is the {name} checkout itself, so the other corpora would be cloned \
-         inside it. Name the folder they all sit in{above}",
+        "--corpus-path {} is the {name} checkout itself, so the other corpora would sit inside \
+         it. Name the folder they all sit in{above}",
         show_path(dir)
+    )
+}
+
+fn explain_the_declared_extensions(named: &str) -> String {
+    format!("--extensions is for a tree with no corpus definition, and {named} declares its own")
+}
+
+fn explain_the_empty_machine(corpora: &[Corpus]) -> String {
+    format!(
+        "no corpus is on this machine, so {EVERYTHING} has nothing to measure\n\n\
+         \x20 linebench fetch --corpus {EVERYTHING}\n\n\
+         \x20 corpora    {}",
+        name_the_corpora(corpora)
     )
 }
 
@@ -578,48 +602,222 @@ pub fn resolve_locations(
     config_path: &Path,
     corpora: &[Corpus],
     data_dir: Option<&Path>,
-) -> Result<Locations, String> {
+) -> Result<Wanted, String> {
     let counters_dir = resolve_counters_dir(options, config, config_path, data_dir)?;
-    let (corpus, checkout) = match (read_target(options, corpora), &options.extensions) {
-        (Target::Named(corpus), Some(_)) => {
-            return Err(format!(
-                "--extensions is for a tree with no corpus definition, and {} declares its own",
-                corpus.name
-            ));
+    let chosen = choose_corpora(options, config, config_path, corpora, data_dir)?;
+    let given = build_given(options, config)?;
+    let out = resolve_out(options, config);
+    let locations = chosen
+        .taken
+        .into_iter()
+        .map(|(corpus, checkout)| Locations {
+            counters_dir: counters_dir.clone(),
+            corpus,
+            checkout,
+            out: out.clone(),
+            given: given.clone(),
+            control: config.control.clone(),
+            skip: config.skip.clone(),
+        })
+        .collect();
+    Ok(Wanted {
+        counters_dir,
+        locations,
+        left_behind: chosen.left_behind,
+    })
+}
+
+pub fn check_skip_names(
+    skip: &[String],
+    counters: &[Definition],
+    config_path: &Path,
+) -> Result<(), String> {
+    match skip
+        .iter()
+        .find(|name| !counters.iter().any(|d| &d.name == *name))
+    {
+        Some(name) => Err(format!(
+            "{}: skip names {name}, and no counter definition has that name",
+            config_path.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+pub fn read_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn read_targets(options: &Options) -> Result<Vec<String>, String> {
+    let Some(text) = options.target.clone().or_else(|| read_env(TARGET_ENV)) else {
+        return Ok(Vec::new());
+    };
+    split_the_targets(&text)
+}
+
+// The comma is what separates one corpus from the next. A space cannot: the shell eats the quotes
+// on its way here, so a space inside a path and a space between two names arrive the same.
+// Quotes that were doubled to survive the shell are honoured and dropped.
+fn split_the_targets(text: &str) -> Result<Vec<String>, String> {
+    let mut named = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    for letter in text.chars() {
+        match letter {
+            '"' => quoted = !quoted,
+            ',' if !quoted => named.push(std::mem::take(&mut word)),
+            _ => word.push(letter),
         }
-        (Target::Nothing, _) => {
-            return Err(explain_the_missing_target(
-                options.command,
-                corpora,
-                config,
-                data_dir,
-            ));
-        }
-        (Target::Tree(checkout), Some(extensions)) => {
-            let corpus = build_corpus_of(&checkout, extensions)?;
-            if corpora.iter().any(|known| known.name == corpus.name) {
-                return Err(format!(
-                    "the directory is named {0}, and so is a corpus definition, so its runs would \
-                     mix with that corpus's: name {0} on its own, or rename the directory",
-                    corpus.name
-                ));
+    }
+    named.push(word);
+    let named: Vec<String> = named.iter().map(|name| name.trim().to_string()).collect();
+    match named.iter().any(String::is_empty) {
+        true => Err(format!("empty name in {text}")),
+        false => Ok(named),
+    }
+}
+
+struct ChosenCorpora {
+    taken: Vec<(Corpus, PathBuf)>,
+    left_behind: Vec<String>,
+}
+
+fn choose_corpora(
+    options: &Options,
+    config: &Config,
+    config_path: &Path,
+    corpora: &[Corpus],
+    data_dir: Option<&Path>,
+) -> Result<ChosenCorpora, String> {
+    let named = read_targets(options)?;
+    let Some(first) = named.first() else {
+        return Err(explain_the_missing_target(
+            options.command,
+            corpora,
+            config,
+            data_dir,
+        ));
+    };
+    let everything = named.iter().any(|name| name == EVERYTHING);
+    if named.len() == 1 && !everything && find_corpus(first, corpora).is_err() {
+        return build_the_tree_corpus(first, options, config, corpora, data_dir).map(|one| {
+            ChosenCorpora {
+                taken: vec![one],
+                left_behind: Vec::new(),
             }
-            (corpus, checkout)
-        }
-        (Target::Tree(path), None) => {
-            return Err(format!(
-                "say what to count in {}, with --extensions rs,c",
-                path.display()
-            ));
-        }
-        (Target::Named(corpus), None) => {
+        });
+    }
+    if options.extensions.is_some() {
+        return Err(explain_the_declared_extensions(match everything {
+            true => "every corpus",
+            false => first,
+        }));
+    }
+    if everything {
+        return choose_every_corpus(options, config, corpora, data_dir);
+    }
+    let wanted = collect_the_named_corpora(&named, corpora)?;
+    check_the_crowded_checkout(options, &wanted)?;
+    let taken = wanted
+        .into_iter()
+        .map(|corpus| {
             let checkout = find_checkout(&corpus.name, options, config)
                 .or_else(|| place_for_corpus(&corpus.name, data_dir).filter(|path| path.is_dir()))
                 .ok_or_else(|| explain_the_missing_checkout(&corpus.name, config_path, data_dir))?;
-            (corpus, checkout)
+            Ok((corpus, checkout))
+        })
+        .collect::<Result<Vec<(Corpus, PathBuf)>, String>>()?;
+    Ok(ChosenCorpora {
+        taken,
+        left_behind: Vec::new(),
+    })
+}
+
+// all is what is on the machine, since nothing here downloads a corpus.
+fn choose_every_corpus(
+    options: &Options,
+    config: &Config,
+    corpora: &[Corpus],
+    data_dir: Option<&Path>,
+) -> Result<ChosenCorpora, String> {
+    check_the_crowded_checkout(options, corpora)?;
+    let mut taken = Vec::new();
+    let mut left_behind = Vec::new();
+    for corpus in corpora {
+        match find_a_checkout_that_is_here(&corpus.name, options, config, data_dir) {
+            Some(checkout) => taken.push((corpus.clone(), checkout)),
+            None => left_behind.push(format!(
+                "{}: not on this machine, so {EVERYTHING} leaves it out",
+                corpus.name
+            )),
         }
+    }
+    if taken.is_empty() {
+        return Err(explain_the_empty_machine(corpora));
+    }
+    Ok(ChosenCorpora { taken, left_behind })
+}
+
+fn collect_the_named_corpora(named: &[String], corpora: &[Corpus]) -> Result<Vec<Corpus>, String> {
+    let mut wanted: Vec<Corpus> = Vec::new();
+    for name in named {
+        let corpus = find_corpus(name, corpora)?;
+        if wanted.iter().any(|taken| taken.name == corpus.name) {
+            return Err(format!("{name} is named twice"));
+        }
+        wanted.push(corpus.clone());
+    }
+    Ok(wanted)
+}
+
+fn build_the_tree_corpus(
+    path: &str,
+    options: &Options,
+    config: &Config,
+    corpora: &[Corpus],
+    data_dir: Option<&Path>,
+) -> Result<(Corpus, PathBuf), String> {
+    let checkout = PathBuf::from(path);
+    if !checkout.is_dir() {
+        return Err(format!(
+            "{path} is neither a corpus definition nor a directory\n\n{}",
+            explain_the_missing_target(options.command, corpora, config, data_dir)
+        ));
+    }
+    let Some(extensions) = &options.extensions else {
+        return Err(format!(
+            "say what to count in {}, with --extensions rs,c",
+            checkout.display()
+        ));
     };
-    let out = resolve_out(options, config);
+    let corpus = build_corpus_of(&checkout, extensions)?;
+    if corpora.iter().any(|known| known.name == corpus.name) {
+        return Err(format!(
+            "the directory is named {0}, and so is a corpus definition, so its runs would mix \
+             with that corpus's: name {0} on its own, or rename the directory",
+            corpus.name
+        ));
+    }
+    Ok((corpus, checkout))
+}
+
+fn check_the_crowded_checkout(options: &Options, wanted: &[Corpus]) -> Result<(), String> {
+    let Some(dir) = &options.corpus_path else {
+        return Ok(());
+    };
+    if wanted.len() < 2 {
+        return Ok(());
+    }
+    match wanted
+        .iter()
+        .find(|corpus| is_the_checkout_of(dir, &corpus.name))
+    {
+        Some(held) => Err(explain_the_crowded_checkout(dir, &held.name)),
+        None => Ok(()),
+    }
+}
+
+fn build_given(options: &Options, config: &Config) -> Result<BTreeMap<String, GivenEntry>, String> {
     let mut given = config.given.clone();
     let empty = || GivenEntry {
         binary: None,
@@ -656,52 +854,7 @@ pub fn resolve_locations(
             ));
         }
     }
-    Ok(Locations {
-        counters_dir,
-        corpus,
-        checkout,
-        out,
-        given,
-        control: config.control.clone(),
-        skip: config.skip.clone(),
-    })
-}
-
-pub fn check_skip_names(
-    skip: &[String],
-    counters: &[Definition],
-    config_path: &Path,
-) -> Result<(), String> {
-    match skip
-        .iter()
-        .find(|name| !counters.iter().any(|d| &d.name == *name))
-    {
-        Some(name) => Err(format!(
-            "{}: skip names {name}, and no counter definition has that name",
-            config_path.display()
-        )),
-        None => Ok(()),
-    }
-}
-
-pub fn read_env(name: &str) -> Option<String> {
-    env::var(name).ok().filter(|value| !value.trim().is_empty())
-}
-
-enum Target {
-    Named(Corpus),
-    Tree(PathBuf),
-    Nothing,
-}
-
-fn read_target(options: &Options, corpora: &[Corpus]) -> Target {
-    let Some(target) = options.target.clone().or_else(|| read_env(TARGET_ENV)) else {
-        return Target::Nothing;
-    };
-    match corpora.iter().find(|corpus| corpus.name == target) {
-        Some(corpus) => Target::Named(corpus.clone()),
-        None => Target::Tree(PathBuf::from(target)),
-    }
+    Ok(given)
 }
 
 fn explain_the_missing_target(
@@ -747,6 +900,20 @@ fn explain_the_missing_counters_dir(config_path: &Path) -> String {
          give one with --counters-dir <dir>, {COUNTERS_ENV}=<dir>, or counters = \"<dir>\" in {}",
         config_path.display()
     )
+}
+
+// The shell hands over one word per space, and the words of the target are put back together so
+// the commas can be cut wherever the person typed them.
+fn read_words<'a>(first: &str, rest: &mut (impl Iterator<Item = &'a String> + Clone)) -> String {
+    let mut words = vec![first.to_string()];
+    while let Some(next) = rest.clone().next() {
+        if next.starts_with('-') || COMMANDS.contains(&next.as_str()) {
+            break;
+        }
+        words.push(next.clone());
+        rest.next();
+    }
+    words.join(" ")
 }
 
 fn read_list<'a>(
@@ -899,22 +1066,35 @@ mod tests {
                 .as_deref(),
             Some("linux")
         );
-        assert!(
+        assert_eq!(
             parse("check --corpus linux,linebench")
-                .unwrap_err()
-                .contains("the one corpus to measure")
+                .unwrap()
+                .target
+                .as_deref(),
+            Some("linux,linebench")
         );
-        let stray = parse("run linux other").unwrap_err();
-        assert!(
-            stray.starts_with(
-                "other is not a flag of this command
-
-"
-            ),
-            "{stray}"
+        for line in [
+            "run linux,cpython",
+            "run linux, cpython",
+            "run linux ,cpython",
+        ] {
+            let spelled = parse(line).unwrap();
+            assert_eq!(
+                read_targets(&spelled).unwrap(),
+                ["linux", "cpython"],
+                "{line}"
+            );
+        }
+        let spaced = parse("run D:/my tree --extensions rs").unwrap();
+        assert_eq!(read_targets(&spaced).unwrap(), ["D:/my tree"]);
+        assert_eq!(
+            split_the_targets("\"D:/my, tree\"").unwrap(),
+            ["D:/my, tree"]
         );
-        assert!(stray.contains("linebench run <corpus|dir>"), "{stray}");
-        assert!(!stray.contains("linebench check <corpus|dir>"), "{stray}");
+        assert_eq!(
+            split_the_targets("linux,").unwrap_err(),
+            "empty name in linux,"
+        );
         assert_eq!(
             parse("run --against 20260908-100000")
                 .unwrap()
@@ -943,7 +1123,11 @@ mod tests {
             "{misspelled}"
         );
         assert!(
-            misspelled.contains("linebench run <corpus|dir>"),
+            misspelled.contains("linebench run <corpora|all|dir>"),
+            "{misspelled}"
+        );
+        assert!(
+            !misspelled.contains("linebench check <corpora|all|dir>"),
             "{misspelled}"
         );
         let nameless = parse("mezura@dev").unwrap_err();
@@ -1065,7 +1249,7 @@ mod tests {
         let conf = Path::new("linebench.conf");
         let data = Some(Path::new("D:/data/linebench"));
         let options = parse("run linux --given mezura@dev=D:/new.exe").unwrap();
-        let locations = resolve_locations(&options, &config, conf, &corpora, data).unwrap();
+        let locations = resolve_one(&options, &config, conf, &corpora, data).unwrap();
         assert_eq!(locations.counters_dir, PathBuf::from("D:/c"));
         assert_eq!(locations.checkout, PathBuf::from("D:/linux"));
         assert_eq!(locations.corpus.name, "linux");
@@ -1074,18 +1258,18 @@ mod tests {
         assert_eq!(entry.definition, Some(PathBuf::from("D:/dev.toml")));
 
         let empty = Config::default();
-        let refusal = resolve_locations(&options, &empty, conf, &corpora, data).unwrap_err();
+        let refusal = resolve_one(&options, &empty, conf, &corpora, data).unwrap_err();
         assert!(
             refusal.contains("say where the linux checkout is"),
             "{refusal}"
         );
         let aimless = parse("run").unwrap();
-        let refusal = resolve_locations(&aimless, &empty, conf, &corpora, data).unwrap_err();
+        let refusal = resolve_one(&aimless, &empty, conf, &corpora, data).unwrap_err();
         assert!(refusal.starts_with("Say what to count"), "{refusal}");
-        let refusal = resolve_locations(&options, &empty, conf, &corpora, None).unwrap_err();
+        let refusal = resolve_one(&options, &empty, conf, &corpora, None).unwrap_err();
         assert!(refusal.contains("--counters-dir <dir>"), "{refusal}");
         let orphan = parse("run linux --definition scc@x=D:/x.toml").unwrap();
-        let refusal = resolve_locations(&orphan, &config, conf, &corpora, data).unwrap_err();
+        let refusal = resolve_one(&orphan, &config, conf, &corpora, data).unwrap_err();
         assert!(
             refusal.contains("no --given, --args or [given] entry"),
             "{refusal}"
@@ -1119,7 +1303,7 @@ mod tests {
         ]
         .map(String::from);
         let options = parse_args(&typed).unwrap();
-        let locations = resolve_locations(&options, &config, conf, &corpora, data).unwrap();
+        let locations = resolve_one(&options, &config, conf, &corpora, data).unwrap();
         let release_with = &locations.given["mezura@c16"];
         assert_eq!(release_with.binary, None);
         assert_eq!(release_with.args, ["--threads", "4", "16"]);
@@ -1130,15 +1314,14 @@ mod tests {
         let plain =
             parse_args(&["linebench", "run", "linux", "--args", "mezura=--fast"].map(String::from))
                 .unwrap();
-        let refusal = resolve_locations(&plain, &config, conf, &corpora, data).unwrap_err();
+        let refusal = resolve_one(&plain, &config, conf, &corpora, data).unwrap_err();
         assert!(refusal.contains("mezura@<tag>"), "{refusal}");
         let hollow: Config = toml::from_str(
             "[corpora]\nlinux = \"D:/linux\"\n[given.\"mezura@x\"]\ndefinition = \"D:/x.toml\"\n",
         )
         .unwrap();
         let refusal =
-            resolve_locations(&parse("run linux").unwrap(), &hollow, conf, &corpora, data)
-                .unwrap_err();
+            resolve_one(&parse("run linux").unwrap(), &hollow, conf, &corpora, data).unwrap_err();
         assert!(refusal.contains("neither a binary nor args"), "{refusal}");
     }
 
@@ -1146,12 +1329,12 @@ mod tests {
     fn a_tree_with_no_corpus_definition_is_counted_by_its_extensions_under_its_own_name() {
         let conf = Path::new("linebench.conf");
         let data = Some(Path::new("D:/data/linebench"));
-        let options = parse("run D:/src/tree --extensions .rs, c").unwrap();
-        let locations = resolve_locations(&options, &Config::default(), conf, &[], data).unwrap();
-        assert_eq!(locations.corpus.name, "tree");
+        let options = parse("run src --extensions .rs, c").unwrap();
+        let locations = resolve_one(&options, &Config::default(), conf, &[], data).unwrap();
+        assert_eq!(locations.corpus.name, "src");
         assert_eq!(locations.corpus.extensions, ["rs", "c"]);
         assert!(!locations.corpus.is_pinned() && locations.corpus.files.is_none());
-        assert_eq!(locations.checkout, PathBuf::from("D:/src/tree"));
+        assert_eq!(locations.checkout, PathBuf::from("src"));
         assert_eq!(
             locations.counters_dir,
             PathBuf::from("D:/data/linebench/counters")
@@ -1165,26 +1348,27 @@ mod tests {
         ];
         let named_too = parse("run linux --extensions rs").unwrap();
         let refusal =
-            resolve_locations(&named_too, &Config::default(), conf, &known_here, data).unwrap_err();
+            resolve_one(&named_too, &Config::default(), conf, &known_here, data).unwrap_err();
         assert!(refusal.contains("declares its own"), "{refusal}");
         let no_path = parse("run --extensions rs").unwrap();
-        let refusal = resolve_locations(&no_path, &Config::default(), conf, &[], data).unwrap_err();
+        let refusal = resolve_one(&no_path, &Config::default(), conf, &[], data).unwrap_err();
         assert!(refusal.starts_with("Say what to count"), "{refusal}");
-        let no_list = parse("run D:/src/tree").unwrap();
-        let refusal = resolve_locations(&no_list, &Config::default(), conf, &[], data).unwrap_err();
-        assert!(refusal.contains("--extensions rs,c"), "{refusal}");
-        let known = vec![
-            linebench::corpus::parse_corpus(
-                "name = \"tree\"\nextensions = [\"c\"]\n",
-                Path::new("tree.toml"),
-            )
-            .unwrap(),
-        ];
+        let no_list = parse("run src").unwrap();
+        let refusal = resolve_one(&no_list, &Config::default(), conf, &[], data).unwrap_err();
+        assert_eq!(refusal, "say what to count in src, with --extensions rs,c");
+        let neither = parse("run nowhere-at-all").unwrap();
+        let refusal = resolve_one(&neither, &Config::default(), conf, &[], data).unwrap_err();
+        assert!(
+            refusal.starts_with("nowhere-at-all is neither a corpus definition nor a directory"),
+            "{refusal}"
+        );
+        let known = vec![named_corpus("src")];
+        let by_its_path = parse("run ./src --extensions rs").unwrap();
         let refusal =
-            resolve_locations(&options, &Config::default(), conf, &known, data).unwrap_err();
-        assert!(refusal.contains("name tree on its own"), "{refusal}");
-        let dot = parse("run D:/src/tree --extensions .").unwrap();
-        let refusal = resolve_locations(&dot, &Config::default(), conf, &[], data).unwrap_err();
+            resolve_one(&by_its_path, &Config::default(), conf, &known, data).unwrap_err();
+        assert!(refusal.contains("name src on its own"), "{refusal}");
+        let dot = parse("run src --extensions .").unwrap();
+        let refusal = resolve_one(&dot, &Config::default(), conf, &[], data).unwrap_err();
         assert!(refusal.contains("empty"), "{refusal}");
     }
 
@@ -1202,7 +1386,7 @@ mod tests {
         let conf = Path::new("linebench.conf");
         let data = Some(Path::new("D:/data/linebench"));
         let locations =
-            resolve_locations(&parse("run linux").unwrap(), &config, conf, &corpora, data).unwrap();
+            resolve_one(&parse("run linux").unwrap(), &config, conf, &corpora, data).unwrap();
         assert_eq!(locations.skip, ["cloc"]);
         let counters = linebench::counters::read_definitions(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1314,7 +1498,7 @@ mod tests {
         // run and check read the flag the same way, so they count what fetch wrote.
         let located = |line: &str| {
             let options = parse(line).unwrap();
-            resolve_locations(&options, &config, conf, &corpora, data)
+            resolve_one(&options, &config, conf, &corpora, data)
                 .unwrap()
                 .checkout
         };
@@ -1346,11 +1530,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_list_of_corpora_is_taken_whole_and_a_name_no_definition_carries_stops_it() {
+        let config: Config = toml::from_str(
+            "counters = \"D:/c\"\n[corpora]\nlinux = \"D:/linux\"\njdk = \"D:/jdk\"\n",
+        )
+        .unwrap();
+        let corpora = ["linux", "jdk"].map(named_corpus).to_vec();
+        let conf = Path::new("linebench.conf");
+        let data = Some(Path::new("D:/data/linebench"));
+        let names = |line: &str| -> Vec<String> {
+            let wanted =
+                resolve_locations(&parse(line).unwrap(), &config, conf, &corpora, data).unwrap();
+            assert!(wanted.left_behind.is_empty(), "{:?}", wanted.left_behind);
+            wanted
+                .locations
+                .iter()
+                .map(|one| one.corpus.name.clone())
+                .collect::<Vec<String>>()
+        };
+        let refused = |line: &str| {
+            resolve_locations(&parse(line).unwrap(), &config, conf, &corpora, data).unwrap_err()
+        };
+        assert_eq!(names("run linux,jdk"), ["linux", "jdk"]);
+        assert_eq!(names("check --corpus jdk, linux"), ["jdk", "linux"]);
+        assert_eq!(refused("run linux,linux"), "linux is named twice");
+        let stray = refused("run linux,D:/tree");
+        assert!(
+            stray.starts_with("no corpus definition named D:/tree"),
+            "{stray}"
+        );
+        let crowded = refused("run linux,jdk --corpus-path D:/bench/linux");
+        assert!(
+            crowded.contains("is the linux checkout itself"),
+            "{crowded}"
+        );
+        let declared = refused("run linux,jdk --extensions rs");
+        assert!(declared.contains("linux declares its own"), "{declared}");
+    }
+
+    #[test]
+    fn all_takes_the_corpora_that_are_on_the_machine_and_names_the_ones_that_are_not() {
+        let config: Config = toml::from_str("counters = \"D:/c\"\n").unwrap();
+        let corpora = ["src", "nowhere"].map(named_corpus).to_vec();
+        let conf = Path::new("linebench.conf");
+        let here = parse("run all --corpus-path .").unwrap();
+        let wanted = resolve_locations(&here, &config, conf, &corpora, None).unwrap();
+        let names: Vec<&str> = wanted
+            .locations
+            .iter()
+            .map(|one| one.corpus.name.as_str())
+            .collect();
+        assert_eq!(names, ["src"]);
+        assert_eq!(wanted.locations[0].checkout, Path::new(".").join("src"));
+        assert_eq!(
+            wanted.left_behind,
+            ["nowhere: not on this machine, so all leaves it out"]
+        );
+        let bare = parse("run all --corpus-path ./target/nothing-is-here").unwrap();
+        let refused = resolve_locations(&bare, &config, conf, &corpora, None).unwrap_err();
+        assert!(
+            refused.starts_with("no corpus is on this machine"),
+            "{refused}"
+        );
+    }
+
     fn parse(line: &str) -> Result<Options, String> {
         let args: Vec<String> = std::iter::once("linebench")
             .chain(line.split_whitespace())
             .map(String::from)
             .collect();
         parse_args(&args)
+    }
+
+    fn named_corpus(name: &str) -> Corpus {
+        linebench::corpus::parse_corpus(
+            &format!("name = \"{name}\"\nextensions = [\"c\"]\n"),
+            Path::new(&format!("{name}.toml")),
+        )
+        .unwrap()
+    }
+
+    fn resolve_one(
+        options: &Options,
+        config: &Config,
+        config_path: &Path,
+        corpora: &[Corpus],
+        data_dir: Option<&Path>,
+    ) -> Result<Locations, String> {
+        let wanted = resolve_locations(options, config, config_path, corpora, data_dir)?;
+        Ok(wanted
+            .locations
+            .into_iter()
+            .next()
+            .expect("a corpus to measure"))
     }
 }
