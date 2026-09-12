@@ -2126,10 +2126,6 @@ fn describe_places(options: &Options, ground: &crate::Ground) -> Vec<String> {
         lines.push(said("data", show_path(dir)));
     }
     let results = resolve_out(options, &ground.config);
-    let results = match results.is_absolute() {
-        true => results,
-        false => env::current_dir().unwrap_or_default().join(results),
-    };
     lines.push(said("results", show_path(&results)));
     lines
 }

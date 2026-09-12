@@ -319,13 +319,18 @@ pub fn read_config(path: &Path) -> Result<Config, String> {
     read_toml(path)
 }
 
+/// In full, so that every path the commands print can be pasted into another one.
 pub fn resolve_out(options: &Options, config: &Config) -> PathBuf {
-    options
+    let out = options
         .out
         .clone()
         .or_else(|| read_env(OUT_ENV).map(PathBuf::from))
         .or_else(|| config.out.clone())
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT));
+    match out.is_absolute() {
+        true => out,
+        false => env::current_dir().unwrap_or_default().join(out),
+    }
 }
 
 pub fn resolve_fetch(
@@ -355,15 +360,18 @@ pub fn resolve_fetch(
             .map(|name| find_corpus(name, corpora).cloned())
             .collect::<Result<Vec<Corpus>, String>>()?,
     };
-    let under = wanted.len() > 1;
+    if let Some(dir) = &options.corpus_path
+        && wanted.len() > 1
+        && let Some(held) = wanted
+            .iter()
+            .find(|corpus| is_the_checkout_of(dir, &corpus.name))
+    {
+        return Err(explain_the_crowded_checkout(dir, &held.name));
+    }
     let taken = wanted
         .into_iter()
         .map(|corpus| {
-            let checkout = find_corpus_home(&corpus.name, options, config)
-                .map(|home| match home.shared && under {
-                    true => home.path.join(&corpus.name),
-                    false => home.path,
-                })
+            let checkout = find_checkout(&corpus.name, options, config)
                 .or_else(|| place_for_corpus(&corpus.name, data_dir))
                 .ok_or_else(|| explain_the_homeless_corpus(&corpus.name))?;
             Ok((corpus, checkout))
@@ -448,23 +456,22 @@ fn find_corpus<'a>(name: &str, corpora: &'a [Corpus]) -> Result<&'a Corpus, Stri
         })
 }
 
+/// --corpus-path is the folder the corpora sit in, one directory each, the way the data directory
+/// holds them. A folder already named after the corpus is that checkout, so the name is never
+/// doubled. A conf entry names the checkout itself, whatever it is called.
 fn find_checkout(name: &str, options: &Options, config: &Config) -> Option<PathBuf> {
-    find_corpus_home(name, options, config).map(|home| home.path)
-}
-
-struct Home {
-    path: PathBuf,
-    shared: bool,
-}
-
-fn find_corpus_home(name: &str, options: &Options, config: &Config) -> Option<Home> {
-    if let Some(path) = options.corpus_path.clone() {
-        return Some(Home { path, shared: true });
+    if let Some(dir) = options.corpus_path.clone() {
+        return Some(match is_the_checkout_of(&dir, name) {
+            true => dir,
+            false => dir.join(name),
+        });
     }
-    config.corpora.get(name).cloned().map(|path| Home {
-        path,
-        shared: false,
-    })
+    config.corpora.get(name).cloned()
+}
+
+fn is_the_checkout_of(dir: &Path, name: &str) -> bool {
+    dir.file_name()
+        .is_some_and(|last| last.eq_ignore_ascii_case(name))
 }
 
 fn place_for_corpus(name: &str, data_dir: Option<&Path>) -> Option<PathBuf> {
@@ -489,7 +496,7 @@ fn explain_the_missing_checkout(name: &str, config_path: &Path, data_dir: Option
         format!("   linebench fetch --corpus {name}"),
         downloaded,
         String::new(),
-        "or name one you already have, with --corpus-path <dir>".to_string(),
+        "or name the folder your corpora sit in, with --corpus-path <dir>".to_string(),
     ];
     if config_path.is_file() {
         lines.push(format!(
@@ -498,6 +505,19 @@ fn explain_the_missing_checkout(name: &str, config_path: &Path, data_dir: Option
         ));
     }
     lines.join("\n")
+}
+
+fn explain_the_crowded_checkout(dir: &Path, name: &str) -> String {
+    let above = dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| format!(", {}", show_path(path)))
+        .unwrap_or_default();
+    format!(
+        "--corpus-path {} is the {name} checkout itself, so the other corpora would be cloned \
+         inside it. Name the folder they all sit in{above}",
+        show_path(dir)
+    )
 }
 
 fn explain_the_homeless_corpus(name: &str) -> String {
@@ -530,9 +550,13 @@ fn explain_what_fetch_takes(
     data_dir: Option<&Path>,
 ) -> String {
     let names = |listed: Vec<&str>| listed.join(", ");
-    let where_corpora = data_dir
-        .map(|dir| show_path(&dir.join(CORPORA_DIR_NAME).join("<name>")))
-        .unwrap_or_else(|| "the directory --corpus-path names".to_string());
+    let where_corpora = match data_dir {
+        Some(dir) => format!(
+            "{},\nunless --corpus-path names another folder to hold them",
+            show_path(&dir.join(CORPORA_DIR_NAME).join("<name>"))
+        ),
+        None => "a directory of its own under the folder --corpus-path names".to_string(),
+    };
     format!(
         "Specify which counters and which corpus to download, or \"{EVERYTHING}\" to get them \
          all\n\n\
@@ -540,8 +564,7 @@ fn explain_what_fetch_takes(
          \x20 counters   {}\n\
          \x20 corpora    {}\n\n\
          The counters go to {}{}\n\
-         A corpus is cloned to {where_corpora},\n\
-         unless --corpus-path names somewhere else.",
+         A corpus is cloned to {where_corpora}.",
         names(counters.iter().map(|c| c.name.as_str()).collect()),
         names(corpora.iter().map(|c| c.name.as_str()).collect()),
         show_path(counters_dir),
@@ -1206,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn a_conf_entry_names_one_checkout_and_only_a_shared_corpus_path_gets_a_directory_each() {
+    fn a_conf_entry_names_the_checkout_and_corpus_path_names_the_folder_they_sit_in() {
         let config: Config = toml::from_str(
             "[corpora]\nlinux = \"D:/bench/linux\"\ncpython = \"D:/bench/cpython\"\n",
         )
@@ -1252,10 +1275,10 @@ mod tests {
             ]
         );
 
-        // --corpus-path is one path standing in for all of them, so they cannot share it.
+        // --corpus-path is the folder they go into, one directory each, for one corpus or for all.
         assert_eq!(
             plan("fetch --corpus linux --corpus-path D:/shared"),
-            [("linux".to_string(), PathBuf::from("D:/shared"))]
+            [("linux".to_string(), PathBuf::from("D:/shared/linux"))]
         );
         assert_eq!(
             plan("fetch --corpus linux,cpython --corpus-path D:/shared"),
@@ -1263,6 +1286,56 @@ mod tests {
                 ("linux".to_string(), PathBuf::from("D:/shared/linux")),
                 ("cpython".to_string(), PathBuf::from("D:/shared/cpython")),
             ]
+        );
+
+        // A folder named after the corpus is that checkout, so the name never comes out doubled.
+        assert_eq!(
+            plan("fetch --corpus linux --corpus-path D:/shared/linux"),
+            [("linux".to_string(), PathBuf::from("D:/shared/linux"))]
+        );
+        assert_eq!(
+            plan("fetch --corpus linux --corpus-path D:/shared/LINUX"),
+            [("linux".to_string(), PathBuf::from("D:/shared/LINUX"))]
+        );
+
+        // Several corpora cannot share a folder that is already one of their checkouts.
+        let crowded = parse("fetch --corpus all --corpus-path D:/bench/linux").unwrap();
+        let refused =
+            resolve_fetch(&crowded, &config, conf, &corpora, &counters, data).unwrap_err();
+        assert!(
+            refused.contains("is the linux checkout itself"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&show_path(Path::new("D:/bench"))),
+            "{refused}"
+        );
+
+        // run and check read the flag the same way, so they count what fetch wrote.
+        let located = |line: &str| {
+            let options = parse(line).unwrap();
+            resolve_locations(&options, &config, conf, &corpora, data)
+                .unwrap()
+                .checkout
+        };
+        assert_eq!(
+            located("run linux --corpus-path D:/shared"),
+            PathBuf::from("D:/shared/linux")
+        );
+        assert_eq!(located("run linux"), PathBuf::from("D:/bench/linux"));
+    }
+
+    #[test]
+    fn the_results_folder_is_named_in_full_so_what_a_command_prints_can_be_pasted() {
+        let here = env::current_dir().unwrap();
+        let plain = resolve_out(&parse("run linux").unwrap(), &Config::default());
+        assert_eq!(plain, here.join(DEFAULT_OUT));
+        let named = parse("run linux --out mine").unwrap();
+        assert_eq!(resolve_out(&named, &Config::default()), here.join("mine"));
+        let elsewhere = parse("run linux --out D:/elsewhere").unwrap();
+        assert_eq!(
+            resolve_out(&elsewhere, &Config::default()),
+            PathBuf::from("D:/elsewhere")
         );
     }
 

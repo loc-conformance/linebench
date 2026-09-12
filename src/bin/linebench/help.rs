@@ -20,7 +20,7 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
     --counters a,b,c           the counters to download, or all
     --corpus a,b               the corpora to download, or all
     --counters-dir <dir>       where the binaries go
-    --corpus-path <dir>        where a single corpus goes
+    --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
     --latest                   take each counter's latest release and pin it beside the binary
     --allow-elevated           download as administrator or root, where there is no ordinary user
     --add <path>               a definition of your own, or a directory of them
@@ -42,7 +42,7 @@ linebench check <corpus|dir> [--extensions rs,c] [--counters a,b,c] [--corpus-pa
 
     --extensions rs,c          what to count in a directory of your own
     --counters a,b,c           the instances, in the order they are timed
-    --corpus-path <dir>        where a named corpus sits, when it sits elsewhere
+    --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target
@@ -51,6 +51,7 @@ linebench check <corpus|dir> [--extensions rs,c] [--counters a,b,c] [--corpus-pa
     --add <path>               a definition of your own, or a directory of them
 
 linebench noise <corpus|dir> [--control <instance>] [--runs <n>] [--settle <s>] [--out <dir>]
+                [--corpus-path <dir>]
 
     Times the control alone, five times, and samples what the machine was doing while it did.
     Its verdict is how far apart those five runs came out and how much of the machine was busy
@@ -59,10 +60,12 @@ linebench noise <corpus|dir> [--control <instance>] [--runs <n>] [--settle <s>] 
     --control <instance>       the instance it times; default the one the conf names
     --runs <n>                 how many times to time it
     --settle <s>               seconds of quiet before each one
+    --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
 linebench run <corpus|dir> [--counters a,b,c] [--control <instance>] [--warmup <n>] [--runs <n>]
                 [--settle <s>] [--against <stamp>] [--no-prep] [--yes] [--keep-raw]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
+                [--corpus-path <dir>]
 
     Times every instance over the target through hyperfine, twice, once with the flags that make
     the work equal and once with none, and writes the record, the csv files, the notes and the
@@ -80,11 +83,13 @@ linebench run <corpus|dir> [--counters a,b,c] [--control <instance>] [--warmup <
     --keep-raw                 keep every counter's printed output beside the record
     --allow-unequal-exclusions measure even with uneven MS Defender exclusions
     --out <dir>                where results go, default results/ here
+    --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
     A run under an instance with args or a build of its own is written under results/local/,
     since its numbers answer for that build alone and never for the release.
 
 linebench insights <corpus|dir> [--counters a,b,c] [--yes] [--out <dir>] [--extensions rs,c]
+                [--corpus-path <dir>]
 
     Measures what a run cannot measure about itself, since watching a process closely enough
     disturbs the times it would report. The floor is what a counter costs before it has counted
@@ -94,6 +99,7 @@ linebench insights <corpus|dir> [--counters a,b,c] [--yes] [--out <dir>] [--exte
     --counters a,b,c           the instances, in the order they are measured
     --yes                      do not ask when a tool the section needs is missing
     --out <dir>                where the session goes, default results/ here
+    --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
 linebench status [--counters-dir <dir>] [--add <path>]
 
