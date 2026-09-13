@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crate::corpus::{Counted, Parity, judge_parity};
 use crate::files::read_text;
+use crate::insight::{
+    FLOOR_PART, INSIGHTS_FILE, Insights, MEMORY_PART, SYSCALLS_PART, read_insights,
+};
 use crate::measure::Table;
 use crate::measure::{CONTROL_END, CONTROL_START};
 use crate::record::{COUNTS_CSV, RECORD_FILE, SUMMARY_CSV, UNKNOWN_INSTANCE};
@@ -10,6 +13,8 @@ use crate::record::{
     CountRecord, InstanceRecord, Measurement, Record, RunSettings, Timings, build_counts_csv,
     build_summary_csv, calculate_drift, read_export, read_record,
 };
+use crate::sample::Curve;
+use crate::syscalls::Syscalls;
 
 const A_MICROSECOND: f64 = 0.000_001;
 const BROKEN_LINES_SHOWN: usize = 5;
@@ -21,38 +26,28 @@ const HEX_DIGITS: usize = 64;
 const LETTERS_AROUND: usize = 8;
 const LETTERS_SHOWN: usize = 60;
 const THE_EXPORTS: &str = "the hyperfine exports";
+const THE_SESSION: &str = "the session";
 const THE_FLAT_FILES: &str = "the flat files";
 const THE_RECORD: &str = "the record";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verification {
     pub run: PathBuf,
-    pub record: Level,
-    pub flat: Level,
-    pub raw: Level,
+    pub levels: Vec<Level>,
+    pub reach: String,
 }
 
 impl Verification {
-    pub fn get_levels(&self) -> [&Level; 3] {
-        [&self.record, &self.flat, &self.raw]
+    pub fn get_levels(&self) -> &[Level] {
+        &self.levels
     }
 
     pub fn count_broken(&self) -> usize {
-        self.get_levels()
-            .iter()
-            .map(|level| level.count_broken())
-            .sum()
+        self.levels.iter().map(Level::count_broken).sum()
     }
 
-    pub fn describe_reach(&self) -> &'static str {
-        match (self.flat.absent.is_empty(), self.raw.absent.is_empty()) {
-            (true, true) => "everything published was read, down to the time of every execution",
-            (true, false) => "the record and the flat files were read, the raw times were absent",
-            (false, true) => "the record and the raw times were read, the flat files were absent",
-            (false, false) => {
-                "the record was read alone, the flat files and the raw times were absent"
-            }
-        }
+    pub fn describe_reach(&self) -> &str {
+        &self.reach
     }
 }
 
@@ -93,22 +88,50 @@ impl Held {
     }
 }
 
-pub fn find_run(path: &Path) -> Result<PathBuf, String> {
-    if path.is_file() {
-        if path.file_name().is_some_and(|name| name == RECORD_FILE) {
-            let held = path.parent().filter(|dir| !dir.as_os_str().is_empty());
-            return Ok(held.unwrap_or(Path::new(".")).to_path_buf());
+/// What sits in the directory the command was given. A run and an insights session are both read
+/// the same way, from one file each, so the file that is there says which of the two it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Session {
+    Run,
+    Insights,
+}
+
+impl Session {
+    pub fn get_file(self) -> &'static str {
+        match self {
+            Session::Run => RECORD_FILE,
+            Session::Insights => INSIGHTS_FILE,
         }
-        return Err(format!("{} is no {RECORD_FILE}", path.display()));
+    }
+}
+
+pub fn find_run(path: &Path) -> Result<(PathBuf, Session), String> {
+    let both = [Session::Run, Session::Insights];
+    if path.is_file() {
+        let Some(session) = both.into_iter().find(|session| {
+            path.file_name()
+                .is_some_and(|name| name == session.get_file())
+        }) else {
+            return Err(format!(
+                "{} is neither a {RECORD_FILE} nor an {INSIGHTS_FILE}",
+                path.display()
+            ));
+        };
+        let held = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        return Ok((held.unwrap_or(Path::new(".")).to_path_buf(), session));
     }
     if !path.is_dir() {
         return Err(format!("{} is not there", path.display()));
     }
-    if path.join(RECORD_FILE).is_file() {
-        return Ok(path.to_path_buf());
+    if let Some(session) = both
+        .into_iter()
+        .find(|session| path.join(session.get_file()).is_file())
+    {
+        return Ok((path.to_path_buf(), session));
     }
     Err(format!(
-        "no run in {}, since it carries no {RECORD_FILE}: name a run directory further in",
+        "nothing to read in {}, since it carries neither a {RECORD_FILE} nor an {INSIGHTS_FILE}: \
+         name a directory further in",
         path.display()
     ))
 }
@@ -133,12 +156,164 @@ pub fn check_run(dir: &Path) -> Result<Verification, String> {
         &record.measurements,
         &record.hyperfine_failures,
     ));
+    let flat = check_flat_files(dir, &record);
+    let raw = check_exports(dir, &record.measurements);
+    let reach = match (flat.absent.is_empty(), raw.absent.is_empty()) {
+        (true, true) => "everything published was read, down to the time of every execution",
+        (true, false) => "the record and the flat files were read, the raw times were absent",
+        (false, true) => "the record and the raw times were read, the flat files were absent",
+        (false, false) => "the record was read alone, the flat files and the raw times were absent",
+    };
     Ok(Verification {
         run: dir.to_path_buf(),
-        record: level,
-        flat: check_flat_files(dir, &record),
-        raw: check_exports(dir, &record.measurements),
+        levels: vec![level, flat, raw],
+        reach: reach.to_string(),
     })
+}
+
+/// The same reading for an insights session: the numbers it published against each other, and the
+/// floor it timed against the times hyperfine exported.
+pub fn check_insights(dir: &Path) -> Result<Verification, String> {
+    let insights = read_insights(&dir.join(INSIGHTS_FILE))?;
+    let mut level = Level::named(THE_SESSION);
+    level.held.push(check_measurements(&insights.floor));
+    level.held.push(check_derived_columns(&insights.floor));
+    level.held.push(check_who_was_measured(&insights));
+    level.held.push(check_curves(&insights.curves));
+    level.held.push(check_the_counted_calls(&insights.syscalls));
+    level.held.push(check_the_parts_asked_for(&insights));
+    let raw = check_exports(dir, &insights.floor);
+    let reach = match (insights.floor.is_empty(), raw.absent.is_empty()) {
+        (true, _) => "the session was read, and it timed no floor for the raw times to hold",
+        (false, true) => "everything published was read, down to the time of every execution",
+        (false, false) => "the session was read, the raw times were absent",
+    };
+    Ok(Verification {
+        run: dir.to_path_buf(),
+        levels: vec![level, raw],
+        reach: reach.to_string(),
+    })
+}
+
+/// Every number the session published names an instance the session measured. The other way around
+/// is no check: an instance can end a session with no number at all, since a part asked for can
+/// come back empty when the tool it needs is not on the machine.
+fn check_who_was_measured(insights: &Insights) -> Held {
+    let named: Vec<&str> = insights
+        .instances
+        .iter()
+        .map(|instance| instance.identity.instance.as_str())
+        .collect();
+    let measured = insights
+        .floor
+        .iter()
+        .map(|m| ("the floor", m.instance.as_str()))
+        .chain(
+            insights
+                .curves
+                .iter()
+                .map(|curve| ("the memory", curve.instance.as_str())),
+        )
+        .chain(
+            insights
+                .syscalls
+                .iter()
+                .map(|counted| ("the system calls", counted.instance.as_str())),
+        );
+    let mut broken = Vec::new();
+    for (part, instance) in measured {
+        if !named.contains(&instance) {
+            broken.push(format!(
+                "{part} carries {instance}, which the session never measured"
+            ));
+        }
+    }
+    Held::of(
+        format!("{} instances answer for every number", named.len()),
+        broken,
+    )
+}
+
+/// A curve is read against its own peak: the peak is what the system reported, taken apart from the
+/// samples, so a sample above it means one of the two is wrong. A curve with no samples at all is
+/// not one of those: a system linebench cannot poll, or a counter that ends before the first poll,
+/// leaves an empty curve behind and nothing about it contradicts anything.
+fn check_curves(curves: &[Curve]) -> Held {
+    let mut broken = Vec::new();
+    for curve in curves.iter().filter(|curve| !curve.samples.is_empty()) {
+        let highest = curve.samples.iter().copied().max().unwrap_or_default();
+        if highest > curve.peak_bytes {
+            broken.push(format!(
+                "{}: a sample of {highest} bytes over a peak of {} bytes",
+                curve.instance, curve.peak_bytes
+            ));
+        }
+        if curve.polls < curve.samples.len() {
+            broken.push(format!(
+                "{}: {} samples out of {} polls",
+                curve.instance,
+                curve.samples.len(),
+                curve.polls
+            ));
+        }
+    }
+    Held::of(format!("{} memory curves hold", curves.len()), broken)
+}
+
+/// The totals of a traced instance are the rows added up, and no call was counted fewer times than
+/// it failed.
+fn check_the_counted_calls(counted: &[Syscalls]) -> Held {
+    let mut broken = Vec::new();
+    for one in counted {
+        let calls: u64 = one.calls.iter().map(|call| call.calls).sum();
+        let errors: u64 = one.calls.iter().map(|call| call.errors).sum();
+        if calls != one.total_calls {
+            broken.push(format!(
+                "{}: {} calls in the rows against a total of {}",
+                one.instance, calls, one.total_calls
+            ));
+        }
+        if errors != one.total_errors {
+            broken.push(format!(
+                "{}: {} errors in the rows against a total of {}",
+                one.instance, errors, one.total_errors
+            ));
+        }
+        for call in &one.calls {
+            if call.errors > call.calls {
+                broken.push(format!(
+                    "{}: {} failed {} times out of {} calls",
+                    one.instance, call.name, call.errors, call.calls
+                ));
+            }
+        }
+    }
+    Held::of(format!("{} traced instances add up", counted.len()), broken)
+}
+
+/// A part the session was never asked for carries nothing. The other way around does not hold: a
+/// part asked for can still come back empty, since the tool it needs may not be on the machine.
+fn check_the_parts_asked_for(insights: &Insights) -> Held {
+    let asked = |part: &str| insights.asked.iter().any(|held| held == part);
+    let mut broken = Vec::new();
+    for (part, measured) in [
+        (FLOOR_PART, !insights.floor.is_empty()),
+        (MEMORY_PART, !insights.curves.is_empty()),
+        (SYSCALLS_PART, !insights.syscalls.is_empty()),
+    ] {
+        if measured && !asked(part) {
+            broken.push(format!(
+                "{part} was not asked for and was measured all the same"
+            ));
+        }
+    }
+    Held::of(
+        format!(
+            "the session measured what it was asked for: {}",
+            insights.asked.join(", ")
+        ),
+        broken,
+    )
 }
 
 fn check_measurements(measurements: &[Measurement]) -> Held {
@@ -466,7 +641,10 @@ fn find_exports(dir: &Path) -> Vec<(String, PathBuf)> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|kind| kind == "json"))
-        .filter(|path| path.file_name().is_some_and(|name| name != RECORD_FILE))
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name != RECORD_FILE && name != INSIGHTS_FILE)
+        })
         .filter_map(|path| {
             let named = path.file_stem()?.to_string_lossy().into_owned();
             Some((named, path))
@@ -650,7 +828,10 @@ mod tests {
     use std::env;
     use std::fs;
 
+    use crate::defender::DefenderState;
     use crate::fetch::{Identity, Origin};
+    use crate::machine::{Machine, Platform};
+    use crate::record::CorpusRecord;
 
     use super::*;
 
@@ -704,6 +885,71 @@ mod tests {
             same_work_note: String::new(),
             scrub_env: Vec::new(),
             args: Vec::new(),
+        }
+    }
+
+    fn build_session() -> Insights {
+        Insights {
+            format: crate::insight::INSIGHTS_FORMAT,
+            stamp: "20260101-000000".to_string(),
+            date: "2026-01-01T00:00:00Z".to_string(),
+            machine: Machine {
+                platform: Platform::Linux,
+                arch: "x86_64".to_string(),
+                os: "Debian".to_string(),
+                kernel: "6.12".to_string(),
+                cpu: "a cpu".to_string(),
+                logical_cores: 8,
+                ram_bytes: Some(1 << 34),
+                cpu_scaling: "performance".to_string(),
+                corpus_fs: "ext4".to_string(),
+                corpus_device: "nvme0".to_string(),
+                global_gitignore: "none".to_string(),
+                linebench: "0.1.0".to_string(),
+                hyperfine: "hyperfine 1.19.0".to_string(),
+            },
+            defender: DefenderState {
+                realtime: "not applicable".to_string(),
+                counters: BTreeMap::new(),
+            },
+            unequal_exclusions: None,
+            corpus: CorpusRecord {
+                name: "linux".to_string(),
+                checkout: PathBuf::from("/bench/linux"),
+                commit: "0".repeat(40),
+                head: Some("0".repeat(40)),
+                clean: Some(true),
+                pinned: true,
+                extensions: vec!["c".to_string()],
+                files: Some(27),
+            },
+            instances: vec![build_instance(&"a".repeat(HEX_DIGITS))],
+            floor: Vec::new(),
+            curves: vec![Curve {
+                instance: "scc".to_string(),
+                table: Table::SameWork.as_str().to_string(),
+                step_ms: 2,
+                spacing_us: 2000,
+                polls: 3,
+                wall_ms: 6,
+                peak_bytes: 4096,
+                samples: vec![1024, 4096, 2048],
+            }],
+            tracer: Some("strace -- version 6.13".to_string()),
+            unmeasured: None,
+            syscalls: vec![Syscalls {
+                instance: "scc".to_string(),
+                table: Table::SameWork.as_str().to_string(),
+                wall_ms: 10,
+                total_calls: 30,
+                total_errors: 1,
+                calls: vec![crate::syscalls::Call {
+                    name: "openat".to_string(),
+                    calls: 30,
+                    errors: 1,
+                }],
+            }],
+            asked: crate::insight::ask_for_everything(),
         }
     }
 
@@ -825,11 +1071,90 @@ mod tests {
         let run = dir.join("linux").join("windows").join("20260101-000000");
         fs::create_dir_all(&run).unwrap();
         fs::write(run.join(RECORD_FILE), "{}").unwrap();
-        assert_eq!(find_run(&run.join(RECORD_FILE)).unwrap(), run);
-        assert_eq!(find_run(&run).unwrap(), run);
+        assert_eq!(
+            find_run(&run.join(RECORD_FILE)).unwrap(),
+            (run.clone(), Session::Run)
+        );
+        assert_eq!(find_run(&run).unwrap(), (run.clone(), Session::Run));
         let refused = find_run(&dir).unwrap_err();
-        assert!(refused.contains("no run in"), "{refused}");
+        assert!(refused.contains("nothing to read in"), "{refused}");
         assert!(refused.contains("further in"), "{refused}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_is_read_against_its_own_numbers_and_a_total_that_is_not_the_rows_is_caught() {
+        let dir = env::temp_dir().join("linebench-verify-insights");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut insights = build_session();
+        fs::write(
+            dir.join(INSIGHTS_FILE),
+            serde_json::to_string(&insights).unwrap(),
+        )
+        .unwrap();
+        let verification = check_insights(&dir).unwrap();
+        assert_eq!(verification.count_broken(), 0, "{verification:?}");
+        insights.syscalls[0].total_calls += 1;
+        let over_the_peak = insights.curves[0].peak_bytes + 1;
+        insights.curves[0].samples[0] = over_the_peak;
+        insights.asked = vec![FLOOR_PART.to_string()];
+        fs::write(
+            dir.join(INSIGHTS_FILE),
+            serde_json::to_string(&insights).unwrap(),
+        )
+        .unwrap();
+        let broken: Vec<String> = check_insights(&dir)
+            .unwrap()
+            .levels
+            .iter()
+            .flat_map(|level| level.held.iter())
+            .flat_map(|held| held.broken.clone())
+            .collect();
+        assert_eq!(broken.len(), 4, "{broken:?}");
+        assert!(
+            broken
+                .iter()
+                .any(|line| line.contains("against a total of")),
+            "{broken:?}"
+        );
+        assert!(
+            broken.iter().any(|line| line.contains("over a peak of")),
+            "{broken:?}"
+        );
+        assert!(
+            broken
+                .iter()
+                .any(|line| line == "memory was not asked for and was measured all the same"),
+            "{broken:?}"
+        );
+        assert!(
+            broken
+                .iter()
+                .any(|line| line == "syscalls was not asked for and was measured all the same"),
+            "{broken:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_holding_an_insights_session_is_read_as_one_and_not_as_a_run() {
+        let dir = env::temp_dir().join("linebench-verify-find-insights");
+        let _ = fs::remove_dir_all(&dir);
+        let session = dir.join("insights").join("linux").join("20260101-000000");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join(INSIGHTS_FILE), "{}").unwrap();
+        assert_eq!(
+            find_run(&session).unwrap(),
+            (session.clone(), Session::Insights)
+        );
+        assert_eq!(
+            find_run(&session.join(INSIGHTS_FILE)).unwrap(),
+            (session.clone(), Session::Insights)
+        );
+        fs::write(session.join("insights.md"), "# Insights").unwrap();
+        let refused = find_run(&session.join("insights.md")).unwrap_err();
+        assert!(refused.contains("is neither a"), "{refused}");
         let _ = fs::remove_dir_all(&dir);
     }
 
