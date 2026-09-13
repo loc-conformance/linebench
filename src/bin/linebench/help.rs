@@ -62,7 +62,7 @@ linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <
     it did. Its verdict is how far apart those runs came out and how much of the machine was busy
     underneath them, which is what says whether a run made now would replicate.
 
-    --control <instance>       the instance it times; default the one the conf names
+    --control <instance>       the instance it times, by default the one the conf names
     --counters a,b,c           the instances the control is chosen from
     --runs <n>                 how many times to time it, default 5
     --settle <s>               seconds of quiet before each one, default none
@@ -161,7 +161,7 @@ linebench verify <run|session>
     re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were kept
     too, every statistic is recomputed from the time of every single execution.
 
-    An insights session is read the same way: the floor against itself and against its exports,
+    An insights session is read the same way. The floor against itself and against its exports,
     every curve against the peak the system reported, every traced instance against the calls it
     listed, and every number against the instances the session measured.
 
@@ -173,10 +173,9 @@ linebench verify <run|session>
 
 Everywhere:
 
-    --dry-run                  write nothing anywhere. What a command would write goes to the
-                               temp folder and is taken away when it ends, and no release is
-                               looked up. The machine is still prepared, so a dry run costs the
-                               time of the run it stands for
+    --dry-run                  what the command would write goes to the temp folder and is
+                               deleted at the end, and no release is looked up. The machine is
+                               prepared as always, so a dry run takes as long as the real one
     --help, -h                 this text, or one command's own after its name
     --version, -V              print this build's version
 
