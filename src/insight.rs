@@ -26,6 +26,11 @@ pub const INSIGHTS_DIR: &str = "insights";
 pub const INSIGHTS_FILE: &str = "insights.json";
 pub const INSIGHTS_PAGE: &str = "insights.md";
 pub const INSIGHTS_FORMAT: u32 = 1;
+pub const FLOOR_PART: &str = "floor";
+pub const MEMORY_PART: &str = "memory";
+pub const SYSCALLS_PART: &str = "syscalls";
+/// What `insights` measures, and what `--only` names. A run does all three unless it says otherwise.
+pub const INSIGHT_PARTS: [&str; 3] = [FLOOR_PART, MEMORY_PART, SYSCALLS_PART];
 pub const SYSCALLS_HEADING: &str = "family / call";
 const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends. What a run cannot \
                           measure about itself, since watching a process closely enough disturbs \
@@ -36,6 +41,7 @@ const MEMORY_MEANS: &str = "What each counter held while it counted, sampled whi
                             axis under each curve is the wall time of that run.";
 const SYSCALLS_MEANS: &str = "What each counter asked of the kernel, counted by the tracer.";
 const NO_SYSCALLS: &str = "The system calls were not counted in this session.";
+const NOT_ASKED: &str = "Not asked for in this session.";
 const FLOOR_PREFIX: &str = "floor-";
 const VERSION_HEADING: &str = "--version";
 const FIRST_HEADINGS: [&str; 2] = ["instance", VERSION_HEADING];
@@ -95,6 +101,14 @@ pub struct Insights {
     #[serde(default)]
     pub unmeasured: Option<String>,
     pub syscalls: Vec<Syscalls>,
+    /// The parts this run was asked for. A record written before --only was there asked for all of
+    /// them, which is what an empty field would otherwise look like.
+    #[serde(default = "ask_for_everything")]
+    pub asked: Vec<String>,
+}
+
+pub fn ask_for_everything() -> Vec<String> {
+    INSIGHT_PARTS.iter().map(|part| part.to_string()).collect()
 }
 
 pub fn build_insights_path(
@@ -165,23 +179,31 @@ pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -
     ));
     lines.push(format_versions(&insights.instances));
     lines.push(String::new());
-    lines.extend(wrap_in_fence(
-        "Floor",
-        FLOOR_MEANS,
-        format_floor(&insights.floor, versions),
-    ));
-    lines.extend(wrap_in_fence(
-        "Memory",
-        MEMORY_MEANS,
-        format_memory(&insights.curves, Style::Hidden),
-    ));
+    let asked_for = |part: &str| insights.asked.iter().any(|held| held == part);
+    lines.extend(match asked_for(FLOOR_PART) {
+        true => wrap_in_fence(
+            "Floor",
+            FLOOR_MEANS,
+            format_floor(&insights.floor, versions),
+        ),
+        false => say_it_was_not_asked_for("Floor"),
+    });
+    lines.extend(match asked_for(MEMORY_PART) {
+        true => wrap_in_fence(
+            "Memory",
+            MEMORY_MEANS,
+            format_memory(&insights.curves, Style::Hidden),
+        ),
+        false => say_it_was_not_asked_for("Memory"),
+    });
     let mut counted = format_syscalls_summary(&insights.syscalls, insights.corpus.files);
     if !counted.is_empty() {
         counted.push(String::new());
         counted.extend(format_syscalls(&insights.syscalls, Style::Hidden));
     }
-    match counted.is_empty() {
-        true => lines.extend([
+    match (asked_for(SYSCALLS_PART), counted.is_empty()) {
+        (false, _) => lines.extend(say_it_was_not_asked_for("System calls")),
+        (true, true) => lines.extend([
             "## System calls".to_string(),
             String::new(),
             insights
@@ -190,7 +212,7 @@ pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -
                 .unwrap_or_else(|| NO_SYSCALLS.to_string()),
             String::new(),
         ]),
-        false => lines.extend(wrap_in_fence("System calls", SYSCALLS_MEANS, counted)),
+        (true, false) => lines.extend(wrap_in_fence("System calls", SYSCALLS_MEANS, counted)),
     }
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
@@ -410,18 +432,32 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
     let widths = measure_columns(&table[0].1, &rows);
     table
         .into_iter()
-        .map(|(label, cells)| {
+        .enumerate()
+        .map(|(at, (label, cells))| {
             let line = lay_out_numbers(&label, &cells, gutter, &widths);
-            if label.starts_with(MEMBER_INDENT) {
-                fade(&line, style)
-            } else {
-                line
+            // The heading is painted by the caller, which looks for its text at the front of the
+            // line, so it is left alone here.
+            match (at, label.starts_with(MEMBER_INDENT)) {
+                (0, _) => line,
+                (_, true) => fade(&line, style),
+                (_, false) => line.replacen(&label, &embolden(&label, style), 1),
             }
         })
         .collect()
 }
 
 /// The tables are laid out for a terminal, so the page keeps them in a fence as they are.
+// A part left out keeps its heading, so the page says the measuring was not asked for rather than
+// leaving a reader to wonder where the section went.
+fn say_it_was_not_asked_for(heading: &str) -> Vec<String> {
+    vec![
+        format!("## {heading}"),
+        String::new(),
+        NOT_ASKED.to_string(),
+        String::new(),
+    ]
+}
+
 fn wrap_in_fence(heading: &str, means: &str, body: Vec<String>) -> Vec<String> {
     if body.is_empty() {
         return Vec::new();
@@ -665,6 +701,13 @@ fn measure_columns(headings: &[String], rows: &[Vec<String>]) -> Vec<usize> {
         .collect()
 }
 
+fn embolden(text: &str, style: Style) -> String {
+    if style != Style::Colored {
+        return text.to_string();
+    }
+    format!("\u{1b}[1m{text}\u{1b}[0m")
+}
+
 fn fade(text: &str, style: Style) -> String {
     if style != Style::Colored {
         return text.to_string();
@@ -840,6 +883,7 @@ mod tests {
             tracer: None,
             unmeasured: Some("strace runs on linux alone".to_string()),
             syscalls,
+            asked: ask_for_everything(),
         }
     }
 
@@ -911,6 +955,46 @@ mod tests {
             .find(|line| line.starts_with("   opening"))
             .expect("the family carries them all");
         assert!(family.ends_with("10,008"), "{family}");
+    }
+
+    #[test]
+    fn a_part_the_session_was_not_asked_for_keeps_its_heading_and_says_so() {
+        let mut insights = build_insights(vec![build_syscalls("tokei", &[("openat", 10)])]);
+        insights.asked = vec![MEMORY_PART.to_string()];
+        let page = build_insights_page(&insights, &only_tokei()).join("\n");
+        assert!(page.contains(&format!("## Floor\n\n{NOT_ASKED}")), "{page}");
+        assert!(
+            page.contains(&format!("## System calls\n\n{NOT_ASKED}")),
+            "{page}"
+        );
+        assert!(
+            !page.contains(&format!("## Memory\n\n{NOT_ASKED}")),
+            "{page}"
+        );
+        assert_eq!(page.matches("```").count(), 2, "{page}");
+    }
+
+    #[test]
+    fn a_family_carries_its_name_in_bold_and_its_calls_faded_under_it() {
+        let counts = build_syscalls("tokei", &[("openat", 10_000), ("read", 9_000)]);
+        let lines = format_syscalls(std::slice::from_ref(&counts), Style::Colored);
+        let named = |name: &str| {
+            lines
+                .iter()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("{name} is in the table"))
+        };
+        assert!(
+            named("opening").contains("\u{1b}[1mopening\u{1b}[0m"),
+            "{lines:?}"
+        );
+        assert!(named("openat").starts_with("\u{1b}[2m"), "{lines:?}");
+        assert!(!named(SYSCALLS_HEADING).contains("\u{1b}["), "{lines:?}");
+        let plain = format_syscalls(std::slice::from_ref(&counts), Style::Plain);
+        assert!(
+            plain.iter().all(|line| !line.contains('\u{1b}')),
+            "{plain:?}"
+        );
     }
 
     #[test]

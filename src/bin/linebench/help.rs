@@ -95,8 +95,8 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     A run under an instance with args or a build of its own is written under results/local/,
     since its numbers answer for that build alone and never for the release.
 
-linebench insights <corpus|dir> [--counters a,b,c] [--yes] [--out <dir>] [--extensions rs,c]
-                [--corpus-path <dir>]
+linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls] [--yes]
+                [--out <dir>] [--extensions rs,c] [--corpus-path <dir>]
 
     Measures what a run cannot measure about itself, since watching a process closely enough
     disturbs the times it would report. The floor is what a counter costs before it has counted
@@ -104,6 +104,7 @@ linebench insights <corpus|dir> [--counters a,b,c] [--yes] [--out <dir>] [--exte
     much it asked of the kernel to do it.
 
     --counters a,b,c           the instances, in the order they are measured
+    --only <parts>             which of floor, memory and syscalls to measure, default all
     --yes                      do not ask when a tool the section needs is missing
     --out <dir>                where the session goes, default results/ here
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout

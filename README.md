@@ -329,7 +329,9 @@ values, each the highest of its slice.
 ```
 
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
-needs is missing.
+needs is missing. `--only floor,memory,syscalls` names which of the three to measure, in any
+combination, and with nothing named all three run. A part left out is named as left out in the
+record and on the page, so an empty section is never read as a measurement that found nothing.
 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
 machine block, the antivirus state, the corpus with its commit and the instances measured, so it
@@ -573,6 +575,7 @@ A flag beats an environment variable, which beats `linebench.conf` in the data d
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
+| what `insights` measures | `--only floor,memory,syscalls` | | | all three |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | cloc |

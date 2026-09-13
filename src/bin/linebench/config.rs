@@ -9,6 +9,7 @@ use linebench::corpus::{Corpus, build_corpus_of};
 use linebench::counters::Definition;
 use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::files::read_toml;
+use linebench::insight::INSIGHT_PARTS;
 use linebench::os::capture_with_status;
 
 use crate::help::{find_help_of, get_help, name_every_command};
@@ -118,6 +119,7 @@ pub struct Options {
     pub keep_raw: bool,
     pub latest: bool,
     pub dry_run: bool,
+    pub only: Option<Vec<String>>,
     #[cfg(feature = "maintenance")]
     pub as_json: bool,
 }
@@ -204,6 +206,20 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     true => None,
                     false => Some(named),
                 };
+            }
+            "--only" => {
+                let first = value()?;
+                let named = read_list(flag, first, &mut rest)?;
+                if let Some(stray) = named
+                    .iter()
+                    .find(|name| !INSIGHT_PARTS.contains(&name.as_str()))
+                {
+                    return Err(format!(
+                        "{flag} takes any of {}, and {stray} is none of them",
+                        INSIGHT_PARTS.join(", ")
+                    ));
+                }
+                options.only = Some(named);
             }
             "--extensions" => {
                 let first = value()?;
@@ -1644,6 +1660,20 @@ mod tests {
         assert!(
             refused.starts_with("no corpus is on this machine"),
             "{refused}"
+        );
+    }
+
+    #[test]
+    fn only_names_the_parts_of_an_insights_session_and_a_name_that_is_no_part_is_refused() {
+        assert_eq!(parse("insights linux").unwrap().only, None);
+        assert_eq!(
+            parse("insights linux --only syscalls,memory").unwrap().only,
+            Some(vec!["syscalls".to_string(), "memory".to_string()])
+        );
+        let refused = parse("insights linux --only floor,noise").unwrap_err();
+        assert_eq!(
+            refused,
+            "--only takes any of floor, memory, syscalls, and noise is none of them"
         );
     }
 

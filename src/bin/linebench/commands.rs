@@ -19,8 +19,8 @@ use linebench::defender::{
 use linebench::fetch::{GIVEN_DIR, Manifest, calculate_sha256, fetch_counter, read_manifest};
 use linebench::insight::Insights;
 use linebench::insight::{
-    FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, INSIGHTS_PAGE, SYSCALLS_HEADING,
-    VERSION_SET,
+    FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, INSIGHTS_PAGE,
+    MEMORY_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET, ask_for_everything,
 };
 use linebench::insight::{
     build_insights_path, format_floor, format_memory, format_syscalls, format_syscalls_summary,
@@ -710,15 +710,20 @@ pub fn run_insights(
     fs::create_dir_all(&res)
         .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
     let scratch = Scratch::create("insights")?;
-    let tracing = match platform.is_linux() {
+    let asked = match &options.only {
+        Some(named) => named.clone(),
+        None => ask_for_everything(),
+    };
+    let asked_for = |part: &str| asked.iter().any(|held| held == part);
+    let tracing = match platform.is_linux() && asked_for(SYSCALLS_PART) {
         true => find_tracer(&scratch.get_path().join(PROBE_FILE)),
         false => Tracing::NotThere,
     };
-    let unmeasured = match (&tracing, platform.is_linux()) {
-        (Tracing::Ready(_), _) => None,
-        (_, false) => Some(TRACER_ELSEWHERE),
-        (Tracing::Refused, _) => Some(TRACER_REFUSED),
-        (Tracing::NotThere, _) => Some(TRACER_MISSING),
+    let unmeasured = match (&tracing, platform.is_linux(), asked_for(SYSCALLS_PART)) {
+        (Tracing::Ready(_), _, _) | (_, _, false) => None,
+        (_, false, _) => Some(TRACER_ELSEWHERE),
+        (Tracing::Refused, _, _) => Some(TRACER_REFUSED),
+        (Tracing::NotThere, _, _) => Some(TRACER_MISSING),
     };
     if let Some(why) = unmeasured
         && platform.is_linux()
@@ -726,9 +731,7 @@ pub fn run_insights(
     {
         return Err("stopped.".to_string());
     }
-    let target = create_floor_target(scratch.get_path())?;
     let scrub = collect_scrub(&instances);
-    print_header(out, "== floor")?;
     let mut runner = Runner::new(
         &res,
         Settings {
@@ -752,70 +755,83 @@ pub fn run_insights(
         }
         versions.push((instance.get_name().to_string(), command));
     }
-    runner.run_hyperfine(out, VERSION_SET, &distinct)?;
-    for table in TABLES {
-        let commands: Vec<(String, String)> = instances
-            .iter()
-            .map(|instance| build_command(instance, &target, &locations.corpus.extensions, table))
-            .collect::<Result<_, _>>()?;
+    let mut measurements = Vec::new();
+    if asked_for(FLOOR_PART) {
+        let target = create_floor_target(scratch.get_path())?;
+        print_header(out, "== floor")?;
+        runner.run_hyperfine(out, VERSION_SET, &distinct)?;
+        for table in TABLES {
+            let commands: Vec<(String, String)> = instances
+                .iter()
+                .map(|instance| {
+                    build_command(instance, &target, &locations.corpus.extensions, table)
+                })
+                .collect::<Result<_, _>>()?;
+            print_line(out, "")?;
+            runner.run_hyperfine(out, &get_floor_set_name(table), &commands)?;
+        }
+        let (found, skipped) = collect_measurements(&res, &runner.commands, &[])?;
+        measurements = found;
+        for message in &skipped {
+            print_warning(out, message)?;
+        }
+        print_header(out, "== floor summary")?;
+        for line in format_floor(&measurements, &versions) {
+            print_line(out, &paint_table_line(&line))?;
+        }
         print_line(out, "")?;
-        runner.run_hyperfine(out, &get_floor_set_name(table), &commands)?;
     }
-    let (measurements, skipped) = collect_measurements(&res, &runner.commands, &[])?;
-    for message in &skipped {
-        print_warning(out, message)?;
-    }
-    print_header(out, "== floor summary")?;
-    for line in format_floor(&measurements, &versions) {
-        print_line(out, &paint_table_line(&line))?;
-    }
-    print_line(out, "")?;
-    print_header(out, "== memory")?;
     let mut curves = Vec::new();
-    for instance in &instances {
-        let args = build_args(
-            instance,
-            &locations.checkout,
-            &locations.corpus.extensions,
-            MEMORY_TABLE,
-            false,
-        )?;
-        print_line(out, &format!(">> {}", instance.get_name()))?;
-        match sample_memory(
-            platform,
-            instance.get_name(),
-            MEMORY_TABLE,
-            &instance.identity.binary,
-            &args,
-            &scrub,
-        ) {
-            Ok(curve) => curves.push(curve),
-            Err(refused) => print_warning(out, &refused)?,
+    if asked_for(MEMORY_PART) {
+        print_header(out, "== memory")?;
+        for instance in &instances {
+            let args = build_args(
+                instance,
+                &locations.checkout,
+                &locations.corpus.extensions,
+                MEMORY_TABLE,
+                false,
+            )?;
+            print_line(out, &format!(">> {}", instance.get_name()))?;
+            match sample_memory(
+                platform,
+                instance.get_name(),
+                MEMORY_TABLE,
+                &instance.identity.binary,
+                &args,
+                &scrub,
+            ) {
+                Ok(curve) => curves.push(curve),
+                Err(refused) => print_warning(out, &refused)?,
+            }
+        }
+        print_header(out, "== memory summary")?;
+        for line in format_memory(&curves, get_report_style()) {
+            print_line(out, &line)?;
         }
     }
-    print_header(out, "== memory summary")?;
-    for line in format_memory(&curves, get_report_style()) {
-        print_line(out, &line)?;
-    }
-    print_header(out, "== syscalls")?;
-    let syscalls = match &tracing {
-        Tracing::Ready(version) => {
-            print_line(out, &format!("   {version}"))?;
-            collect_syscalls(out, &instances, locations, &scrub, scratch.get_path())?
-        }
-        _ => {
-            print_line(out, &format!("   {}", unmeasured.unwrap_or_default()))?;
-            Vec::new()
-        }
-    };
-    if !syscalls.is_empty() {
-        print_header(out, "== syscalls summary")?;
-        for line in format_syscalls_summary(&syscalls, locations.corpus.files) {
-            print_line(out, &paint_table_line(&line))?;
-        }
-        print_line(out, "")?;
-        for line in format_syscalls(&syscalls, get_report_style()) {
-            print_line(out, &paint_table_line(&line))?;
+    let mut syscalls = Vec::new();
+    if asked_for(SYSCALLS_PART) {
+        print_header(out, "== syscalls")?;
+        syscalls = match &tracing {
+            Tracing::Ready(version) => {
+                print_line(out, &format!("   {version}"))?;
+                collect_syscalls(out, &instances, locations, &scrub, scratch.get_path())?
+            }
+            _ => {
+                print_line(out, &format!("   {}", unmeasured.unwrap_or_default()))?;
+                Vec::new()
+            }
+        };
+        if !syscalls.is_empty() {
+            print_header(out, "== syscalls summary")?;
+            for line in format_syscalls_summary(&syscalls, locations.corpus.files) {
+                print_line(out, &paint_table_line(&line))?;
+            }
+            print_line(out, "")?;
+            for line in format_syscalls(&syscalls, get_report_style()) {
+                print_line(out, &paint_table_line(&line))?;
+            }
         }
     }
     let insights = Insights {
@@ -838,6 +854,7 @@ pub fn run_insights(
         },
         unmeasured: unmeasured.map(str::to_string),
         syscalls,
+        asked,
     };
     write_insights(&res, &insights)?;
     let mut written = vec![INSIGHTS_FILE];
