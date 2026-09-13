@@ -552,8 +552,8 @@ results/
 One directory per corpus, then per platform, then per run, named by its UTC timestamp. Nothing is
 ever overwritten. `results/README.md` is the page, rewritten after every run and on demand with
 `report`: one section per machine, and under it the newest run over each corpus with its two tables
-and its trust checks, then every run once there is more than one, the local builds under headings of
-their own, and the methodology and the terms.
+and its trust checks, biggest corpus first, then every run once there is more than one, the local
+builds under headings of their own, and the methodology and the terms.
 
 Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
 `summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`, hyperfine's
