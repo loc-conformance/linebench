@@ -517,22 +517,26 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
         latest.insert(key, entry);
     }
     let mut shown: Vec<&FoundRun> = latest.into_values().collect();
-    let mut newest_of: BTreeMap<String, String> = BTreeMap::new();
-    for entry in &shown {
-        let stamp = entry.record.stamp.clone();
+    // The newest run of each machine, which orders the machines and describes them. The corpora
+    // under a machine are ordered by size, so its first run is no longer its newest one, and the
+    // heading would otherwise carry whatever that machine was when it counted the biggest corpus.
+    let mut newest_of: BTreeMap<String, &FoundRun> = BTreeMap::new();
+    for entry in shown.iter().copied() {
         newest_of
             .entry(name_the_machine(&entry.record))
             .and_modify(|held| {
-                if *held < stamp {
-                    held.clone_from(&stamp);
+                if held.record.stamp < entry.record.stamp {
+                    *held = entry;
                 }
             })
-            .or_insert(stamp);
+            .or_insert(entry);
     }
     shown.sort_by(|a, b| {
         let (one, other) = (name_the_machine(&a.record), name_the_machine(&b.record));
         newest_of[&other]
-            .cmp(&newest_of[&one])
+            .record
+            .stamp
+            .cmp(&newest_of[&one].record.stamp)
             .then(one.cmp(&other))
             .then(count_files(&b.record).cmp(&count_files(&a.record)))
             .then(b.record.stamp.cmp(&a.record.stamp))
@@ -542,7 +546,7 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
     for entry in &shown {
         let machine = name_the_machine(&entry.record);
         if machine != said {
-            lines.extend(format_machine_heading(&entry.record, family));
+            lines.extend(format_machine_heading(&newest_of[&machine].record, family));
             said = machine;
         }
         let earlier: Vec<&Record> = anchors
@@ -2052,6 +2056,35 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert_eq!(order, ["linux", "jdk", "cpython", "older"], "{page}");
+    }
+
+    #[test]
+    fn a_machine_is_described_by_its_newest_run_and_not_by_the_one_over_its_biggest_corpus() {
+        let named = |stamp: &str, corpus: &str, files: u64, os: &str| {
+            let mut record = build_record(stamp, &[("mezura", 0.32)], "nvme0");
+            record.corpus.name = corpus.to_string();
+            record.corpus.files = Some(files);
+            record.machine.os = os.to_string();
+            record
+        };
+        let found: Vec<FoundRun> = [
+            named("20260903-100000", "linux", 80_000, "the old os"),
+            named("20260903-120000", "cpython", 3_000, "the new os"),
+        ]
+        .into_iter()
+        .map(|record| FoundRun {
+            relative: format!("{}/{}", record.corpus.name, record.stamp),
+            record,
+        })
+        .collect();
+        let page = build_results_page(&found).join("\n");
+        assert!(page.contains("the new os"), "{page}");
+        assert!(!page.contains("the old os"), "{page}");
+        let first = page
+            .lines()
+            .find(|line| line.starts_with("### "))
+            .unwrap_or_default();
+        assert!(first.starts_with("### linux corpus"), "{page}");
     }
 
     #[test]
