@@ -39,7 +39,7 @@ use crate::help::{find_help_of, get_help, paint_help};
 use crate::output::{Color, Output, enable_colors, paint, print_line};
 use crate::shipped::collect_definitions;
 
-const NAME_THE_RUN: &str = "name the run to read";
+const NAME_THE_RUN: &str = "name the run or the insights session to read";
 
 fn main() {
     enable_colors();
@@ -151,8 +151,9 @@ struct Ground {
     corpora: Vec<Corpus>,
 }
 
-// A dry run writes where nobody looks and the directory goes when the command ends, however it
-// ends, so what the run would have left behind is never there to find.
+// A dry run writes where nobody looks and the directory goes when the command ends. A Ctrl-C does
+// not unwind, so a run stopped that way leaves its directory in the temp folder, under the name of
+// a process that is gone, for the system to clear like any other temporary file.
 struct DryRun(PathBuf);
 
 impl DryRun {

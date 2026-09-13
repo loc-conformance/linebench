@@ -29,9 +29,10 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
     The counters land in the counters directory and a corpus in corpora/<name> next to it, which
     is where every later command looks for it with nothing said.
 
-linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--corpus-path <dir>]
-                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
-                [--expect-identical a=b] [--counters-dir <dir>] [--add <path>]
+linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--control <instance>]
+                [--corpus-path <dir>] [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
+                [--args <c>@<tag>=<text>] [--expect-identical a=b] [--counters-dir <dir>]
+                [--add <path>]
 
     Runs every counter once over the target, reads its counts back out of its own output, and
     holds them against each other and against the count the corpus definition declares. Nothing
@@ -43,6 +44,7 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--corp
 
     --extensions rs,c          what to count in a directory of your own
     --counters a,b,c           the instances, in the order they are timed
+    --control <instance>       the instance hyperfine is tried with
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
@@ -51,21 +53,31 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--corp
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
 
-linebench noise <corpus|dir> [--control <instance>] [--runs <n>] [--settle <s>] [--out <dir>]
+linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <n>]
+                [--settle <s>] [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
+                [--args <c>@<tag>=<text>] [--counters-dir <dir>] [--add <path>]
                 [--corpus-path <dir>]
 
-    Times the control alone, five times, and samples what the machine was doing while it did.
-    Its verdict is how far apart those five runs came out and how much of the machine was busy
+    Times the control alone, five times by default, and samples what the machine was doing while
+    it did. Its verdict is how far apart those runs came out and how much of the machine was busy
     underneath them, which is what says whether a run made now would replicate.
 
     --control <instance>       the instance it times; default the one the conf names
-    --runs <n>                 how many times to time it
-    --settle <s>               seconds of quiet before each one
+    --counters a,b,c           the instances the control is chosen from
+    --runs <n>                 how many times to time it, default 5
+    --settle <s>               seconds of quiet before each one, default none
+    --given <c>@<tag>=<path>   a build of your own, copied before it is measured
+    --definition <c>@<tag>=<f> the definition that instance runs under
+    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --counters-dir <dir>       where the binaries are
+    --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
 linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--warmup <n>]
                 [--runs <n>] [--settle <s>] [--against <stamp>] [--no-prep] [--yes] [--keep-raw]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
+                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
+                [--expect-identical a=b] [--counters-dir <dir>] [--add <path>]
                 [--corpus-path <dir>]
 
     Times every instance over the target through hyperfine, twice, once with the flags that make
@@ -90,13 +102,22 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     --keep-raw                 keep every counter's printed output beside the record
     --allow-unequal-exclusions measure even with uneven MS Defender exclusions
     --out <dir>                where results go, default results/ here
+    --extensions rs,c          what to count in a directory of your own
+    --given <c>@<tag>=<path>   a build of your own, copied before it is measured
+    --definition <c>@<tag>=<f> the definition that instance runs under
+    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --expect-identical a=b     instances whose JSON output has to match, volatile fields aside
+    --counters-dir <dir>       where the binaries are
+    --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
     A run under an instance with args or a build of its own is written under results/local/,
     since its numbers answer for that build alone and never for the release.
 
 linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls] [--yes]
-                [--out <dir>] [--extensions rs,c] [--corpus-path <dir>]
+                [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
+                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
+                [--counters-dir <dir>] [--add <path>] [--corpus-path <dir>]
 
     Measures what a run cannot measure about itself, since watching a process closely enough
     disturbs the times it would report. The floor is what a counter costs before it has counted
@@ -106,7 +127,14 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     --counters a,b,c           the instances, in the order they are measured
     --only <parts>             which of floor, memory and syscalls to measure, default all
     --yes                      do not ask when a tool the section needs is missing
+    --allow-unequal-exclusions measure even with uneven MS Defender exclusions
     --out <dir>                where the session goes, default results/ here
+    --extensions rs,c          what to count in a directory of your own
+    --given <c>@<tag>=<path>   a build of your own, copied before it is measured
+    --definition <c>@<tag>=<f> the definition that instance runs under
+    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --counters-dir <dir>       where the binaries are
+    --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
 linebench status [--counters-dir <dir>] [--add <path>]
@@ -115,38 +143,45 @@ linebench status [--counters-dir <dir>] [--add <path>]
     channel publishes latest, and what sits in the counters directory. Every corpus with the
     place its checkout goes and the commit that is there. Then the paths all of that came from.
 
+    --counters-dir <dir>       where the binaries are
+    --add <path>               a definition of your own, or a directory of them
+
 linebench report [--out <dir>] [--verify]
 
     Rewrites the results page from the records that are already there, with nothing measured.
 
+    --out <dir>                where the results are, default results/ here
     --verify                   build the page and say whether the one on disk is that page,
                                writing nothing
 
-linebench verify <run>
+linebench verify <run|session>
 
     Reads a run back and holds its numbers against each other: every measurement against itself,
     the columns that come off other columns, the counts against their own addition, equal work
     re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were kept
     too, every statistic is recomputed from the time of every single execution.
 
-    The run is its directory, or the run.json inside it. A folder holding many runs is not one,
-    and the refusal says to name a run further in.
+    An insights session is read the same way: the floor against itself and against its exports,
+    every curve against the peak the system reported, every traced instance against the calls it
+    listed, and every number against the instances the session measured.
+
+    Name the directory, or the run.json or insights.json inside it. A folder holding many of them
+    is not one, and the refusal says to name a directory further in.
 
     What could not be read is printed as it is. A check that does not hold exits 1, and a file
     that is absent is a gap and does not.
 
-linebench version
+Everywhere:
 
-    Prints this build's version.
+    --dry-run                  write nothing anywhere. What a command would write goes to the
+                               temp folder and is taken away when it ends, and no release is
+                               looked up. The machine is still prepared, so a dry run costs the
+                               time of the run it stands for
+    --help, -h                 this text, or one command's own after its name
+    --version, -V              print this build's version
 
---dry-run can be used with any command and leaves nothing behind. Everything that would be written goes
-to a directory in the temp folder, which is cleaned up when the command finishes. No release is
-looked up and nothing is downloaded: a fetch only names what it would have taken. On the `run` command, the machine is is prepared as normal so that the results are accurate.
-
-A flag beats an environment variable, which beats linebench.conf. The conf is optional and holds
-what belongs to this machine: control, counters, out, skip, given and the corpora that sit
-somewhere other than where fetch puts them. A --help after a command prints that command alone.
-Output to a terminal has colour and output to a file or a pipe does not."#;
+A flag beats an environment variable, which beats linebench.conf.
+"#;
 
 #[cfg(feature = "maintenance")]
 const BUMP_HELP: &str = r#"
@@ -165,9 +200,11 @@ linebench bump-versions [<counter>] [--json]
 "#;
 
 const TOOL_AND_SPACE: &str = "linebench ";
-const FLAG_OPENING: &str = "--";
 #[cfg(feature = "maintenance")]
-const CLOSING_NOTE: &str = "A flag beats an environment variable";
+const EVERYWHERE: &str = "Everywhere:";
+const FLAG_OPENING: &str = "--";
+/// Flags of no command in particular, which is why no usage line names them.
+const ALWAYS: [&str; 5] = ["--dry-run", "--help", "-h", "--version", "-V"];
 const COUNTERS_HERE: &str = "{counters}";
 const CORPORA_HERE: &str = "{corpora}";
 const LISTING_OPENINGS: [&str; 2] = ["    counters   ", "    corpora    "];
@@ -180,12 +217,27 @@ pub fn get_help() -> String {
     return whole;
     #[cfg(feature = "maintenance")]
     whole.replace(
-        CLOSING_NOTE,
-        &format!(
-            "{BUMP_HELP}
-{CLOSING_NOTE}"
-        ),
+        EVERYWHERE,
+        &format!("{}\n{EVERYWHERE}", BUMP_HELP.trim_start()),
     )
+}
+
+/// The flags a command takes, read off the usage line of its own help block, so that the text and
+/// what the parser allows cannot drift apart. ALWAYS is the handful that belong to no command.
+pub fn find_flags_of(named: &str) -> Vec<String> {
+    let block = find_help_of(named);
+    let usage = block
+        .lines()
+        .take_while(|line| !line.trim().is_empty())
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let mut flags: Vec<String> = ALWAYS.iter().map(|flag| (*flag).to_string()).collect();
+    for word in usage.split(['[', ']', ' ']) {
+        if word.starts_with(FLAG_OPENING) && !flags.iter().any(|held| held == word) {
+            flags.push(word.to_string());
+        }
+    }
+    flags
 }
 
 pub fn find_help_of(named: &str) -> String {
@@ -324,6 +376,26 @@ mod tests {
     }
 
     #[test]
+    fn the_usage_line_of_a_command_and_the_flags_listed_under_it_name_the_same_flags() {
+        for named in COMMANDS {
+            let block = find_help_of(named);
+            let mut listed: Vec<&str> = block
+                .lines()
+                .filter_map(|line| line.strip_prefix("    "))
+                .filter(|line| line.starts_with(FLAG_OPENING))
+                .filter_map(|line| line.split_whitespace().next())
+                .collect();
+            listed.sort_unstable();
+            let mut taken: Vec<String> = find_flags_of(named)
+                .into_iter()
+                .filter(|flag| !ALWAYS.contains(&flag.as_str()))
+                .collect();
+            taken.sort();
+            assert_eq!(listed, taken, "{named}");
+        }
+    }
+
+    #[test]
     fn a_block_carries_its_own_command_and_neither_another_nor_the_closing_note() {
         let fetch = find_help_of("fetch");
         assert!(fetch.contains("--counters-dir"), "{fetch}");
@@ -333,11 +405,12 @@ mod tests {
     }
 
     #[test]
-    fn a_command_whose_line_is_its_bare_name_is_cut_like_the_rest() {
-        let version = find_help_of("version");
-        assert!(version.starts_with("linebench version\n"), "{version}");
-        assert!(version.contains("Prints this build's version"), "{version}");
-        assert!(!version.contains("linebench report"), "{version}");
+    fn one_command_is_cut_out_of_the_help_without_what_follows_it() {
+        let status = find_help_of("status");
+        assert!(status.starts_with("linebench status "), "{status}");
+        assert!(status.contains("Says what this machine holds"), "{status}");
+        assert!(!status.contains("linebench report"), "{status}");
+        assert!(!status.contains("Everywhere:"), "{status}");
     }
 
     #[test]

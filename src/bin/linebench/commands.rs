@@ -50,11 +50,11 @@ use linebench::record::{
 use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
-use linebench::verify::{Verification, check_run, find_run};
+use linebench::verify::{Session, Verification, check_insights, check_run, find_run};
 
 use crate::config::{
     Chosen, Config, FetchPlan, Locations, Options, choose_corpus_home, choose_counters_dir,
-    resolve_out, show_path,
+    find_settled_results_dir, show_path,
 };
 use crate::instances::{ChosenInstances, build_instances};
 use crate::output::{
@@ -319,7 +319,17 @@ pub fn run_noise(
     let (instances, control) = (chosen.instances, chosen.control);
     let scratch = Scratch::create("noise")?;
     print_header(out, "== noise")?;
-    let Some(worst) = judge_noise(out, locations, &instances, control, platform, &scratch)? else {
+    // The runs and the settle are the run command's, since the point of noise is to time the
+    // control the way a run would and see how far apart the answers come out.
+    let settings = Settings {
+        warmup: 0,
+        runs: options.runs.unwrap_or(NOISE_RUNS),
+        settle: options.settle.unwrap_or_default(),
+    };
+    let Some(worst) = judge_noise(
+        out, locations, &instances, control, platform, &scratch, settings,
+    )?
+    else {
         return Ok(1);
     };
     if worst < UNSTEADY_STEP {
@@ -332,7 +342,9 @@ pub fn run_noise(
     )?;
     thread::sleep(Duration::from_secs(NOISE_RETRY_SECONDS));
     print_header(out, "== noise, measured again")?;
-    match judge_noise(out, locations, &instances, control, platform, &scratch)? {
+    match judge_noise(
+        out, locations, &instances, control, platform, &scratch, settings,
+    )? {
         Some(worst) if worst < UNSTEADY_STEP => Ok(0),
         _ => Ok(1),
     }
@@ -345,6 +357,7 @@ fn judge_noise(
     control: usize,
     platform: Platform,
     scratch: &Scratch,
+    settings: Settings,
 ) -> Result<Option<usize>, String> {
     let cores = thread::available_parallelism().map_or(1, |c| c.get());
     let busy = sample_background_busy(platform);
@@ -370,6 +383,7 @@ fn judge_noise(
         control,
         platform,
         scratch.get_path(),
+        settings,
     )?;
     let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
         print_line(out, "   workload      hyperfine failed")?;
@@ -408,9 +422,10 @@ fn judge_noise(
     print_line(
         out,
         &format!(
-            "   workload      {} on {}, {NOISE_RUNS} runs",
+            "   workload      {} on {}, {} runs",
             instances[control].get_name(),
-            locations.corpus.name
+            locations.corpus.name,
+            settings.runs
         ),
     )?;
     print_line(
@@ -550,7 +565,11 @@ pub fn run_report(
 }
 
 pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
-    let verification = check_run(&find_run(path)?)?;
+    let (dir, session) = find_run(path)?;
+    let (verification, what) = match session {
+        Session::Run => (check_run(&dir)?, "run"),
+        Session::Insights => (check_insights(&dir)?, "session"),
+    };
     print_verification(out, &verification)?;
     let broken = verification.count_broken();
     print_line(out, "")?;
@@ -558,13 +577,16 @@ pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
         print_line(
             out,
             &format!(
-                "{} nothing in this run contradicts itself",
+                "{} nothing in this {what} contradicts itself",
                 paint(Color::Green, "done.")
             ),
         )?;
         return Ok(0);
     }
-    print_warning(out, &format!("{broken} checks over this run do not hold"))?;
+    print_warning(
+        out,
+        &format!("{broken} checks over this {what} do not hold"),
+    )?;
     Ok(1)
 }
 
@@ -614,7 +636,7 @@ pub fn run_status(
             }
         }
         print_header(out, "== where these come from")?;
-        for line in lay_out_rows(&describe_places(options, ground)) {
+        for line in lay_out_rows(&describe_places(ground)) {
             print_line(out, &line)?;
         }
         let (lookups, warning) = looking.join().unwrap_or_default();
@@ -1861,14 +1883,11 @@ fn time_the_control(
     control: usize,
     platform: Platform,
     scratch: &Path,
+    settings: Settings,
 ) -> Result<Option<Value>, String> {
     let mut runner = Runner::new(
         scratch,
-        Settings {
-            warmup: 0,
-            runs: NOISE_RUNS,
-            settle: 0,
-        },
+        settings,
         platform,
         collect_scrub(instances),
         Style::Hidden,
@@ -2480,7 +2499,7 @@ fn describe_own_definitions(ground: &crate::Ground) -> Vec<Vec<Cell>> {
     rows
 }
 
-fn describe_places(options: &Options, ground: &crate::Ground) -> Vec<Vec<Cell>> {
+fn describe_places(ground: &crate::Ground) -> Vec<Vec<Cell>> {
     let said = |what: &str, path: String| vec![cell(what.to_string()), cell(path)];
     let conf = match ground.config_path.is_file() {
         true => show_path(&ground.config_path),
@@ -2490,7 +2509,7 @@ fn describe_places(options: &Options, ground: &crate::Ground) -> Vec<Vec<Cell>> 
     if let Some(dir) = &ground.data_dir {
         rows.push(said("data", show_path(dir)));
     }
-    let results = resolve_out(options, &ground.config);
+    let results = find_settled_results_dir(&ground.config);
     rows.push(said("results", show_path(&results)));
     rows
 }

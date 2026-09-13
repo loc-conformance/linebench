@@ -12,7 +12,7 @@ use linebench::files::read_toml;
 use linebench::insight::INSIGHT_PARTS;
 use linebench::os::capture_with_status;
 
-use crate::help::{find_help_of, get_help, name_every_command};
+use crate::help::{find_flags_of, find_help_of, get_help, name_every_command};
 
 pub const TOOL: &str = "linebench";
 pub const CONFIG_FILE: &str = "linebench.conf";
@@ -27,8 +27,8 @@ const THE_DATA_DIR: &str = "the data directory";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
 pub const DRY_RUN_DIR: &str = "linebench-dry-run";
-pub const COMMANDS: [&str; 9] = [
-    "run", "fetch", "check", "noise", "insights", "report", "status", "verify", "version",
+pub const COMMANDS: [&str; 8] = [
+    "run", "fetch", "check", "noise", "insights", "report", "status", "verify",
 ];
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,12 +152,16 @@ pub struct Locations {
 
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut options = Options::default();
+    let mut typed: Vec<String> = Vec::new();
     let mut rest = args.iter().skip(1);
     while let Some(arg) = rest.next() {
         let (flag, attached) = match arg.split_once('=') {
             Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
             _ => (arg.as_str(), None),
         };
+        if flag.starts_with('-') && !typed.iter().any(|held| held == flag) {
+            typed.push(flag.to_string());
+        }
         let mut value = || -> Result<String, String> {
             match &attached {
                 Some(text) if !text.is_empty() => Ok(text.clone()),
@@ -170,7 +174,6 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         };
         match flag {
             "run" | "fetch" | "check" | "noise" | "insights" | "report" | "status" | "verify"
-            | "version"
                 if options.command.is_none() =>
             {
                 options.command = Some(match flag {
@@ -181,8 +184,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     "insights" => Command::Insights,
                     "report" => Command::Report,
                     "status" => Command::Status,
-                    "verify" => Command::Verify,
-                    _ => Command::Version,
+                    _ => Command::Verify,
                 });
             }
             #[cfg(feature = "maintenance")]
@@ -289,27 +291,15 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     if options.help.is_some() {
         return Ok(options);
     }
-    read_corpus_as_the_target(&mut options)?;
-    Ok(options)
-}
-
-fn read_corpus_as_the_target(options: &mut Options) -> Result<(), String> {
-    if options.command == Some(Command::Fetch) {
-        return Ok(());
-    }
-    let Some(named) = options.corpus.take() else {
-        return Ok(());
-    };
-    let named = named.join(",");
-    match &options.target {
-        Some(typed) if *typed != named => Err(format!(
-            "name what to count once: {typed} was typed and --corpus names {named}"
-        )),
-        _ => {
-            options.target = Some(named);
-            Ok(())
+    // Held back to here rather than refused where each flag is read, since a flag can be typed
+    // before its command and the command is what says which flags are its own.
+    if let Some(command) = options.command {
+        let taken = find_flags_of(command.as_str());
+        if let Some(stray) = typed.iter().find(|flag| !taken.contains(flag)) {
+            return Err(explain_the_unknown_argument(stray, options.command));
         }
     }
+    Ok(options)
 }
 
 pub fn find_config() -> PathBuf {
@@ -366,9 +356,18 @@ pub fn resolve_out(options: &Options, config: &Config) -> PathBuf {
 /// that are already there are read from: a dry run writes somewhere else but still reads these,
 /// so what it says about earlier runs is what the real run would say.
 pub fn find_results_dir(options: &Options, config: &Config) -> PathBuf {
-    let out = options
-        .out
-        .clone()
+    find_out_dir(options.out.clone(), config)
+}
+
+/// Where the results of this machine are, with nothing said on the command line: what status
+/// reports, since status writes nothing and a flag naming somewhere else would be reporting a
+/// place no run of this machine ever used.
+pub fn find_settled_results_dir(config: &Config) -> PathBuf {
+    find_out_dir(None, config)
+}
+
+fn find_out_dir(named: Option<PathBuf>, config: &Config) -> PathBuf {
+    let out = named
         .or_else(|| read_env(OUT_ENV).map(PathBuf::from))
         .or_else(|| config.out.clone())
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT));
@@ -1097,26 +1096,13 @@ mod tests {
         assert!(!parse("fetch").unwrap().latest);
         assert_eq!(parse("run linux").unwrap().target.as_deref(), Some("linux"));
         assert_eq!(
-            parse("check --corpus linux").unwrap().target.as_deref(),
-            Some("linux")
-        );
-        assert_eq!(
             parse("fetch --corpus linux,linebench").unwrap().corpus,
             Some(vec!["linux".to_string(), "linebench".to_string()])
         );
-        assert_eq!(
-            parse("check linux --corpus linux")
-                .unwrap()
-                .target
-                .as_deref(),
-            Some("linux")
-        );
-        assert_eq!(
-            parse("check --corpus linux,linebench")
-                .unwrap()
-                .target
-                .as_deref(),
-            Some("linux,linebench")
+        let elsewhere = parse("check --corpus linux").unwrap_err();
+        assert!(
+            elsewhere.starts_with("--corpus is not a flag of this command"),
+            "{elsewhere}"
         );
         for line in [
             "run linux,cpython",
@@ -1237,15 +1223,14 @@ mod tests {
         let one = parse("fetch --help").unwrap().help.unwrap();
         assert!(one.starts_with("linebench fetch ["), "{one}");
         assert!(!one.contains("linebench check "), "{one}");
-        assert!(!one.contains("A flag beats"), "{one}");
         let short = parse("check -h").unwrap().help.unwrap();
         assert!(short.starts_with("linebench check "), "{short}");
         let whole = parse("--help").unwrap().help.unwrap();
         assert!(whole.contains("linebench check "), "{whole}");
-        assert!(whole.contains("A flag beats"), "{whole}");
-        let asked = parse("check --corpus linux,linebench --help").unwrap();
+        assert!(whole.contains("Everywhere:"), "{whole}");
+        let asked = parse("check linux,linebench --help").unwrap();
         assert!(asked.help.is_some());
-        assert_eq!(asked.target, None);
+        assert_eq!(asked.target.as_deref(), Some("linux,linebench"));
     }
 
     #[test]
@@ -1598,7 +1583,7 @@ mod tests {
             resolve_locations(&parse(line).unwrap(), &config, conf, &corpora, data).unwrap_err()
         };
         assert_eq!(names("run linux,jdk"), ["linux", "jdk"]);
-        assert_eq!(names("check --corpus jdk, linux"), ["jdk", "linux"]);
+        assert_eq!(names("check jdk,linux"), ["jdk", "linux"]);
         assert_eq!(refused("run linux,linux"), "linux is named twice");
         let stray = refused("run linux,D:/tree");
         assert!(
@@ -1675,6 +1660,35 @@ mod tests {
             refused,
             "--only takes any of floor, memory, syscalls, and noise is none of them"
         );
+        let elsewhere = parse("run linux --only floor").unwrap_err();
+        assert!(
+            elsewhere.starts_with("--only is not a flag of this command"),
+            "{elsewhere}"
+        );
+        assert!(parse("--only floor insights linux").is_ok());
+    }
+
+    #[test]
+    fn a_flag_of_another_command_is_refused_wherever_it_is_typed() {
+        for line in [
+            "status --warmup 5",
+            "report --counters mezura",
+            "noise linux --out /tmp/x",
+            "--out /tmp/x noise linux",
+            "check linux --corpus linux",
+        ] {
+            let refused = parse(line).unwrap_err();
+            assert!(refused.contains("is not a flag of this command"), "{line}");
+        }
+        for line in [
+            "status --dry-run",
+            "verify /tmp/run --dry-run",
+            "noise linux --runs 9",
+            "insights linux --only floor",
+            "run linux --expect-identical a=b",
+        ] {
+            assert!(parse(line).is_ok(), "{line}: {:?}", parse(line));
+        }
     }
 
     fn parse(line: &str) -> Result<Options, String> {

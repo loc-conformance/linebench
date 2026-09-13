@@ -198,7 +198,8 @@ linebench noise linux
 
 Answers "is this machine steady enough to benchmark right now". It samples the system-wide cpu for
 seven seconds with nothing of ours running, then runs the control five times, the first one cold
-on purpose: about fifteen seconds with mezura on the kernel, minutes with cloc.
+on purpose: about fifteen seconds with mezura on the kernel, minutes with cloc. `--runs` changes
+how many.
 
 ![what noise prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/noise.png)
 
@@ -355,6 +356,7 @@ nothing.
 
 ```
 linebench verify results/linux/windows/20260911-014803
+linebench verify results/insights/linux/linux/20260911-021742
 ```
 
 Reads a run back and holds its numbers against each other: every measurement against itself, the
@@ -362,6 +364,12 @@ columns that come off other columns, the counts against their own addition, equa
 and the csv files rebuilt from the record. Where the hyperfine exports were published too, every
 statistic is recomputed from the time of every single execution. The path is a run directory, or
 the `run.json` inside it.
+
+An insights session is read the same way. Name its directory, or the `insights.json` inside it, and
+the floor is held against itself and against its exports, every memory curve against the peak the
+system reported apart from the samples, every traced instance against the calls it listed, and every
+number against the instances the session says it measured. A part `--only` left out and measured
+all the same does not hold either.
 
 ![what verify prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/verify.png)
 
@@ -566,7 +574,9 @@ same session to read, and hyperfine's own output for the floor phase.
 
 ## Settings
 
-A flag beats an environment variable, which beats `linebench.conf` in the data directory.
+A flag beats an environment variable, which beats `linebench.conf` in the data directory. Every
+flag belongs to the commands whose help names it, and a command refuses one that is not its own.
+`--dry-run`, `--help` and `--version` go with anything.
 
 | what | flag | environment | in the conf | default |
 |---|---|---|---|---|
