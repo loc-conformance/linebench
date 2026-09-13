@@ -121,7 +121,8 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
         String::new(),
         "Written by `linebench report` after every run, and rewritten whole each time. One \
          section per \
-         machine, and under it the newest run over each corpus. Older runs are listed in the \
+         machine, and under it the newest run over each corpus, biggest corpus first. Older runs \
+         are listed in the \
          \"Every run\" table further down. A run holding a build or arguments of your own is kept \
          apart, under its own headings. What every term means and how this was measured: the last \
          two sections."
@@ -491,6 +492,11 @@ struct SetAside<'a> {
 
 type ReadContext = fn(&Record) -> String;
 
+// The corpora of a machine are read biggest first.
+fn count_files(record: &Record) -> u64 {
+    record.corpus.files.unwrap_or_default()
+}
+
 /// The newest run per machine and corpus in full, the rest in one table under them.
 fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut bool) -> Vec<String> {
     let mut runs: Vec<&FoundRun> = found.iter().filter(|entry| family.has(entry)).collect();
@@ -528,6 +534,7 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
         newest_of[&other]
             .cmp(&newest_of[&one])
             .then(one.cmp(&other))
+            .then(count_files(&b.record).cmp(&count_files(&a.record)))
             .then(b.record.stamp.cmp(&a.record.stamp))
     });
     let mut lines = Vec::new();
@@ -2015,6 +2022,36 @@ mod tests {
         assert_eq!(counted("## Native Linux, a cpu"), 1, "{page}");
         assert_eq!(counted("### linux corpus"), 2, "{page}");
         assert_eq!(counted("### jdk corpus"), 1, "{page}");
+    }
+
+    #[test]
+    fn the_corpora_of_a_machine_are_written_out_biggest_first_whatever_order_they_ran_in() {
+        let named = |stamp: &str, corpus: &str, files: Option<u64>| {
+            let mut record = build_record(stamp, &[("mezura", 0.32)], "nvme0");
+            record.corpus.name = corpus.to_string();
+            record.corpus.files = files;
+            record
+        };
+        let found: Vec<FoundRun> = [
+            named("20260903-100000", "linux", Some(80_000)),
+            named("20260903-110000", "cpython", Some(3_000)),
+            named("20260903-120000", "jdk", Some(30_000)),
+            named("20260903-130000", "older", None),
+        ]
+        .into_iter()
+        .map(|record| FoundRun {
+            relative: format!("{}/{}", record.corpus.name, record.stamp),
+            record,
+        })
+        .collect();
+        let page = build_results_page(&found).join("\n");
+        let order: Vec<&str> = page
+            .lines()
+            .filter_map(|line| line.strip_prefix("### "))
+            .filter_map(|line| line.split_once(" corpus, "))
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(order, ["linux", "jdk", "cpython", "older"], "{page}");
     }
 
     #[test]
