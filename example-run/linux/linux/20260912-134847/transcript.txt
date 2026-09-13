@@ -1,0 +1,131 @@
+
+== phase 0: machine state
+   background: 0% busy
+   arch: x86_64
+   corpus_device: Lexar SSD NQ790 2TB, 16.0 GT/s PCIe x4
+   corpus_fs: ext4 /dev/nvme1n1p3
+   cpu: AMD Ryzen 7 9700X 8-Core Processor
+   cpu_scaling: performance
+   global_gitignore: none
+   hyperfine: hyperfine 1.19.0
+   kernel: 6.12.107+deb13-amd64
+   linebench: 0.1.0
+   logical_cores: 16
+   os: Debian GNU/Linux 13 (trixie)
+   platform: linux
+   ram_bytes: 64950505472
+   mezura: v3.1.1 (2026-09-11) (fetched, mezura-v3.1.1-linux-x86_64.tar.gz)
+   scc: scc version 4.1.0 (fetched, scc_Linux_x86_64.tar.gz)
+   tokei: tokei 15.0.0 compiled with serialization support: json (built with rustc 1.97.1 (8bab26f4f 2026-07-14))
+
+== JSON captures (also the settling runs)
+
+== opening control run
+>> control-start
+   Benchmark 1: mezura
+     Time (mean ± σ):     192.5 ms ±   6.2 ms    [User: 2255.5 ms, System: 395.8 ms]
+     Range (min … max):   181.8 ms … 206.1 ms    15 runs
+
+== Same work
+>> t1-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):     164.1 ms ±   9.7 ms    [User: 1813.8 ms, System: 372.9 ms]
+     Range (min … max):   151.5 ms … 194.8 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     210.4 ms ±   4.0 ms    [User: 2791.6 ms, System: 370.8 ms]
+     Range (min … max):   205.3 ms … 220.2 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):     414.1 ms ±   2.2 ms    [User: 5596.9 ms, System: 591.3 ms]
+     Range (min … max):   409.0 ms … 417.8 ms    15 runs
+
+   Summary
+     mezura ran
+       1.28 ± 0.08 times faster than scc
+       2.52 ± 0.15 times faster than tokei
+
+>> t1-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):     414.8 ms ±   2.6 ms    [User: 5590.4 ms, System: 609.6 ms]
+     Range (min … max):   409.6 ms … 420.5 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     209.9 ms ±   2.4 ms    [User: 2776.0 ms, System: 367.2 ms]
+     Range (min … max):   206.0 ms … 213.9 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):     168.1 ms ±  13.2 ms    [User: 1811.3 ms, System: 377.7 ms]
+     Range (min … max):   154.7 ms … 197.9 ms    15 runs
+
+   Summary
+     mezura ran
+       1.25 ± 0.10 times faster than scc
+       2.47 ± 0.19 times faster than tokei
+
+== Out of the box
+>> t2-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):     197.5 ms ±  15.9 ms    [User: 2276.9 ms, System: 387.4 ms]
+     Range (min … max):   183.4 ms … 250.2 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     320.8 ms ±   3.8 ms    [User: 4478.8 ms, System: 438.6 ms]
+     Range (min … max):   316.9 ms … 328.9 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):     466.8 ms ±   3.5 ms    [User: 6294.5 ms, System: 714.2 ms]
+     Range (min … max):   458.7 ms … 471.8 ms    15 runs
+
+   Summary
+     mezura ran
+       1.62 ± 0.13 times faster than scc
+       2.36 ± 0.19 times faster than tokei
+WARNING: hyperfine on t2-fwd: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+>> t2-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):     467.5 ms ±   1.8 ms    [User: 6286.2 ms, System: 749.3 ms]
+     Range (min … max):   464.2 ms … 470.4 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     321.9 ms ±   3.6 ms    [User: 4442.3 ms, System: 457.4 ms]
+     Range (min … max):   315.5 ms … 329.5 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):     196.5 ms ±   6.0 ms    [User: 2269.9 ms, System: 399.8 ms]
+     Range (min … max):   185.7 ms … 207.6 ms    15 runs
+
+   Summary
+     mezura ran
+       1.64 ± 0.05 times faster than scc
+       2.38 ± 0.07 times faster than tokei
+
+== closing control run
+>> control-end
+   Benchmark 1: mezura
+     Time (mean ± σ):     194.2 ms ±   5.6 ms    [User: 2282.1 ms, System: 387.9 ms]
+     Range (min … max):   187.0 ms … 204.5 ms    15 runs
+
+== summary
+   drift         1.0088
+
+   Same work
+   instance  wall         vs fastest    user cpu  system cpu  parallelism  files   lines
+   mezura    166 ms ± 12  1.00x         1.81 s    0.38 s      13.17        63,738  36,018,801
+   scc       210 ms ± 3   1.26x ± 0.09  2.78 s    0.37 s      15.00        63,738  36,018,801
+   tokei     414 ms ± 2   2.50x ± 0.18  5.59 s    0.60 s      14.94        63,793  36,027,518
+
+   Out of the box
+   instance  wall         vs fastest    user cpu  system cpu  parallelism  files   lines
+   mezura    197 ms ± 12  1.00x         2.27 s    0.39 s      13.54        66,539  35,816,820
+   scc       321 ms ± 4   1.63x ± 0.10  4.46 s    0.45 s      15.27        83,784  39,993,947
+   tokei     467 ms ± 3   2.37x ± 0.15  6.29 s    0.73 s      15.03        83,843  39,992,832
+
+   equal work    within 1.0% of the corpus
+
+   since: no earlier run on this machine over this corpus shares an instance with this one
+
+WARNING: Statistical outliers were detected, on t2-fwd
+
+done. everything is in /home/petros/Documents/dev/Rusty/linebench/results/linux/linux/20260912-134847

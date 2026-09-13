@@ -1,0 +1,143 @@
+
+== phase 0: machine state
+   background: 0% busy
+   arch: x86_64
+   corpus_device: Lexar SSD NQ790 2TB, 16.0 GT/s PCIe x4
+   corpus_fs: ext4 /dev/nvme1n1p3
+   cpu: AMD Ryzen 7 9700X 8-Core Processor
+   cpu_scaling: performance
+   global_gitignore: none
+   hyperfine: hyperfine 1.19.0
+   kernel: 6.12.107+deb13-amd64
+   linebench: 0.1.0
+   logical_cores: 16
+   os: Debian GNU/Linux 13 (trixie)
+   platform: linux
+   ram_bytes: 64950505472
+   mezura: v3.1.1 (2026-09-11) (fetched, mezura-v3.1.1-linux-x86_64.tar.gz)
+   scc: scc version 4.1.0 (fetched, scc_Linux_x86_64.tar.gz)
+   tokei: tokei 15.0.0 compiled with serialization support: json (built with rustc 1.97.1 (8bab26f4f 2026-07-14))
+
+== JSON captures (also the settling runs)
+
+== opening control run
+>> control-start
+   Benchmark 1: mezura
+     Time (mean ± σ):      93.7 ms ±   0.9 ms    [User: 1089.4 ms, System: 306.1 ms]
+     Range (min … max):    92.8 ms …  95.6 ms    15 runs
+
+== Same work
+>> t1-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):      80.4 ms ±   2.7 ms    [User: 890.0 ms, System: 291.5 ms]
+     Range (min … max):    78.7 ms …  89.7 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     114.9 ms ±  10.7 ms    [User: 1352.3 ms, System: 323.2 ms]
+     Range (min … max):   110.2 ms … 152.1 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):     304.4 ms ±   4.7 ms    [User: 4048.3 ms, System: 438.8 ms]
+     Range (min … max):   297.4 ms … 316.0 ms    15 runs
+
+   Summary
+     mezura ran
+       1.43 ± 0.14 times faster than scc
+       3.78 ± 0.14 times faster than tokei
+WARNING: hyperfine on t1-fwd: The first benchmarking run for this command was significantly slower than the rest (89.7 ms). This could be caused by (filesystem) caches that were not filled until after the first run. You are already using the '--warmup' option which helps to fill these caches before the actual benchmark. You can either try to increase the warmup count further or re-run this benchmark on a quiet system in case it was a random outlier. Alternatively, consider using the '--prepare' option to clear the caches before each timing run.
+WARNING: hyperfine on t1-fwd: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+>> t1-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):     304.6 ms ±   2.9 ms    [User: 4067.5 ms, System: 426.1 ms]
+     Range (min … max):   299.4 ms … 309.2 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     113.8 ms ±   7.4 ms    [User: 1359.2 ms, System: 326.8 ms]
+     Range (min … max):   110.6 ms … 140.0 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):      82.6 ms ±   4.6 ms    [User: 878.9 ms, System: 301.2 ms]
+     Range (min … max):    79.6 ms …  95.0 ms    15 runs
+
+   Summary
+     mezura ran
+       1.38 ± 0.12 times faster than scc
+       3.69 ± 0.21 times faster than tokei
+WARNING: hyperfine on t1-rev: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+WARNING: hyperfine on t1-rev: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+== Out of the box
+>> t2-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):      95.4 ms ±   3.3 ms    [User: 1096.7 ms, System: 298.5 ms]
+     Range (min … max):    91.7 ms … 105.9 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     185.6 ms ±  12.7 ms    [User: 2369.7 ms, System: 366.4 ms]
+     Range (min … max):   179.3 ms … 221.3 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):     371.7 ms ±   2.4 ms    [User: 5137.8 ms, System: 421.7 ms]
+     Range (min … max):   367.1 ms … 376.5 ms    15 runs
+
+   Summary
+     mezura ran
+       1.95 ± 0.15 times faster than scc
+       3.90 ± 0.14 times faster than tokei
+WARNING: hyperfine on t2-fwd: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+>> t2-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):     371.6 ms ±   3.3 ms    [User: 5148.6 ms, System: 414.3 ms]
+     Range (min … max):   367.0 ms … 378.7 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     181.8 ms ±   3.7 ms    [User: 2375.1 ms, System: 359.2 ms]
+     Range (min … max):   178.4 ms … 192.5 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):      97.5 ms ±   9.2 ms    [User: 1101.7 ms, System: 294.6 ms]
+     Range (min … max):    93.8 ms … 130.4 ms    15 runs
+
+   Summary
+     mezura ran
+       1.86 ± 0.18 times faster than scc
+       3.81 ± 0.36 times faster than tokei
+WARNING: hyperfine on t2-rev: The first benchmarking run for this command was significantly slower than the rest (130.4 ms). This could be caused by (filesystem) caches that were not filled until after the first run. You are already using the '--warmup' option which helps to fill these caches before the actual benchmark. You can either try to increase the warmup count further or re-run this benchmark on a quiet system in case it was a random outlier. Alternatively, consider using the '--prepare' option to clear the caches before each timing run.
+
+== closing control run
+>> control-end
+   Benchmark 1: mezura
+     Time (mean ± σ):      95.6 ms ±   3.9 ms    [User: 1104.5 ms, System: 291.4 ms]
+     Range (min … max):    92.5 ms … 109.0 ms    15 runs
+WARNING: hyperfine on control-end: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+== summary
+   drift         1.0199
+
+   Same work
+   instance  wall         vs fastest    user cpu  system cpu  parallelism  files   lines
+   mezura    82 ms ± 4    1.00x         0.88 s    0.30 s      14.48        61,425  13,226,930
+   scc       114 ms ± 9   1.40x ± 0.13  1.36 s    0.32 s      14.70        61,420  13,226,395
+   tokei     304 ms ± 4   3.73x ± 0.19  4.06 s    0.43 s      14.75        61,421  13,226,397
+
+   Out of the box
+   instance  wall         vs fastest    user cpu  system cpu  parallelism  files   lines
+   mezura    96 ms ± 7    1.00x         1.10 s    0.30 s      14.47        61,950  13,740,143
+   scc       184 ms ± 10  1.90x ± 0.17  2.37 s    0.36 s      14.89        66,301  15,818,623
+   tokei     372 ms ± 3   3.85x ± 0.28  5.14 s    0.42 s      14.96        65,042  15,688,680
+
+   equal work    within 1.0% of the corpus
+
+   since: no earlier run on this machine over this corpus shares an instance with this one
+
+WARNING: The first benchmarking run for this command was significantly slower than the rest (89.7 ms), on t1-fwd
+WARNING: Statistical outliers were detected, on t1-fwd
+WARNING: Statistical outliers were detected, on t1-rev
+WARNING: Statistical outliers were detected, on t1-rev
+WARNING: Statistical outliers were detected, on t2-fwd
+WARNING: The first benchmarking run for this command was significantly slower than the rest (130.4 ms), on t2-rev
+WARNING: Statistical outliers were detected, on control-end
+
+done. everything is in /home/petros/Documents/dev/Rusty/linebench/results/jdk/linux/20260912-134711
