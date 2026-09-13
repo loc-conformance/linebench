@@ -155,16 +155,16 @@ linebench report [--out <dir>] [--verify]
     --verify                   build the page and say whether the one on disk is that page,
                                writing nothing
 
-linebench verify <run|session>
+linebench verify <a run directory|an insights directory>
 
     Reads a run back and holds its numbers against each other: every measurement against itself,
     the columns that come off other columns, the counts against their own addition, equal work
     re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were kept
     too, every statistic is recomputed from the time of every single execution.
 
-    An insights session is read the same way. The floor against itself and against its exports,
-    every curve against the peak the system reported, every traced instance against the calls it
-    listed, and every number against the instances the session measured.
+    What one insights command wrote is read the same way. The floor against itself and against its
+    exports, every curve against the peak the system reported, every traced instance against the
+    calls it listed, and every number against the instances that were measured.
 
     Name the directory, or the run.json or insights.json inside it. A folder holding many of them
     is not one, and the refusal says to name a directory further in.

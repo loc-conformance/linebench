@@ -696,7 +696,7 @@ pub fn compare_lines(built: &[String], found: &str) -> Vec<String> {
         if built.as_str() != *found {
             let (built, found) = describe_difference(built, found);
             broken.push(format!(
-                "line {}: the record builds {built}, the file carries {found}",
+                "line {}: the record builds \"{built}\", the file carries \"{found}\"",
                 at + 1
             ));
         }

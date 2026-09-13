@@ -365,7 +365,8 @@ and the csv files rebuilt from the record. Where the hyperfine exports were publ
 statistic is recomputed from the time of every single execution. The path is a run directory, or
 the `run.json` inside it.
 
-An insights session is read the same way. Name its directory, or the `insights.json` inside it, and
+What one `insights` command wrote is read the same way. Name its directory, or the `insights.json`
+inside it, and
 the floor is held against itself and against its exports, every memory curve against the peak the
 system reported apart from the samples, every traced instance against the calls it listed, and every
 number against the instances the session says it measured. A part `--only` left out and measured
@@ -547,9 +548,13 @@ one fetch wrote is refused, with the two ways out, fetch again or measure it as 
 ## Where results go
 
 We don't claim to keep any official benchmarks in this repo itself. We keep one example run under
-<example_run> but the variability of each machine and environment is too great.  
-You can also see the results that each counter publishes for itself in their own repo, if they use
-linebench, to see how to results change between machines and environments.
+[example-run/](example-run/README.md), but the variability of each machine and environment is too
+great for it to say anything about yours. It is one machine on one day: the three shipped corpora,
+a local run comparing a build of mezura against the release, and an insights session, with the page
+those records build.
+
+You can also see the results that each counter publishes for itself in its own repo, if it uses
+linebench, to see how results change between machines and environments.
 
 ```
 results/
@@ -605,9 +610,11 @@ linux = "D:/corpora/linux"
 attention, since a counter has to be asked for by name before it is downloaded at all. A corpus
 definition carries a `[skip]` of its own, per system, for a counter too slow over that one tree.
 
-`--dry-run` can be used with any command and leaves nothing behind. Everything that would be written goes
-to a directory in the temp folder, which is cleaned up when the command finishes. No release is
-looked up and nothing is downloaded: a fetch only names what it would have taken. On the `run` command, the machine is is prepared as normal so that the results are accurate.
+`--dry-run` goes with any command and leaves nothing behind. What the command would write, the
+record, the page, the notes, the transcript, the hyperfine exports and any build staged by
+`--given`, goes to the temp folder and is deleted at the end. No release is looked up and nothing
+is downloaded, so a fetch only names what it would have taken. The machine is prepared as always,
+so a dry run takes as long as the real one.
 
 With nothing set at all, every command but `report` refuses and prints the recipe.
 

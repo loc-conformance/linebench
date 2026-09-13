@@ -39,7 +39,7 @@ use crate::help::{find_help_of, get_help, paint_help};
 use crate::output::{Color, Output, enable_colors, paint, print_line};
 use crate::shipped::collect_definitions;
 
-const NAME_THE_RUN: &str = "name the run or the insights session to read";
+const NAME_THE_RUN: &str = "name the directory of a run or of an insights command to read";
 
 fn main() {
     enable_colors();
