@@ -14,9 +14,8 @@ machine moved while it measured.
 | counter b | 420 ms ± 24 | 1.56x ± 0.14 | 2.90 s | 2.60 s | 13.10 | 85.7M | 63,700 | 36,000,000 |
 | counter c | 564 ms ± 28 | 2.09x ± 0.19 | 3.30 s | 4.47 s | 13.78 | 63.8M | 63,700 | 36,000,000 |
 
-The shape of the answer over a tree the size of the Linux kernel, with the names left out and the
-numbers rounded: no run of ours is published here, and the ones worth reading are the ones each
-counter publishes in its own repository.
+The shape of the answer over a tree the size of the Linux kernel, names left out and numbers
+rounded. The runs worth reading are the ones each counter publishes in its own repository.
 
 The counters are data, one `counters/<name>.toml` each, and linebench never builds one: it
 fetches the release, hashes it, and writes the hash into the record. Today it knows cloc,
@@ -57,7 +56,7 @@ Or take the archive for your system from the
 [releases](https://github.com/loc-conformance/linebench/releases) page.   
 Every counter and corpus definition is built into the binary.
 
-On PATH it wants git, [hyperfine](https://github.com/sharkdp/hyperfine), curl or wget, and tar.
+It needs git, [hyperfine](https://github.com/sharkdp/hyperfine), curl or wget, and tar on PATH.
 The last two come with every Unix, and Windows 10 and 11 carry both. cargo is needed only for a
 counter that publishes no binaries and has to be built (tokei), and perl for one that ships as a
 script (cloc on Linux and macOS).
@@ -83,12 +82,13 @@ linebench noise cpython
 sudo linebench run cpython
 ```
 
-The first line downloads the four counters and clones one of the provided corpuses at its pinned commit.  
+The first line downloads the four counters and clones one of the shipped corpora at its pinned
+commit.  
 The second says what arrived and where.  
-The third proves the machine can measure: every counter
-runs once, its counts are read back and held against the corpus.   
-The fourth checks the noise of the 
-system and tells you about the cpu usage, spread of a run and whether it is suitable to run a benchmark.  
+The third proves the machine can measure: every counter runs once and its counts are checked
+against the corpus.  
+The fourth measures the noise: the background cpu, the spread of a few runs, and whether the
+machine is steady enough to benchmark.  
 The fifth measures, elevated so the power scheme can be set for it.
 
 linebench keeps a directory of its own on every machine, made on first use: `%APPDATA%\linebench`
@@ -96,10 +96,10 @@ on Windows, `~/Library/Application Support/linebench` on macOS, `~/.local/share/
 Linux.  
 By default, the binaries land in `counters/` under it, the checkouts in `corpora/<name>`,
 `linebench.conf` sits beside them, copied from `linebench.conf.example`, and results go to
-`results/` in the directory you run from. Every one of those places can be moved, with a flag, a
-variable in the environment or a line in the conf; [Settings](#settings) is the table.
+`results/` in the directory you run from. Each of those can be moved with a flag, an environment
+variable or a line in the conf; [Settings](#settings) has the table.
 
-Corpora take room: 190 MB for cpython, 990 MB for the jdk and 2.0 GB for the kernel, all three
+Corpora take space: 190 MB for cpython, 990 MB for the jdk and 2.0 GB for the kernel, all three
 shallow clones.
 
 Keep the corpus and the counters on a local disk. Measuring across `/mnt` from WSL, or over a
@@ -117,26 +117,26 @@ linebench fetch --counters tokei
 linebench fetch --corpus all --corpus-path /data/corpora
 ```
 
-Brings the binaries and the checkouts down to this machine. Each counter comes at the version its
-definition declares, each corpus at the commit its definition pins. Naming neither refuses and
-prints what there is to take. What arrived, and its sha256, goes into `linebench-fetched.toml`
-beside the binaries; a second `fetch` answers "already here" for what matches.
+Downloads the counter binaries and clones the corpora. Each counter comes at the version its
+definition declares, each corpus at the commit its definition pins. With neither named it refuses
+and lists what there is. What arrived, and its sha256, goes into `linebench-fetched.toml` beside
+the binaries; a second `fetch` answers "already here" for what matches.
 
-It runs from an ordinary terminal and refuses an elevated one, so the files it writes belong to
-you. Where there is no ordinary user, as on a CI runner, `--allow-elevated` lifts that refusal.
+On Linux and macOS it refuses to run as root, so the files it writes belong to you. An elevated
+Windows terminal is the same user with the same `%APPDATA%`, so there it runs. Where there is no
+ordinary user, as on a CI runner, `--allow-elevated` lifts the refusal.
 
 `fetch` asks the GitHub API which files a release holds, and anonymous calls are limited per
 address, a limit shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it; the
-token goes to that one call and never to a download.
+token goes to that one call, and downloads are made without it.
 
 ```
 linebench fetch --counters all --latest
 ```
 
-`--latest` takes the newest release of each counter in place of the version the definition pins,
-and records that pin in the manifest. From then on that version is the one in effect on this
-machine, until the definition catches up with it or passes it, when every command says the pin is
-set aside. A plain `fetch` keeps the pin. To drop it, remove the counter's entry from
+`--latest` takes the newest release of each counter and pins that version in the manifest. The pin
+holds on this machine until the definition reaches or passes it, when every command says the pin
+is set aside. A plain `fetch` keeps the pin. To drop it, remove the counter's entry from
 `linebench-fetched.toml` and fetch again.
 
 ### status
@@ -167,8 +167,7 @@ linebench check all
 ```
 
 Answers "is this machine ready to measure". Every instance runs once per table against the real
-corpus, the counts are read back and held against the corpus, and hyperfine and git are proven to
-work:
+corpus, the counts are read back and held against the corpus, and hyperfine and git are tried:
 
 ![what check prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/check.png)
 
@@ -177,12 +176,12 @@ commit, `files = 3556` above, so "who is off" has an answer with one instance as
 Lines have no such reference and are compared between instances. The tolerance belongs to the
 corpus, `tolerance = "1%"`, since how many odd files a tree holds is a property of the tree.
 A count of zero fails, and so does one outside the tolerance: the definition names a language the
-tree does not have, or selects less than the others. This is what catches a definition that turns
-off too little: cloc on Linux matches an extension by its exact case, so `--include-ext=s` skipped
-the 1,350 `.S` files of the kernel and came out 2.2% under the corpus.
+tree does not have, or selects fewer files than the others. This is what catches a definition that
+turns off too little: cloc on Linux matches an extension by its exact case, so `--include-ext=s`
+skipped the 1,350 `.S` files of the kernel and came out 2.2% under the corpus.
 
 The `releases` lines say whether the version each definition pins is still the newest published,
-one lookup per counter on the channel it fetches from. Answers are kept six hours beside the
+one lookup per counter on the channel it fetches from. Answers are cached six hours beside the
 binaries. A lookup that fails prints why, in yellow, and the check passes all the same. Nothing is
 fetched here. Over a list of corpora the block is printed once, after the last of them, and covers
 every counter any corpus ran, since the answer does not change from one corpus to the next.
@@ -231,10 +230,10 @@ is [Where results go](#where-results-go).
 On Windows open the terminal with "Run as administrator"; elsewhere use `sudo`. Elevated, it sets
 the cpu governor to `performance` (Linux) or the power scheme to High performance (Windows) and
 puts it back when the run ends, whether it finishes, fails or is interrupted with Ctrl-C. Before
-it changes anything it prints the command that puts it back by hand, which is what a run that is
-killed outright leaves you with. Unelevated it prints what it would have changed and asks before
-doing any work: `--yes` answers that question, `--no-prep` skips the whole thing even when
-elevated, and with no terminal attached it carries on.
+it changes anything it prints the command that puts it back by hand, for a run that gets killed
+outright. Unelevated it prints what it would have changed and asks before doing any work: `--yes`
+answers that question, `--no-prep` skips the whole thing even when elevated, and with no terminal
+attached it carries on.
 
 `--runs`, `--warmup` and `--settle` are hyperfine's, per command. `--against <stamp>` adds a
 second comparison block read against that one run. `--keep-raw` holds on to each counter's JSON
@@ -252,14 +251,13 @@ An instance is a definition, a binary and a name in the table. By default every 
 is one instance, named after itself, and so is every `[given]` entry in the conf. `--counters`
 picks a subset and fixes the order.
 
-The control is the instance timed alone at the start and at the end, whose shift is read as the
-machine's own movement, and the workload `noise` times. `control = "mezura"` in the conf names it
-for every run on the machine, `--control` for one run, and with neither it is the first instance
-named, which with no `--counters` is the first definition alphabetically that the corpus does not
-leave out, today mezura, since every shipped corpus skips cloc. Keep the control the same across
-the runs you want compared: "since the last run"
-reads every change against the control's own shift, and that shift is known only when an earlier
-run timed the same control build.
+The control is the instance timed alone at the start and at the end. Its shift is read as the
+machine's own movement, and it is also what `noise` times. `control = "mezura"` in the conf names
+it for every run on the machine, `--control` for one run, and with neither it is the first
+instance named, which with no `--counters` is the first definition alphabetically that the corpus
+does not skip, today mezura. Keep the control the same across the runs you want compared: "since
+the last run" reads every change against the control's own shift, and that shift is known only
+when an earlier run timed the same control build.
 
 ### insights
 
@@ -267,8 +265,8 @@ run timed the same control build.
 linebench insights linux
 ```
 
-Measurements that each want their own executions over their own target, kept out of a run where
-they would lengthen it and disturb it. What each system can answer:
+Measurements that each need executions of their own, kept out of a run because they would
+lengthen and disturb it. What each system can answer:
 
 | insight | Linux | Windows | macOS |
 |---|---|---|---|
@@ -292,42 +290,30 @@ removed when the command ends.
    ready t1, t2    the same binary over a target with no files, its report printed
 ```
 
-The ready floor holds everything a counter does with nothing to count, its empty report included,
-so a run subtracts nothing from it. The two columns of one row say how much of a floor is the
-runtime it ships on: tokei answers its version in 5.5 of the 11.2 it needs to be ready, cloc in
-141 of its 167, because a Perl interpreter comes up before any of cloc's own code. Down a column
-they say less, since each counter stops answering `--version` at a point of its own. Two instances
-riding one binary give the same version command, so it is timed once and printed on both rows. The
-times are wall clock and the table carries no cpu columns.
+The ready floor is everything a counter does with nothing to count, its empty report included,
+and no run subtracts it. The two columns of one row say how much of a floor is the runtime it
+ships on: tokei answers its version in 5.5 of the 11.2 it needs to be ready, cloc in 141 of its
+167, because a Perl interpreter comes up before any of cloc's own code. Down a column they say
+less, since each counter stops answering `--version` at a point of its own. Two instances sharing
+one binary give the same version command, so it is timed once and printed on both rows. The times
+are wall clock and the table carries no cpu columns.
 
 **The memory** is one execution per instance over the corpus with the t1 flags, outside hyperfine
-and never timed. linebench starts the counter and asks the system every 2 ms what it holds:
+and untimed. linebench starts the counter and asks the system every 2 ms what it holds:
 `GetProcessMemoryInfo` on Windows, `/proc/<pid>/status` on Linux. The peak is exact, from
 `PeakWorkingSetSize` and `VmHWM`, so a peak between two samples survives.
 
-![the memory mezura holds over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/memory_sample.png)
+![the memory each counter holds over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/memory.png)
 
-Every column stands at the highest reading in it. The axis top comes off a ladder, 10, 20, 50,
-100, 200, 500 MB and 1 GB, and a counter takes the first rung its peak fits in, so two counters on
-one rung are drawn against the same ruler and their heights compare directly. Every rung owns a
-colour, blue at 10 MB through amber at 200 to fuchsia at 1 GB, so 200 MB is the same amber in
-every session. The time along the axis carries the polling and starts cold, so it is longer than a
-timed run. A run under three seconds writes every reading it took; a longer one is folded to 120
-values, each the highest of its slice.
+Each panel has an axis top of its own, the first of 10, 20, 50, 100, 200, 500 MB or 1 GB the peak
+fits under, so heights compare directly only between panels with the same top, and the peak
+printed above each one is what to compare. The time axis includes the polling and a cold start, so
+it runs longer than a timed run.
 
-**The system calls** are `strace -c -f` once per instance, grouped into families:
+**The system calls** are `strace -c -f` once per instance, grouped into families, with the calls
+of a family under it and what each one answered with an error:
 
-```
-   family / call      mezura   tokei    scc
-   directories           945     937    966
-   opening             8,244   8,269  8,073
-   metadata            4,231     490  3,557
-   reading             3,740  42,774  7,081
-   memory                866     321     52
-   threads               406     149     73
-   waiting            12,866     804  1,577
-   other                 764     207  2,650
-```
+![the system calls of each counter over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/syscalls.png)
 
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
 needs is missing. `--only floor,memory,syscalls` names which of the three to measure, in any
@@ -360,29 +346,28 @@ linebench verify results/insights/linux/linux/20260911-021742
 ```
 
 Reads a run back and holds its numbers against each other: every measurement against itself, the
-columns that come off other columns, the counts against their own addition, equal work re-judged,
-and the csv files rebuilt from the record. Where the hyperfine exports were published too, every
-statistic is recomputed from the time of every single execution. The path is a run directory, or
-the `run.json` inside it.
+derived columns against the ones they come from, the counts against their sum, equal work
+re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were published
+too, every statistic is recomputed from the time of every single execution. The path is a run
+directory, or the `run.json` inside it.
 
 What one `insights` command wrote is read the same way. Name its directory, or the `insights.json`
-inside it, and
-the floor is held against itself and against its exports, every memory curve against the peak the
-system reported apart from the samples, every traced instance against the calls it listed, and every
-number against the instances the session says it measured. A part `--only` left out and measured
-all the same does not hold either.
+inside it, and the floor is held against itself and against its exports, every memory curve
+against the peak the system reported independently of the samples, every traced instance against
+the calls it listed, and every number against the instances the session says it measured. A part
+`--only` left out and measured all the same fails too.
 
 ![what verify prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/verify.png)
 
-It prints what it could not read. A check that does not hold exits 1, and a file that is absent is
-a gap and does not.
+It prints what it could not read. A check that fails exits 1, and a missing file is reported as a
+gap and does not.
 
 ## Three ways to use it
 
 ### A tree of your own
 
-Any directory at all, together with `--extensions`, which names the file extensions every counter
-is pointed at so that all of them do the same work:
+Any directory, with `--extensions` naming the file extensions every counter is pointed at, so that
+all of them do the same work:
 
 ```
 linebench check /home/me/dev/myproject --extensions rs,toml
@@ -469,9 +454,9 @@ release with those arguments beside the release as it is. Arguments make an inst
 so the name carries a tag.
 
 A run holding any given instance is written under `results/local/` and the page gives such runs
-headings of their own, under the release ones, with the same sections. A `[given]` entry in the conf joins every run that names no
-`--counters`, so for a run meant for the release tables comment it out or name the release
-instances with `--counters`.
+headings of their own, under the release ones, with the same sections. A `[given]` entry in the
+conf joins every run that names no `--counters`, so for a run meant for the release tables comment
+it out or name the release instances with `--counters`.
 
 ## Reading the numbers
 
@@ -483,6 +468,8 @@ with how much each one chose to do.
 Every table is measured twice, once in each command order, and the numbers pool the two; how far
 the orders disagreed is a trust check on the page. The control, the same binary timed at the start
 and the end, gives the drift, and `drift` is the first thing to read.
+
+![what a run over the three corpora prints at the end](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/run.png)
 
 The ± on **vs fastest** is the σ of the ratio, taken from the two walls' σ by the propagation of
 uncertainty for a quotient of independent quantities, σ_r = r · √((σ_a/μ_a)² + (σ_f/μ_f)²), the
@@ -515,7 +502,7 @@ for the sum of a series of changes. The stamp is the run's directory name, as `d
 Same rows and rules, with the machine's shift taken over the same span. A run on another platform,
 over another corpus, on another cpu, commit or disk, or recorded after this one, is named as not
 comparable with the reason, and a run that would be published cannot name a local one. The block
-goes to the terminal and to `notes.md`, never to the page.
+goes to the terminal and to `notes.md`, and stays off the page.
 
 ## Equal work and the machine
 
@@ -529,12 +516,11 @@ work.
 
 **The JSON.** `--expect-identical mezura=mezura@dev` (pairs, comma separated), a flag of `run`,
 checks that two instances of one counter printed the same JSON, in both tables, before any timing
-starts. The
-fields the definition lists as `volatile` (a timestamp, its version, its own timing) are set aside,
-lists of objects are compared regardless of their order, and the first difference is named with
-both values. The verdict is printed, kept in the record and shown on the page, and a run where the
-two differ exits 1 once everything is written: the times still stand, the claim that the work was
-the same does not.
+starts. The fields the definition lists as `volatile` (a timestamp, its version, its own timing)
+are set aside, lists of objects are compared regardless of their order, and the first difference is
+named with both values. The verdict is printed, kept in the record and shown on the page, and a run
+where the two differ exits 1 once everything is written: the times still stand, the claim that the
+work was the same does not.
 
 **The antivirus.** On Windows the record carries the Defender state: real-time protection, and per
 instance whether its process and its binary are excluded. **Unequal exclusions refuse the run**,
@@ -547,14 +533,15 @@ one fetch wrote is refused, with the two ways out, fetch again or measure it as 
 
 ## Where results go
 
-We don't claim to keep any official benchmarks in this repo itself. We keep one example run under
-[example-run/](example-run/README.md), but the variability of each machine and environment is too
-great for it to say anything about yours. It is one machine on one day: the three shipped corpora,
-a local run comparing a build of mezura against the release, and an insights session, with the page
-those records build.
+No official benchmarks live in this repository. There is one example run under
+[example-run/](example-run/README.md), and the variability between machines is too great for it to
+say anything about yours. It is the same machine under two systems, Windows and native Linux: the
+three shipped corpora and an insights session on each, plus a local run putting the mezura release
+that `fetch` downloaded that day against a newer working build of it. Every section speaks for the
+day it was measured and says nothing about where the counters stand today.
 
-You can also see the results that each counter publishes for itself in its own repo, if it uses
-linebench, to see how results change between machines and environments.
+Each counter that uses linebench publishes results of its own in its own repository, which is
+where to see how the numbers move between machines.
 
 ```
 results/
@@ -606,9 +593,9 @@ linux = "D:/corpora/linux"
 ```
 
 `skip` leaves counters out of every default set on this machine, whatever the corpus: `check` and
-`run` leave them out and say so, and naming one in `--counters` runs it. Fetching pays it no
-attention, since a counter has to be asked for by name before it is downloaded at all. A corpus
-definition carries a `[skip]` of its own, per system, for a counter too slow over that one tree.
+`run` leave them out and say so, and naming one in `--counters` runs it. `fetch` ignores it, since
+a counter is downloaded only when asked for by name. A corpus definition carries a `[skip]` of its
+own, per system, for a counter too slow over that one tree.
 
 `--dry-run` goes with any command and leaves nothing behind. What the command would write, the
 record, the page, the notes, the transcript, the hyperfine exports and any build staged by
@@ -616,7 +603,7 @@ record, the page, the notes, the transcript, the hyperfine exports and any build
 is downloaded, so a fetch only names what it would have taken. The machine is prepared as always,
 so a dry run takes as long as the real one.
 
-With nothing set at all, every command but `report` refuses and prints the recipe.
+With no target named, a command that needs one refuses and prints the two forms it takes.
 
 ## Counters and corpora
 

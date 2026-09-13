@@ -3,14 +3,14 @@ use std::path::Path;
 use crate::output::{Color, paint};
 use crate::shipped::{CORPORA, COUNTERS};
 
-const HELP: &str = r#"linebench: measure line counters fairly, with the machine's state as context
+const HELP: &str = r#"linebench: time line counters on equal work, and record the machine's state
 
 linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus-path <dir>]
                 [--latest] [--allow-elevated] [--add <path>]
 
-    Brings down what the other commands need, and measures none of it. A counter arrives at the
-    version its definition declares and a corpus at the commit its definition pins, so a second
-    fetch answers "already here" for what matches and downloads again what does not.
+    Downloads what the other commands need and measures nothing. A counter arrives at the version
+    its definition declares and a corpus at the commit its definition pins, so a second fetch
+    answers "already here" for what matches and downloads again what does not.
 
     Say what to take. The word all takes everything there is.
 
@@ -22,7 +22,7 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
     --counters-dir <dir>       where the binaries go
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
     --latest                   take each counter's latest release and pin it beside the binary
-    --allow-elevated           download as administrator or root, where there is no ordinary user
+    --allow-elevated           download as root, where there is no ordinary user
     --add <path>               a definition of your own, or a directory of them
 
     What arrived, its version and its sha256 go into linebench-fetched.toml beside the binaries.
@@ -36,14 +36,14 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--cont
 
     Runs every counter once over the target, reads its counts back out of its own output, and
     holds them against each other and against the count the corpus definition declares. Nothing
-    is timed, so it answers whether a run would mean anything before the run is paid for.
+    is timed, so it answers whether a run would mean anything before one is paid for.
 
     The target is a corpus definition by name, counted where fetch put it, several of them
     separated by commas, all for every corpus this machine holds, or a directory of your own,
     which takes --extensions to say what counts in it. A list is checked one corpus at a time.
 
     --extensions rs,c          what to count in a directory of your own
-    --counters a,b,c           the instances, in the order they are timed
+    --counters a,b,c           the instances, in the order they run
     --control <instance>       the instance hyperfine is tried with
     --allow-unequal-exclusions pass even with uneven MS Defender exclusions
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
@@ -58,13 +58,13 @@ linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <
                 [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--counters-dir <dir>]
                 [--add <path>] [--corpus-path <dir>]
 
-    Times the control alone, five times by default, and samples what the machine was doing while
-    it did. Its verdict is how far apart those runs came out and how much of the machine was busy
-    underneath them, which is what says whether a run made now would replicate.
+    Times the control alone, five times by default, and samples what else the machine was doing
+    meanwhile. The verdict is how far apart those runs came out and how much of the machine was
+    busy under them, which says whether a run made now would replicate.
 
     --control <instance>       the instance it times, by default the one the conf names
     --counters a,b,c           the instances the control is chosen from
-    --runs <n>                 how many times to time it, default 5, never under 3
+    --runs <n>                 how many times to time it, default 5, at least 3
     --settle <s>               seconds of quiet before each one, default none
     --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
@@ -83,8 +83,8 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
 
     Times every instance over the target through hyperfine, twice, once with the flags that make
     the work equal and once with none, and writes the record, the csv files, the notes and the
-    results page. The control is timed alone at both ends, and how far its two answers sit apart
-    is the drift the record carries, which is the run's own claim about whether it replicates.
+    results page. The control is timed alone at both ends, and the gap between its two answers is
+    the drift the record carries: the run's own claim about whether it replicates.
 
     Several corpora, run linux,cpython or run all, are measured one after the other in one
     process. The machine is prepared once, each corpus keeps its own run directory and its own
@@ -113,7 +113,7 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
     A run under an instance with args or a build of its own is written under results/local/,
-    since its numbers answer for that build alone and never for the release.
+    since its numbers answer for that build alone.
 
 linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls] [--yes]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
@@ -141,8 +141,8 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
 linebench status [--counters-dir <dir>] [--add <path>]
 
     Says what this machine holds. Every counter with the version its definition pins, what its
-    channel publishes latest, and what sits in the counters directory. Every corpus with the
-    place its checkout goes and the commit that is there. Then the paths all of that came from.
+    channel publishes latest, and what sits in the counters directory. Every corpus with the path
+    of its checkout and the commit there. Then the paths all of that came from.
 
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
@@ -158,7 +158,7 @@ linebench report [--out <dir>] [--verify]
 linebench verify <a run directory|an insights directory>
 
     Reads a run back and holds its numbers against each other: every measurement against itself,
-    the columns that come off other columns, the counts against their own addition, equal work
+    the derived columns against the ones they come from, the counts against their sum, equal work
     re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were kept
     too, every statistic is recomputed from the time of every single execution.
 
@@ -169,8 +169,8 @@ linebench verify <a run directory|an insights directory>
     Name the directory, or the run.json or insights.json inside it. A folder holding many of them
     is not one, and the refusal says to name a directory further in.
 
-    What could not be read is printed as it is. A check that does not hold exits 1, and a file
-    that is absent is a gap and does not.
+    What could not be read is printed. A check that fails exits 1, and a missing file is reported
+    as a gap and does not.
 
 Everywhere:
 
@@ -195,7 +195,7 @@ linebench bump-versions [<counter>] [--json]
 
     It maintains this repository's own definitions and nobody who measures needs it, so it is
     built with --features maintenance alone. A raised version is half a change: the definitions
-    are compiled into the binary, so the binary is built again before anything measures the new
+    are compiled into the binary, so it has to be rebuilt before anything measures the new
     version, and the same-work flags are read against that release's notes by a person.
 "#;
 

@@ -17,11 +17,11 @@ linebench check cpython
 
 The tests run git and hyperfine, so both have to be on PATH before `cargo test`.
 
-`fetch` brings the counter the way its definition says, from an ordinary terminal. `check` is
-the acceptance test: it runs the fetched counter once per table, reads the counts back, and
-compares them with the file count the corpus declares. CI runs both over the cpython corpus on
-Linux, Windows and macOS. Run `check` on the `linux` corpus too before publishing a definition:
-the kernel is where cloc's case handling and tokei's nested languages were found.
+`fetch` downloads the counter the way its definition says. `check` is the acceptance test: it
+runs the fetched counter once per table, reads the counts back, and compares them with the file
+count the corpus declares. CI runs both over the cpython corpus on Linux, Windows and macOS. Run
+`check` on the `linux` corpus too before publishing a definition: the kernel is where cloc's case
+handling and tokei's nested languages were caught.
 
 ## What has already bitten
 
@@ -93,7 +93,7 @@ hours.
 A run worth publishing is measured elevated, so the power scheme or governor is set for it, on a
 machine with nothing else running, and its trust checks say so: a control drift under a few
 percent, both command orders within a few percent, background well under one core. A run
-holding a build given by hand lands under `results/local/` and never on the page's release
+holding a build given by hand lands under `results/local/` and stays out of the page's release
 tables. `results/README.md` is generated; do not edit it by hand.
 
 Publish it from your own repository: copy `results/README.md` and the run directories it names
