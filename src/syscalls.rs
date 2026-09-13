@@ -210,7 +210,7 @@ fn parse_summary(text: &str) -> (Vec<Call>, Option<usize>) {
         }
         let Some(numbers) = columns
             .iter()
-            .map(|column| column.parse::<f64>().ok())
+            .map(|column| read_number(column))
             .collect::<Option<Vec<f64>>>()
         else {
             continue;
@@ -228,6 +228,15 @@ fn parse_summary(text: &str) -> (Vec<Call>, Option<usize>) {
         });
     }
     (calls, (rules > 1).then_some(rows))
+}
+
+// strace prints its summary through the locale, so LC_NUMERIC=el_GR gives 29,36 where C gives
+// 29.36. Only the separator changes, never grouping, so swapping it back is enough.
+fn read_number(column: &str) -> Option<f64> {
+    match column.contains(',') {
+        true => column.replace(',', ".").parse().ok(),
+        false => column.parse().ok(),
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +320,22 @@ mod tests {
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert_eq!(calls[0].name, "_llseek");
         assert_eq!(calls[1].errors, 12);
+    }
+
+    #[test]
+    fn a_summary_printed_under_a_locale_that_writes_decimals_with_a_comma_is_read_the_same() {
+        let (calls, rows) = parse_summary(&SUMMARY.replace('.', ","));
+        assert_eq!(rows, Some(calls.len()));
+        assert_eq!(calls.len(), 30, "{calls:?}");
+        assert_eq!(
+            calls.iter().find(|call| call.name == "epoll_ctl"),
+            Some(&Call {
+                name: "epoll_ctl".to_string(),
+                calls: 480,
+                errors: 479
+            })
+        );
+        assert_eq!(calls.iter().map(|call| call.calls).sum::<u64>(), 24_440);
     }
 
     #[test]

@@ -372,9 +372,14 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
             family.to_string(),
             totals.iter().copied().map(describe_count).collect(),
         ));
-        let (shown, hidden): (Vec<String>, Vec<String>) = collect_names(counted, family)
+        let (mut shown, mut hidden): (Vec<String>, Vec<String>) = collect_names(counted, family)
             .into_iter()
             .partition(|name| is_shown(name, counted));
+        // A rest row standing for one call is that call with its name taken away, so the name stays
+        // and the row goes.
+        if hidden.len() == 1 && !shown.is_empty() {
+            shown.append(&mut hidden);
+        }
         for name in &shown {
             let cells = counted
                 .iter()
@@ -889,8 +894,8 @@ mod tests {
     }
 
     #[test]
-    fn a_call_too_small_to_stand_on_its_own_is_folded_into_the_rest_of_its_family() {
-        let counts = build_syscalls("tokei", &[("openat", 10_000), ("openat2", 5)]);
+    fn calls_too_small_to_stand_on_their_own_are_folded_into_the_rest_of_their_family() {
+        let counts = build_syscalls("tokei", &[("openat", 10_000), ("openat2", 5), ("open", 3)]);
         let lines = format_syscalls(std::slice::from_ref(&counts), Style::Plain);
         assert!(
             !lines.iter().any(|line| line.contains("openat2")),
@@ -898,14 +903,29 @@ mod tests {
         );
         let rest = lines
             .iter()
-            .find(|line| line.contains("rest (1)"))
-            .expect("the small call is folded into a rest row");
-        assert!(rest.ends_with('5'), "{rest}");
+            .find(|line| line.contains("rest (2)"))
+            .expect("the small calls are folded into a rest row");
+        assert!(rest.ends_with('8'), "{rest}");
         let family = lines
             .iter()
             .find(|line| line.starts_with("   opening"))
-            .expect("the family carries them both");
-        assert!(family.ends_with("10,005"), "{family}");
+            .expect("the family carries them all");
+        assert!(family.ends_with("10,008"), "{family}");
+    }
+
+    #[test]
+    fn a_rest_row_that_would_stand_for_one_call_carries_the_name_of_that_call() {
+        let counts = build_syscalls("tokei", &[("openat", 10_000), ("openat2", 5)]);
+        let lines = format_syscalls(std::slice::from_ref(&counts), Style::Plain);
+        assert!(
+            !lines.iter().any(|line| line.contains(REST_LABEL)),
+            "{lines:?}"
+        );
+        let only = lines
+            .iter()
+            .find(|line| line.contains("openat2"))
+            .expect("the one call left over is named");
+        assert!(only.ends_with('5'), "{only}");
     }
 
     #[test]
