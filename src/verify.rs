@@ -38,16 +38,8 @@ pub struct Verification {
 }
 
 impl Verification {
-    pub fn get_levels(&self) -> &[Level] {
-        &self.levels
-    }
-
     pub fn count_broken(&self) -> usize {
         self.levels.iter().map(Level::count_broken).sum()
-    }
-
-    pub fn describe_reach(&self) -> &str {
-        &self.reach
     }
 }
 
@@ -96,26 +88,17 @@ pub enum Session {
     Insights,
 }
 
-impl Session {
-    pub fn get_file(self) -> &'static str {
-        match self {
-            Session::Run => RECORD_FILE,
-            Session::Insights => INSIGHTS_FILE,
-        }
-    }
-}
-
 pub fn find_run(path: &Path) -> Result<(PathBuf, Session), String> {
-    let both = [Session::Run, Session::Insights];
     if path.is_file() {
-        let Some(session) = both.into_iter().find(|session| {
-            path.file_name()
-                .is_some_and(|name| name == session.get_file())
-        }) else {
-            return Err(format!(
-                "{} is neither a {RECORD_FILE} nor an {INSIGHTS_FILE}",
-                path.display()
-            ));
+        let session = match path.file_name().and_then(|name| name.to_str()) {
+            Some(RECORD_FILE) => Session::Run,
+            Some(INSIGHTS_FILE) => Session::Insights,
+            _ => {
+                return Err(format!(
+                    "{} is neither a {RECORD_FILE} nor an {INSIGHTS_FILE}",
+                    path.display()
+                ));
+            }
         };
         let held = path.parent().filter(|dir| !dir.as_os_str().is_empty());
         return Ok((held.unwrap_or(Path::new(".")).to_path_buf(), session));
@@ -123,11 +106,11 @@ pub fn find_run(path: &Path) -> Result<(PathBuf, Session), String> {
     if !path.is_dir() {
         return Err(format!("{} is not there", path.display()));
     }
-    if let Some(session) = both
-        .into_iter()
-        .find(|session| path.join(session.get_file()).is_file())
-    {
-        return Ok((path.to_path_buf(), session));
+    if path.join(RECORD_FILE).is_file() {
+        return Ok((path.to_path_buf(), Session::Run));
+    }
+    if path.join(INSIGHTS_FILE).is_file() {
+        return Ok((path.to_path_buf(), Session::Insights));
     }
     Err(format!(
         "nothing to read in {}, since it carries neither a {RECORD_FILE} nor an {INSIGHTS_FILE}: \

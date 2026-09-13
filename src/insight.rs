@@ -3,11 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::corpus::shorten_hash;
 use crate::defender::DefenderState;
-use crate::files::read_text;
+use crate::files::read_json;
 use crate::machine::{Machine, Platform};
 use crate::measure::TABLES;
 use crate::measure::{Style, Table};
@@ -128,20 +127,7 @@ pub fn build_insights_path(
 }
 
 pub fn read_insights(path: &Path) -> Result<Insights, String> {
-    let text = read_text(path)?;
-    serde_json::from_str(&text).map_err(|error| {
-        let written_by = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| value.get("format").and_then(Value::as_u64));
-        match written_by {
-            Some(format) if format != u64::from(INSIGHTS_FORMAT) => format!(
-                "{}: written as insights format {format}, and this build reads format \
-                 {INSIGHTS_FORMAT}: {error}",
-                path.display()
-            ),
-            _ => format!("{}: {error}", path.display()),
-        }
-    })
+    read_json(path, "insights", INSIGHTS_FORMAT)
 }
 
 pub fn write_insights(res: &Path, insights: &Insights) -> Result<(), String> {

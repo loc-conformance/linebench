@@ -6,13 +6,12 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::corpus::{Parity, describe_empty_count, shorten_hash};
 use crate::defender::{DefenderState, ProcessExclusions, judge_process_exclusions};
 use crate::fetch::Identity;
 use crate::fetch::Origin;
-use crate::files::read_text;
+use crate::files::{read_json, read_text};
 use crate::machine::Machine;
 use crate::measure::{CONTROL_END, CONTROL_START, FORWARD, REVERSE};
 use crate::measure::{Instance, Table, get_set_name};
@@ -550,20 +549,7 @@ pub fn write_record(res: &Path, record: &Record) -> Result<(), String> {
 }
 
 pub fn read_record(path: &Path) -> Result<Record, String> {
-    let text = read_text(path)?;
-    serde_json::from_str(&text).map_err(|error| {
-        let written_by = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| value.get("format").and_then(Value::as_u64));
-        match written_by {
-            Some(format) if format != u64::from(RECORD_FORMAT) => format!(
-                "{}: written as record format {format}, and this build reads format \
-                 {RECORD_FORMAT}: {error}",
-                path.display()
-            ),
-            _ => format!("{}: {error}", path.display()),
-        }
-    })
+    read_json(path, "record", RECORD_FORMAT)
 }
 
 pub fn write_csvs(res: &Path, record: &Record) -> Result<(), String> {

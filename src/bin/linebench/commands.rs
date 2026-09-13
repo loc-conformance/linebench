@@ -608,9 +608,8 @@ pub fn run_status(
     };
     let now = read_seconds_since_epoch();
     thread::scope(|scope| {
-        let looking = scope.spawn(|| match asked.is_empty() {
-            true => (Vec::new(), None),
-            false => collect_latest_releases(&asked, &counters_dir.path, now, find_latest_release),
+        let looking = scope.spawn(|| {
+            collect_latest_releases(&asked, &counters_dir.path, now, find_latest_release)
         });
         print_header(out, "== corpora")?;
         let corpora: Vec<Vec<Cell>> = ground
@@ -1122,8 +1121,24 @@ fn check_corpus(
     let scratch = Scratch::create("check")?;
     let counters = choose_counters_to_look_up(instances.iter().map(|i| &i.definition));
     let names: Vec<String> = counters.iter().map(|d| d.name.clone()).collect();
-    let (bad, nothing_compared) = match releases {
-        None => check_everything(
+    // Asked nothing, the lookups spawn nothing and print nothing, which is what every corpus but
+    // the last one wants.
+    let asked = match releases {
+        None => Vec::new(),
+        Some(earlier) => choose_counters_to_look_up(
+            counters.into_iter().chain(
+                earlier
+                    .iter()
+                    .filter_map(|name| definitions.iter().find(|d| &d.name == name)),
+            ),
+        ),
+    };
+    let now = read_seconds_since_epoch();
+    let (checked, looked_up) = thread::scope(|scope| {
+        let lookups = scope.spawn(|| {
+            collect_latest_releases(&asked, &locations.counters_dir, now, find_latest_release)
+        });
+        let checked = check_everything(
             out,
             options,
             locations,
@@ -1131,40 +1146,16 @@ fn check_corpus(
             control,
             platform,
             scratch.get_path(),
-        )?,
-        Some(earlier) => {
-            let asked = add_counters_of_earlier_corpora(counters, earlier, definitions);
-            let now = read_seconds_since_epoch();
-            let (checked, looked_up) = thread::scope(|scope| {
-                let lookups = scope.spawn(|| {
-                    collect_latest_releases(
-                        &asked,
-                        &locations.counters_dir,
-                        now,
-                        find_latest_release,
-                    )
-                });
-                let checked = check_everything(
-                    out,
-                    options,
-                    locations,
-                    &instances,
-                    control,
-                    platform,
-                    scratch.get_path(),
-                );
-                (checked, lookups.join())
-            });
-            let checked = checked?;
-            let (lookups, warning) =
-                looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
-            print_latest_releases(out, &lookups)?;
-            if let Some(warning) = warning {
-                print_warning(out, &warning)?;
-            }
-            checked
-        }
-    };
+        );
+        (checked, lookups.join())
+    });
+    let (bad, nothing_compared) = checked?;
+    let (lookups, warning) =
+        looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
+    print_latest_releases(out, &lookups)?;
+    if let Some(warning) = warning {
+        print_warning(out, &warning)?;
+    }
     print_line(out, "")?;
     if bad.is_empty() {
         let verdict = if nothing_compared {
@@ -1184,21 +1175,6 @@ fn check_corpus(
         .to_string(),
     )?;
     Ok((1, names))
-}
-
-fn add_counters_of_earlier_corpora<'a>(
-    mut asked: Vec<&'a Definition>,
-    earlier: &[String],
-    definitions: &'a [Definition],
-) -> Vec<&'a Definition> {
-    for name in earlier {
-        if !asked.iter().any(|d| &d.name == name)
-            && let Some(found) = definitions.iter().find(|d| &d.name == name)
-        {
-            asked.push(found);
-        }
-    }
-    asked
 }
 
 fn measure_corpus(
@@ -2139,7 +2115,7 @@ fn print_parity(out: &mut dyn Write, parity: &Parity, lead: &str) -> Result<(), 
 fn print_verification(out: &mut dyn Write, verification: &Verification) -> Result<(), String> {
     print_header(out, &format!("== verify {}", show_path(&verification.run)))?;
     let mut printed = false;
-    for level in verification.get_levels() {
+    for level in &verification.levels {
         if level.held.is_empty() && level.absent.is_empty() {
             continue;
         }
@@ -2166,7 +2142,7 @@ fn print_verification(out: &mut dyn Write, verification: &Verification) -> Resul
         }
     }
     print_line(out, "")?;
-    print_line(out, &format!("   {}", verification.describe_reach()))
+    print_line(out, &format!("   {}", verification.reach))
 }
 
 fn lay_out_counts(counted: &[Counted], reference: Option<u64>) -> (String, String) {
@@ -2246,7 +2222,8 @@ fn check_the_page(out: &mut dyn Write, results: &Path, found: &[FoundRun]) -> Re
 
 fn describe_home(chosen: &Chosen) -> String {
     let said = paint(Color::Grey, &format!("from {}", chosen.said_by));
-    lay_out_rows(&[vec![cell(show_path(&chosen.path)), cell(said.to_string())]]).remove(0)
+    let gap = " ".repeat(COLUMN_GAP);
+    format!("{ROW_OPENING}{}{gap}{said}", show_path(&chosen.path))
 }
 
 fn describe_counter(
@@ -2366,7 +2343,7 @@ fn describe_corpus(corpus: &Corpus, ground: &crate::Ground) -> Vec<Cell> {
         let said = paint(Color::Yellow, "no place on this machine to keep it");
         return vec![cell(name.clone()), cell(said.to_string())];
     };
-    let (state, _) = describe_checkout(corpus, &home.path);
+    let state = describe_checkout(corpus, &home.path);
     let tail = match home.path.is_dir() {
         true => format!("from {}", home.said_by),
         false => format!("fetch --corpus {name}"),
@@ -2379,41 +2356,34 @@ fn describe_corpus(corpus: &Corpus, ground: &crate::Ground) -> Vec<Cell> {
     ]
 }
 
-fn describe_checkout(corpus: &Corpus, checkout: &Path) -> (String, String) {
-    let painted = |color: Color, said: String| (paint(color, &said).to_string(), said);
+fn describe_checkout(corpus: &Corpus, checkout: &Path) -> String {
+    let warn = |said: &str| paint(Color::Yellow, said).to_string();
     if !checkout.is_dir() {
-        return painted(Color::Yellow, "not there".to_string());
+        return warn("not there");
     }
     let state = read_git_state(checkout);
     let Some(head) = state.head else {
-        return painted(
-            Color::Yellow,
-            "there, and it is no git checkout".to_string(),
-        );
+        return warn("there, and it is no git checkout");
     };
     let (dirt, held) = match state.clean {
         Some(false) => describe_changes(checkout),
         _ => (String::new(), true),
     };
-    if corpus.commit.is_empty() {
-        let said = format!("on {}{dirt}, unpinned", shorten_hash(&head));
-        return match held {
-            true => (said.clone(), said),
-            false => painted(Color::Yellow, said),
-        };
-    }
-    if head != corpus.commit {
-        let said = format!(
+    if !corpus.commit.is_empty() && head != corpus.commit {
+        return warn(&format!(
             "on {}, and it pins {}",
             shorten_hash(&head),
             shorten_hash(&corpus.commit)
-        );
-        return painted(Color::Yellow, said);
+        ));
     }
-    let said = format!("on {}{dirt}", shorten_hash(&head));
+    let unpinned = match corpus.commit.is_empty() {
+        true => ", unpinned",
+        false => "",
+    };
+    let said = format!("on {}{dirt}{unpinned}", shorten_hash(&head));
     match held {
-        true => (said.clone(), said),
-        false => painted(Color::Yellow, said),
+        true => said,
+        false => warn(&said),
     }
 }
 
@@ -2483,20 +2453,20 @@ fn describe_where(path: &Path) -> String {
 }
 
 fn describe_own_definitions(ground: &crate::Ground) -> Vec<Vec<Cell>> {
-    let mut rows = Vec::new();
-    for definition in ground.counters.iter().filter(|d| d.added) {
-        rows.push(vec![
-            cell(definition.name.clone()),
-            cell(show_path(&definition.path)),
-        ]);
-    }
-    for corpus in ground.corpora.iter().filter(|c| c.added) {
-        rows.push(vec![
-            cell(corpus.name.clone()),
-            cell(show_path(&corpus.path)),
-        ]);
-    }
-    rows
+    let counters = ground
+        .counters
+        .iter()
+        .filter(|d| d.added)
+        .map(|d| (&d.name, &d.path));
+    let corpora = ground
+        .corpora
+        .iter()
+        .filter(|c| c.added)
+        .map(|c| (&c.name, &c.path));
+    counters
+        .chain(corpora)
+        .map(|(name, path)| vec![cell(name.clone()), cell(show_path(path))])
+        .collect()
 }
 
 fn describe_places(ground: &crate::Ground) -> Vec<Vec<Cell>> {
@@ -2514,16 +2484,16 @@ fn describe_places(ground: &crate::Ground) -> Vec<Vec<Cell>> {
     rows
 }
 
-// What one column of a status row holds: the text as it is printed, colour and all, and what it
-// is worth on the screen, since the bytes that carry colour take up none of it.
+// What one column of a status row holds. The text as it is printed, colour and all, and how wide
+// it is on the screen, since the bytes that carry colour take up none of it.
 struct Cell {
     painted: String,
-    plain: String,
+    width: usize,
 }
 
 fn cell(text: String) -> Cell {
     Cell {
-        plain: strip_ansi(&text),
+        width: strip_ansi(&text).chars().count(),
         painted: text,
     }
 }
@@ -2540,10 +2510,9 @@ fn lay_out_rows(rows: &[Vec<Cell>]) -> Vec<String> {
                 widths.push(0);
                 filled.push(false);
             }
-            let wide = held.plain.chars().count();
-            filled[at] |= wide > 0;
+            filled[at] |= held.width > 0;
             if at + 1 < row.len() {
-                widths[at] = widths[at].max(wide);
+                widths[at] = widths[at].max(held.width);
             }
         }
     }
@@ -2558,7 +2527,7 @@ fn lay_out_rows(rows: &[Vec<Cell>]) -> Vec<String> {
                 line.push_str(&" ".repeat(COLUMN_GAP));
             }
             line.push_str(&held.painted);
-            let gap = widths[at].saturating_sub(held.plain.chars().count());
+            let gap = widths[at].saturating_sub(held.width);
             line.push_str(&" ".repeat(gap));
         }
         lines.push(format!("{ROW_OPENING}{}", line.trim_end()));

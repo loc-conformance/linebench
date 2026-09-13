@@ -30,9 +30,9 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
     is where every later command looks for it with nothing said.
 
 linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--control <instance>]
-                [--corpus-path <dir>] [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
-                [--args <c>@<tag>=<text>] [--expect-identical a=b] [--counters-dir <dir>]
-                [--add <path>]
+                [--allow-unequal-exclusions] [--corpus-path <dir>] [--given <c>@<tag>=<path>]
+                [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--expect-identical a=b]
+                [--counters-dir <dir>] [--add <path>]
 
     Runs every counter once over the target, reads its counts back out of its own output, and
     holds them against each other and against the count the corpus definition declares. Nothing
@@ -45,6 +45,7 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--cont
     --extensions rs,c          what to count in a directory of your own
     --counters a,b,c           the instances, in the order they are timed
     --control <instance>       the instance hyperfine is tried with
+    --allow-unequal-exclusions pass even with uneven MS Defender exclusions
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
@@ -54,9 +55,9 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--cont
     --add <path>               a definition of your own, or a directory of them
 
 linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <n>]
-                [--settle <s>] [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
-                [--args <c>@<tag>=<text>] [--counters-dir <dir>] [--add <path>]
-                [--corpus-path <dir>]
+                [--settle <s>] [--extensions rs,c] [--given <c>@<tag>=<path>]
+                [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--counters-dir <dir>]
+                [--add <path>] [--corpus-path <dir>]
 
     Times the control alone, five times by default, and samples what the machine was doing while
     it did. Its verdict is how far apart those runs came out and how much of the machine was busy
@@ -64,8 +65,9 @@ linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <
 
     --control <instance>       the instance it times, by default the one the conf names
     --counters a,b,c           the instances the control is chosen from
-    --runs <n>                 how many times to time it, default 5
+    --runs <n>                 how many times to time it, default 5, never under 3
     --settle <s>               seconds of quiet before each one, default none
+    --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target
@@ -204,6 +206,8 @@ const EVERYWHERE: &str = "Everywhere:";
 const FLAG_OPENING: &str = "--";
 /// Flags of no command in particular, which is why no usage line names them.
 const ALWAYS: [&str; 5] = ["--dry-run", "--help", "-h", "--version", "-V"];
+/// A usage line carries the long spelling alone, and the short one goes wherever it goes.
+const SHORT: [(&str, &str); 1] = [("--yes", "-y")];
 const COUNTERS_HERE: &str = "{counters}";
 const CORPORA_HERE: &str = "{corpora}";
 const LISTING_OPENINGS: [&str; 2] = ["    counters   ", "    corpora    "];
@@ -234,6 +238,9 @@ pub fn find_flags_of(named: &str) -> Vec<String> {
     for word in usage.split(['[', ']', ' ']) {
         if word.starts_with(FLAG_OPENING) && !flags.iter().any(|held| held == word) {
             flags.push(word.to_string());
+            if let Some((_, short)) = SHORT.iter().find(|(long, _)| long == &word) {
+                flags.push((*short).to_string());
+            }
         }
     }
     flags
@@ -388,6 +395,7 @@ mod tests {
             let mut taken: Vec<String> = find_flags_of(named)
                 .into_iter()
                 .filter(|flag| !ALWAYS.contains(&flag.as_str()))
+                .filter(|flag| !SHORT.iter().any(|(_, short)| short == flag))
                 .collect();
             taken.sort();
             assert_eq!(listed, taken, "{named}");
