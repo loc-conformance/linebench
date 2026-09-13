@@ -2,6 +2,109 @@
 
 Written by `linebench report` after every run, and rewritten whole each time. One section per machine, and under it the newest run over each corpus, biggest corpus first. Older runs are listed in the "Every run" table further down. A run holding a build or arguments of your own is kept apart, under its own headings. What every term means and how this was measured: the last two sections.
 
+## Windows, AMD Ryzen 7 9700X 8-Core Processor
+
+16 threads, 62 GB usable RAM, Microsoft Windows 11 Pro
+
+### linux corpus, 20260913-052540
+
+measured 2026-09-13 05:25 UTC by linebench 0.1.0  
+corpus at `0ff41df1c` on NTFS, Lexar SSD NQ790 2TB, SSD, NVMe  
+mezura v3.1.1 (2026-09-11), scc 4.1.0, tokei 15.0.0  
+3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
+
+#### Same work (every counter pinned to the same languages and settings)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 254 ms ± 22 | 1.00x | 1.92 s | 1.45 s | 13.24 | 141.6M | 10.7M | 63,767 | 36,017,775 |
+| scc | 539 ms ± 61 | 2.12x ± 0.30 | 3.53 s | 3.85 s | 13.69 | 66.8M | 4.9M | 63,767 | 36,017,775 |
+| tokei | 632 ms ± 22 | 2.48x ± 0.23 | 6.02 s | 2.66 s | 13.73 | 57.0M | 4.2M | 63,822 | 36,026,522 |
+
+#### Out of the box (each counter at its own defaults)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 300 ms ± 15 | 1.00x | 2.15 s | 1.81 s | 13.20 | 119.3M | 9.0M | 66,568 | 35,815,794 |
+| tokei | 734 ms ± 32 | 2.45x ± 0.16 | 6.84 s | 3.26 s | 13.76 | 54.5M | 4.0M | 83,891 | 39,991,863 |
+| scc | 737 ms ± 35 | 2.46x ± 0.17 | 5.80 s | 4.77 s | 14.33 | 54.2M | 3.8M | 83,832 | 39,992,940 |
+
+Trust checks for this run:
+- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 2.8%.
+- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 6.8%.
+- **Power**: set for the run and restored after: power scheme: Balanced -> high performance.
+- **Quiet machine**: everything other than the benchmark was using 0.4% of the cpu when the run started, about 0.1 of 16 cores.
+- **Antivirus**: real-time protection True, every counter equally excluded from real-time scanning.
+- **Equal work**: every file count sat within 1.0% of the 63,779 files the corpus declares, and the line counts within 1.0% of each other.
+
+### jdk corpus, 20260913-052324
+
+measured 2026-09-13 05:23 UTC by linebench 0.1.0  
+corpus at `b96680ca9` on NTFS, Lexar SSD NQ790 2TB, SSD, NVMe  
+mezura v3.1.1 (2026-09-11), scc 4.1.0, tokei 15.0.0  
+3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
+
+#### Same work (every counter pinned to the same languages and settings)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 162 ms ± 12 | 1.00x | 1.07 s | 1.23 s | 14.22 | 81.7M | 5.7M | 61,425 | 13,226,930 |
+| scc | 290 ms ± 18 | 1.79x ± 0.17 | 1.78 s | 2.01 s | 13.06 | 45.5M | 3.5M | 61,420 | 13,226,395 |
+| tokei | 452 ms ± 24 | 2.79x ± 0.26 | 4.04 s | 2.09 s | 13.54 | 29.2M | 2.2M | 61,421 | 13,226,397 |
+
+#### Out of the box (each counter at its own defaults)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 182 ms ± 11 | 1.00x | 1.26 s | 1.36 s | 14.43 | 75.6M | 5.2M | 61,950 | 13,740,143 |
+| scc | 397 ms ± 19 | 2.18x ± 0.17 | 2.89 s | 2.55 s | 13.70 | 39.8M | 2.9M | 66,301 | 15,818,623 |
+| tokei | 540 ms ± 19 | 2.97x ± 0.21 | 5.22 s | 2.33 s | 13.99 | 29.1M | 2.1M | 65,042 | 15,688,680 |
+
+Trust checks for this run:
+- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 1.3%.
+- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 6.3%.
+- **Power**: set for the run and restored after: power scheme: Balanced -> high performance.
+- **Quiet machine**: everything other than the benchmark was using 1.3% of the cpu when the run started, about 0.2 of 16 cores.
+- **Antivirus**: real-time protection True, every counter equally excluded from real-time scanning.
+- **Equal work**: every file count sat within 1.0% of the 61,420 files the corpus declares, and the line counts within 1.0% of each other.
+- **hyperfine warning**: control-start: Statistical outliers were detected.
+- **hyperfine warning**: t1-fwd: Statistical outliers were detected.
+- **hyperfine warning**: t1-rev: Statistical outliers were detected.
+- **hyperfine warning**: t2-fwd: Statistical outliers were detected.
+- **hyperfine warning**: t2-rev: Statistical outliers were detected.
+- **hyperfine warning**: control-end: Statistical outliers were detected.
+
+### cpython corpus, 20260913-052216
+
+measured 2026-09-13 05:22 UTC by linebench 0.1.0  
+corpus at `34439b8a2` on NTFS, Lexar SSD NQ790 2TB, SSD, NVMe  
+mezura v3.1.1 (2026-09-11), scc 4.1.0, tokei 15.0.0  
+3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
+
+#### Same work (every counter pinned to the same languages and settings)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 27 ms ± 0 | 1.00x | 0.10 s | 0.13 s | 8.85 | 82.7M | 9.3M | 3,559 | 2,230,164 |
+| scc | 40 ms ± 0 | 1.48x ± 0.02 | 0.19 s | 0.18 s | 9.29 | 56.0M | 6.0M | 3,556 | 2,229,545 |
+| tokei | 65 ms ± 1 | 2.42x ± 0.05 | 0.47 s | 0.33 s | 12.13 | 34.1M | 2.8M | 3,583 | 2,230,905 |
+
+#### Out of the box (each counter at its own defaults)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 31 ms ± 0 | 1.00x | 0.15 s | 0.13 s | 9.04 | 69.0M | 7.6M | 3,577 | 2,127,111 |
+| scc | 58 ms ± 1 | 1.87x ± 0.03 | 0.33 s | 0.29 s | 10.83 | 52.9M | 4.9M | 5,780 | 3,047,697 |
+| tokei | 81 ms ± 2 | 2.62x ± 0.07 | 0.61 s | 0.40 s | 12.40 | 37.1M | 3.0M | 5,659 | 2,998,726 |
+
+Trust checks for this run:
+- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 7.5%.
+- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 0.2%.
+- **Power**: set for the run and restored after: power scheme: Balanced -> high performance.
+- **Quiet machine**: everything other than the benchmark was using 0.2% of the cpu when the run started, about 0.0 of 16 cores.
+- **Antivirus**: real-time protection True, every counter equally excluded from real-time scanning.
+- **Equal work**: every file count sat within 1.0% of the 3,556 files the corpus declares, and the line counts within 1.0% of each other.
+
 ## Native Linux, AMD Ryzen 7 9700X 8-Core Processor
 
 16 threads, 60 GB usable RAM, Debian GNU/Linux 13 (trixie)
