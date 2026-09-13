@@ -118,17 +118,12 @@ pub fn run_fetch(
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
-    if is_privileged(platform) && !options.allow_elevated {
-        return Err(format!(
-            "fetch writes files as you, so it does not run as {}; run it from an ordinary \
-             terminal, or pass --allow-elevated where there is no ordinary user, as on a CI \
-             runner",
-            if platform == Platform::Windows {
-                "administrator"
-            } else {
-                "root"
-            }
-        ));
+    if needs_an_ordinary_terminal(platform, is_privileged(platform), options.allow_elevated) {
+        return Err(
+            "fetch writes files as you, so it does not run as root; run it from an ordinary \
+             terminal, or pass --allow-elevated where there is no ordinary user, as on a CI runner"
+                .to_string(),
+        );
     }
     if let Some(named) = &options.counters {
         let unknown: Vec<&str> = named
@@ -1006,6 +1001,12 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+// An elevated Windows terminal is the same user with the same %APPDATA%, so what fetch writes
+// there is yours either way. Under sudo the files come out owned by root inside your own home.
+fn needs_an_ordinary_terminal(platform: Platform, privileged: bool, allowed: bool) -> bool {
+    privileged && !allowed && platform != Platform::Windows
 }
 
 // A dry fetch downloads nothing and creates nothing, not even the directory the binaries would
@@ -2657,6 +2658,16 @@ mod tests {
             find_the_one_corpus("insights", &two).unwrap_err(),
             "insights takes one corpus at a time, and linux, jdk were named"
         );
+    }
+
+    #[test]
+    fn only_a_root_outside_windows_is_sent_back_to_an_ordinary_terminal() {
+        assert!(needs_an_ordinary_terminal(Platform::Linux, true, false));
+        assert!(needs_an_ordinary_terminal(Platform::Wsl, true, false));
+        assert!(needs_an_ordinary_terminal(Platform::Macos, true, false));
+        assert!(!needs_an_ordinary_terminal(Platform::Windows, true, false));
+        assert!(!needs_an_ordinary_terminal(Platform::Linux, true, true));
+        assert!(!needs_an_ordinary_terminal(Platform::Linux, false, false));
     }
 
     #[test]
