@@ -47,7 +47,7 @@ use linebench::record::{
     format_summary_tables, format_thousands, format_utc_date, format_utc_stamp, format_wall,
     read_seconds_since_epoch, shorten_version, write_csvs, write_notes, write_record,
 };
-use linebench::record::{LOCAL_DIR, RECORD_FORMAT};
+use linebench::record::{LOCAL_DIR, RECORD_FILE, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 use linebench::verify::{Session, Verification, check_insights, check_run, find_run};
@@ -573,11 +573,22 @@ pub fn run_report(
     Ok(1)
 }
 
-pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
+pub fn run_verify(out: &mut dyn Write, path: &Path, results: &Path) -> Result<i32, String> {
+    if let Some(dir) = find_the_page_beside(path) {
+        // Where report looks with nothing said needs no --out, and saying it would teach a flag
+        // nobody needs.
+        let elsewhere = match make_absolute(&dir) == results {
+            true => String::new(),
+            false => format!(" --out {}", show_path(&dir)),
+        };
+        return Err(format!(
+            "{PAGE_FILE} is the page, not a record. Check it with: report --verify{elsewhere}"
+        ));
+    }
     let (dir, session) = find_run(path)?;
-    let (verification, what) = match session {
-        Session::Run => (check_run(&dir)?, "run"),
-        Session::Insights => (check_insights(&dir)?, "session"),
+    let verification = match session {
+        Session::Run => check_run(&dir)?,
+        Session::Insights => check_insights(&dir)?,
     };
     print_verification(out, &verification)?;
     let broken = verification.count_broken();
@@ -586,16 +597,13 @@ pub fn run_verify(out: &mut dyn Write, path: &Path) -> Result<i32, String> {
         print_line(
             out,
             &format!(
-                "{} nothing in this {what} contradicts itself",
+                "{} nothing here contradicts itself",
                 paint(Color::Green, "done.")
             ),
         )?;
         return Ok(0);
     }
-    print_warning(
-        out,
-        &format!("{broken} checks over this {what} do not hold"),
-    )?;
+    print_warning(out, &format!("{broken} checks here do not hold"))?;
     Ok(1)
 }
 
@@ -904,6 +912,27 @@ pub fn run_insights(
         &format!("hyperfine failed on {}", runner.failures.join(", ")),
     )?;
     Ok(1)
+}
+
+fn make_absolute(path: &Path) -> PathBuf {
+    match path.is_absolute() {
+        true => path.to_path_buf(),
+        false => env::current_dir().unwrap_or_default().join(path),
+    }
+}
+
+/// The results directory the page names, when the path is the page itself or a directory holding
+/// one and no record at all.
+fn find_the_page_beside(path: &Path) -> Option<PathBuf> {
+    if path.file_name().is_some_and(|name| name == PAGE_FILE) {
+        let held = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        return Some(held.unwrap_or(Path::new(".")).to_path_buf());
+    }
+    let holds_the_page = path.is_dir()
+        && path.join(PAGE_FILE).is_file()
+        && !path.join(RECORD_FILE).is_file()
+        && !path.join(INSIGHTS_FILE).is_file();
+    holds_the_page.then(|| path.to_path_buf())
 }
 
 pub fn warn_about_staged_builds(out: &mut dyn Write, counters_dir: &Path) -> Result<(), String> {

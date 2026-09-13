@@ -99,7 +99,12 @@ fn dispatch() -> Result<i32, String> {
                     find_help_of(command.as_str())
                 ));
             };
-            commands::run_verify(&mut out, &PathBuf::from(named))
+            let config = read_config(&find_config()).unwrap_or_default();
+            commands::run_verify(
+                &mut out,
+                &PathBuf::from(named),
+                &find_results_dir(&options, &config),
+            )
         }
         Command::Fetch => {
             let ground = read_ground(&mut out, &options)?;
