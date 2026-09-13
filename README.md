@@ -97,7 +97,7 @@ Linux.
 By default, the binaries land in `counters/` under it, the checkouts in `corpora/<name>`,
 `linebench.conf` sits beside them, copied from `linebench.conf.example`, and results go to
 `results/` in the directory you run from. Each of those can be moved with a flag, an environment
-variable or a line in the conf; [Settings](#settings) has the table.
+variable or a line in the conf, and [Settings](#settings) has the table.
 
 Corpora take space: 190 MB for cpython, 990 MB for the jdk and 2.0 GB for the kernel, all three
 shallow clones.
@@ -120,14 +120,14 @@ linebench fetch --corpus all --corpus-path /data/corpora
 Downloads the counter binaries and clones the corpora. Each counter comes at the version its
 definition declares, each corpus at the commit its definition pins. With neither named it refuses
 and lists what there is. What arrived, and its sha256, goes into `linebench-fetched.toml` beside
-the binaries; a second `fetch` answers "already here" for what matches.
+the binaries, and a second `fetch` answers "already here" for what matches.
 
 On Linux and macOS it refuses to run as root, so the files it writes belong to you. An elevated
 Windows terminal is the same user with the same `%APPDATA%`, so there it runs. Where there is no
 ordinary user, as on a CI runner, `--allow-elevated` lifts the refusal.
 
 `fetch` asks the GitHub API which files a release holds, and anonymous calls are limited per
-address, a limit shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it; the
+address, a limit shared CI runners hit. A token in `GITHUB_TOKEN` or `GH_TOKEN` lifts it. The
 token goes to that one call, and downloads are made without it.
 
 ```
@@ -227,7 +227,7 @@ sudo linebench run all
 The measurement. What it prints is [Reading the numbers](#reading-the-numbers), where it lands
 is [Where results go](#where-results-go).
 
-On Windows open the terminal with "Run as administrator"; elsewhere use `sudo`. Elevated, it sets
+On Windows open the terminal with "Run as administrator", elsewhere use `sudo`. Elevated, it sets
 the cpu governor to `performance` (Linux) or the power scheme to High performance (Windows) and
 puts it back when the run ends, whether it finishes, fails or is interrupted with Ctrl-C. Before
 it changes anything it prints the command that puts it back by hand, for a run that gets killed
@@ -465,7 +465,7 @@ own same-work flags, and the file and line counts beside the times, checked agai
 prove the work was the same. **Out of the box** runs every instance bare, so the ratio mixes speed
 with how much each one chose to do.
 
-Every table is measured twice, once in each command order, and the numbers pool the two; how far
+Every table is measured twice, once in each command order, and the numbers pool the two. How far
 the orders disagreed is a trust check on the page. The control, the same binary timed at the start
 and the end, gives the drift, and `drift` is the first thing to read.
 
@@ -482,7 +482,7 @@ At the end of a run, and on the page, **since the last run** compares every inst
 time with its own newest earlier measurement on the same machine, at the same corpus commit and
 with the corpus on the same disk, whatever else that run held. Earlier runs set aside for another
 cpu, commit or disk are listed with the reason, and an instance with no earlier measurement gets
-its row all the same. The heading says "same builds" when no compared instance's binary changed; a
+its row all the same. The heading says "same builds" when no compared instance's binary changed. A
 changed one carries `version 4.0.0 -> 4.1.0` on its line, or `build a81c2e5 -> 9b7e4d0` when the
 version stayed the same, as a rebuilt dev build does, and it is compared all the same.
 
@@ -526,7 +526,8 @@ work was the same does not.
 instance whether its process and its binary are excluded. **Unequal exclusions refuse the run**,
 because files opened by an excluded process are never scanned and the comparison would measure who
 escaped the antivirus. `--allow-unequal-exclusions` measures anyway and marks the record, the notes
-and the page. Reading the lists needs an elevated shell; unelevated, the record says `needs admin`.
+and the page. Reading the lists needs an elevated shell, and unelevated the record says
+`needs admin`.
 
 The counters directory belongs to `fetch` for the same reason: a binary in it whose hash is not the
 one fetch wrote is refused, with the two ways out, fetch again or measure it as a given instance.
@@ -558,12 +559,13 @@ ever overwritten. `results/README.md` is the page, rewritten after every run and
 and its trust checks, biggest corpus first, then every run once there is more than one, the local
 builds under headings of their own, and the methodology and the terms.
 
-Inside a run directory: `run.json`, the record, self-contained and the one that is read back;
-`summary.csv` and `counts.csv`, the same numbers flat; `<phase>.json` and `<phase>.md`, hyperfine's
-own output; `transcript.txt`, everything the run printed; `notes.md`, the checklist to fill in by
-hand, with the since block under it. `out/` holds every counter's JSON and is deleted once the
-counts are read. Inside an insights directory: `insights.json`, the session, `insights.md`, the
-same session to read, and hyperfine's own output for the floor phase.
+Inside a run directory, `run.json` is the record, self-contained and the one that is read back.
+`summary.csv` and `counts.csv` are the same numbers flat, `<phase>.json` and `<phase>.md` are
+hyperfine's own output, `transcript.txt` is everything the run printed, and `notes.md` is the
+checklist to fill in by hand, with the since block under it. `out/` holds every counter's JSON and
+is deleted once the counts are read. Inside an insights directory, `insights.json` is the session,
+`insights.md` the same session to read, and hyperfine's own output sits beside them for the floor
+phase.
 
 ## Settings
 
@@ -653,10 +655,10 @@ blanks   = "Blank"
 | `[read]` | where the counts sit in the counter's own JSON |
 | `output` | a compiled reader for JSON the paths cannot reach, `tokei-json` today, in place of `[read]` |
 
-The shipped `[language-names]` covers the extensions the shipped corpora name; a corpus of your own
-carrying another extension adds a line for it. Every bucket in `[read]` beyond code and comments is
-read by name, so one block covers a counter that prints `blanks` in one mode and `extra` in
-another, and the buckets have to add up to `lines`.
+The shipped `[language-names]` covers the extensions the shipped corpora name, and a corpus of
+your own carrying another extension adds a line for it. Every bucket in `[read]` beyond code and
+comments is read by name, so one block covers a counter that prints `blanks` in one mode and
+`extra` in another, and the buckets have to add up to `lines`.
 
 The channels are `github-release-asset` (the file for this system and architecture is picked by the
 words in its name, and the published checksums are checked), `github-release-file` (a file named
@@ -683,7 +685,7 @@ linux   = ["cloc"]
 macos   = ["cloc"]
 ```
 
-Only what differs between one tree and another lives here; how each counter spells these extensions
+Only what differs between one tree and another lives here. How each counter spells these extensions
 and what it turns off is in its own definition. A definition with a `commit` is checked before
 every run and every `check`, and a checkout on anything else is refused. `files` is the number of
 files carrying those extensions in the tree of that commit, `git ls-tree -r HEAD`, a number no

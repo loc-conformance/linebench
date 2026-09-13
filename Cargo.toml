@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/loc-conformance/linebench"
 keywords = ["benchmark", "performance", "hyperfine", "lines-of-code", "loc"]
 categories = ["development-tools::profiling", "development-tools"]
-exclude = [".github"]
+exclude = [".github", "assets", "example-run"]
 
 [[bin]]
 name = "linebench"

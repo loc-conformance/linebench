@@ -30,7 +30,7 @@ handling and tokei's nested languages were caught.
   needs a per-system interpreter table in `[run]`, and the process name the antivirus sees would
   come from the interpreter. It is written the day such a counter exists.
 - **`[acquisition.file]` is keyed by system alone**: `windows`, `linux`, `macos`, `other`. A
-  release that publishes named files per architecture cannot be declared yet; the
+  release that publishes named files per architecture cannot be declared yet. The
   `github-release-asset` channel already picks by system and architecture words, and the file
   channel would take the same keys.
 - **The fetched file is stored under the counter's own name** plus the release file's extension,
@@ -53,7 +53,7 @@ handling and tokei's nested languages were caught.
   not found inside `14.0.0`. A counter that prints its version in another form needs
   `version-flag` pointed at whatever does print it.
 - **`crates-io` means cargo on the measuring machine.** It is the channel of last resort, for a
-  counter that publishes no binaries at all; the refusal names the `cargo install` line and
+  counter that publishes no binaries at all, and the refusal names the `cargo install` line and
   `--given` as the way around it.
 - **`same-work` is the counter's own claim, and the equal work check is what tests it.** A
   definition that turns off less than it should, or selects fewer files, comes out over or under
@@ -64,8 +64,8 @@ handling and tokei's nested languages were caught.
   five files: cloc and scc walk into `.github` and stay out of `.git`, while tokei and mezura
   stay out of both. The reference counts what `git ls-tree` lists, `.github` included, so
   same-work carries `--search-in-dotted` for mezura and `--hidden` for tokei. On cpython that is
-  two files each; on the kernel `--hidden` sends tokei through a 276 MB `.git` and finds nothing
-  in it.
+  two files each, and on the kernel `--hidden` sends tokei through a 276 MB `.git` and finds
+  nothing in it.
 - **A language flag is not an extension flag.** `-i` of scc and `--include-ext` of cloc take
   extensions, while `--languages` of mezura and `-t` of tokei take languages, so `js` brings
   `.mjs` along and `py` brings `.pyi` and `.pyw`. A definition that spells languages by name
@@ -76,7 +76,7 @@ handling and tokei's nested languages were caught.
 
 A corpus is `corpora/<name>.toml`: `name`, `remote`, `commit`, `files`, `extensions`,
 `tolerance`. The commit is the full 40-character hash in lower case, as `git rev-parse` prints
-it; an abbreviated one cannot be fetched with `--depth 1` and is refused. The extensions are
+it. An abbreviated one cannot be fetched with `--depth 1` and is refused. The extensions are
 spelled once, in whatever case, and each counter spells them its own way. A counter that spells
 languages by name, tokei alone today, needs every extension in its `[language-names]` table,
 and the shipped one covers the extensions the shipped corpora name. An extension missing from
@@ -94,7 +94,7 @@ A run worth publishing is measured elevated, so the power scheme or governor is 
 machine with nothing else running, and its trust checks say so: a control drift under a few
 percent, both command orders within a few percent, background well under one core. A run
 holding a build given by hand lands under `results/local/` and stays out of the page's release
-tables. `results/README.md` is generated; do not edit it by hand.
+tables. `results/README.md` is generated, so do not edit it by hand.
 
 Publish it from your own repository: copy `results/README.md` and the run directories it names
 into a folder there, put the insight sessions beside them if you ran any, and link to that folder
