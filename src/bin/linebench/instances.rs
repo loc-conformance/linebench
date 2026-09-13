@@ -90,7 +90,7 @@ pub fn build_instances(
             let tag = check_given_name(name, &definition)?;
             let identity = match &entry.binary {
                 Some(binary) => {
-                    stage_given(&definition, tag, binary, platform, &locations.counters_dir)?
+                    stage_given(&definition, tag, binary, platform, &locations.staging)?
                 }
                 None => {
                     let mut identity = identify_counter(

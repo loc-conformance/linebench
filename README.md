@@ -153,7 +153,9 @@ A version is green while the channel publishes nothing newer and yellow when it 
 under a corpus says which commit its checkout sits on, and `13 name clashes` on the kernel is a
 filesystem that keeps one name of a pair differing only in case, `xt_CONNMARK.h` and
 `xt_connmark.h`, so git calls those files changed for as long as the checkout lives. The three
-paths at the top are where every line below them came from.
+paths at the top are where every line below them came from. Every `[given]` entry in the conf is
+listed too, with the build and the definition it names and whether they are there, since nothing
+fetches those and status is the only place that says they exist.
 
 ### check
 
@@ -182,7 +184,8 @@ the 1,350 `.S` files of the kernel and came out 2.2% under the corpus.
 The `releases` lines say whether the version each definition pins is still the newest published,
 one lookup per counter on the channel it fetches from. Answers are kept six hours beside the
 binaries. A lookup that fails prints why, in yellow, and the check passes all the same. Nothing is
-fetched here.
+fetched here. Over a list of corpora the block is printed once, after the last of them, and covers
+every counter any corpus ran, since the answer does not change from one corpus to the next.
 
 A list, `linux,cpython`, or `all` for every corpus this machine holds, is checked one corpus at a
 time, each under a heading of its own.
@@ -251,8 +254,9 @@ picks a subset and fixes the order.
 The control is the instance timed alone at the start and at the end, whose shift is read as the
 machine's own movement, and the workload `noise` times. `control = "mezura"` in the conf names it
 for every run on the machine, `--control` for one run, and with neither it is the first instance
-named, which with no `--counters` is the first definition alphabetically, today cloc, the slowest
-of the four. Keep the control the same across the runs you want compared: "since the last run"
+named, which with no `--counters` is the first definition alphabetically that the corpus does not
+leave out, today mezura, since every shipped corpus skips cloc. Keep the control the same across
+the runs you want compared: "since the last run"
 reads every change against the control's own shift, and that shift is known only when an earlier
 run timed the same control build.
 
@@ -531,11 +535,10 @@ one fetch wrote is refused, with the two ways out, fetch again or measure it as 
 
 ## Where results go
 
-No run of ours is published here: the spread from one machine and one operating system to the next
-is too wide for a number measured on ours to say anything about yours. The runs worth reading are
-the ones the counters publish themselves, in their own repositories, and a counter that publishes
-none is worth asking for some. When you measure, copy `results/README.md` and the run directories
-it names into a folder of your own repository, and link to it from your README.
+We don't claim to keep any official benchmarks in this repo itself. We keep one example run under
+<example_run> but the variability of each machine and environment is too great.  
+You can also see the results that each counter publishes for itself in their own repo, if they use
+linebench, to see how to results change between machines and environments.
 
 ```
 results/
@@ -570,10 +573,10 @@ A flag beats an environment variable, which beats `linebench.conf` in the data d
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
-| definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | none |
+| definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
-| counters left out on this machine | | | `skip = ["cloc"]` | none |
-| a GitHub API token for `fetch` | | `GITHUB_TOKEN`, else `GH_TOKEN` | | none |
+| counters left out on this machine | | | `skip = ["cloc"]` | cloc |
+| write nothing, anywhere | `--dry-run` | | | off |
 
 ```toml
 control = "mezura"
@@ -587,6 +590,10 @@ linux = "D:/corpora/linux"
 `run` leave them out and say so, and naming one in `--counters` runs it. Fetching pays it no
 attention, since a counter has to be asked for by name before it is downloaded at all. A corpus
 definition carries a `[skip]` of its own, per system, for a counter too slow over that one tree.
+
+`--dry-run` can be used with any command and leaves nothing behind. Everything that would be written goes
+to a directory in the temp folder, which is cleaned up when the command finishes. No release is
+looked up and nothing is downloaded: a fetch only names what it would have taken. On the `run` command, the machine is is prepared as normal so that the results are accurate.
 
 With nothing set at all, every command but `report` refuses and prints the recipe.
 
@@ -675,8 +682,10 @@ files carrying those extensions in the tree of that commit, `git ls-tree -r HEAD
 index, working tree or gitignore can move: `check` over a definition with a `commit` and no `files`
 counts them and prints the line to paste, and `run` refuses until it is there. `[skip]` names, per
 system, the counters left out of the default set over this corpus, with WSL counting as linux: cloc
-takes about 90 s per run over the kernel, so a plain `run` there would be hours of it on any
-system. Leave `commit` blank to measure a tree as it stands. `remote` is needed only to fetch.
+takes far longer over these trees than the other three, about 90 s per run over the kernel, so a
+plain `run` would be mostly it. All three shipped corpora leave it out on every system, and a
+name in `--counters` runs it anyway. Leave `commit` blank to measure a tree as it stands.
+`remote` is needed only to fetch.
 
 Both directories are built into the binary, and `--add` joins a definition of your own to them.
 

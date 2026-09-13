@@ -36,7 +36,7 @@ use linebench::machine::{
 };
 use linebench::measure::{
     Instance, Runner, Settings, Style, Table, build_args, build_command, capture_json_outputs,
-    capture_plain_output, get_capture_name, join_command, run_phases,
+    capture_plain_output, get_capture_name, join_command, run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
 use linebench::os::{capture_with_status, is_privileged};
@@ -53,8 +53,8 @@ use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 use linebench::verify::{Verification, check_run, find_run};
 
 use crate::config::{
-    Chosen, FetchPlan, Locations, Options, choose_corpus_home, choose_counters_dir, resolve_out,
-    show_path,
+    Chosen, Config, FetchPlan, Locations, Options, choose_corpus_home, choose_counters_dir,
+    resolve_out, show_path,
 };
 use crate::instances::{ChosenInstances, build_instances};
 use crate::output::{
@@ -75,10 +75,8 @@ const SYSCALLS_SUFFIX: &str = "txt";
 const NO_DEFINITION: &str = "Binaries found that no definition names:";
 const CORPUS_COLUMN: &str = "corpus";
 const COUNT_GAP: &str = "   ";
-const VERSION_WIDTH: usize = 8;
-const LATEST_WIDTH: usize = 16;
-const STATE_WIDTH: usize = 30;
-const TAIL_WIDTH: usize = 24;
+const ROW_OPENING: &str = "   ";
+const COLUMN_GAP: usize = 2;
 const A_QUIET_GIVEN: u64 = 50 * 1024 * 1024;
 const A_LOUD_GIVEN: u64 = 200 * 1024 * 1024;
 const TRACER_MISSING: &str = "strace is not present on the system, or is not in the PATH, so \
@@ -131,12 +129,6 @@ pub fn run_fetch(
             }
         ));
     }
-    fs::create_dir_all(&plan.counters_dir).map_err(|error| {
-        format!(
-            "{} could not be created: {error}",
-            plan.counters_dir.display()
-        )
-    })?;
     if let Some(named) = &options.counters {
         let unknown: Vec<&str> = named
             .iter()
@@ -151,6 +143,15 @@ pub fn run_fetch(
             ));
         }
     }
+    if options.dry_run {
+        return say_what_fetch_would_take(out, options, plan, definitions);
+    }
+    fs::create_dir_all(&plan.counters_dir).map_err(|error| {
+        format!(
+            "{} could not be created: {error}",
+            plan.counters_dir.display()
+        )
+    })?;
     let mut manifest = read_manifest(&plan.counters_dir)?;
     let mut definitions = definitions.to_vec();
     let set_aside = apply_latest_pins(&mut definitions, &manifest);
@@ -291,8 +292,15 @@ pub fn run_check(
     platform: Platform,
 ) -> Result<i32, String> {
     let mut code = 0;
-    for one in locations {
-        code = code.max(check_corpus(out, options, one, definitions, platform)?);
+    let mut seen: Vec<String> = Vec::new();
+    let last = locations.len().saturating_sub(1);
+    for (at, one) in locations.iter().enumerate() {
+        // Every corpus would ask the same forges the same question, so only the last of them
+        // looks the releases up, for every counter any of the corpora ran.
+        let releases = (at == last && !options.dry_run).then_some(seen.as_slice());
+        let (found, counters) = check_corpus(out, options, one, definitions, platform, releases)?;
+        code = code.max(found);
+        seen.extend(counters);
     }
     Ok(code)
 }
@@ -508,7 +516,12 @@ pub fn run_benchmark(
     Ok(code)
 }
 
-pub fn run_report(out: &mut dyn Write, results: &Path, verify: bool) -> Result<i32, String> {
+pub fn run_report(
+    out: &mut dyn Write,
+    results: &Path,
+    into: &Path,
+    verify: bool,
+) -> Result<i32, String> {
     let collected = collect_records(results);
     for message in &collected.skipped {
         print_warning(out, message)?;
@@ -516,8 +529,14 @@ pub fn run_report(out: &mut dyn Write, results: &Path, verify: bool) -> Result<i
     if verify {
         return check_the_page(out, results, &collected.found);
     }
-    if write_results_page(results, &collected.found)? {
-        print_line(out, &format!("wrote {}", results.join(PAGE_FILE).display()))?;
+    // The page is written where it is read from, except under --dry-run, where that place is a
+    // directory of its own that nothing has made yet.
+    if !collected.found.is_empty() {
+        fs::create_dir_all(into)
+            .map_err(|error| format!("{} could not be created: {error}", into.display()))?;
+    }
+    if write_results_page(into, &collected.found)? {
+        print_line(out, &format!("wrote {}", into.join(PAGE_FILE).display()))?;
         return Ok(0);
     }
     print_line(
@@ -561,44 +580,71 @@ pub fn run_status(
         ground.data_dir.as_deref(),
     )?;
     let manifest = read_manifest(&counters_dir.path)?;
-    let asked = choose_counters_to_look_up(ground.counters.iter());
+    let asked = match options.dry_run {
+        true => Vec::new(),
+        false => choose_counters_to_look_up(ground.counters.iter()),
+    };
     let now = read_seconds_since_epoch();
     thread::scope(|scope| {
-        let looking = scope.spawn(|| {
-            collect_latest_releases(&asked, &counters_dir.path, now, find_latest_release)
+        let looking = scope.spawn(|| match asked.is_empty() {
+            true => (Vec::new(), None),
+            false => collect_latest_releases(&asked, &counters_dir.path, now, find_latest_release),
         });
         print_header(out, "== corpora")?;
-        for corpus in &ground.corpora {
-            print_line(out, &describe_corpus(corpus, ground))?;
+        let corpora: Vec<Vec<Cell>> = ground
+            .corpora
+            .iter()
+            .map(|corpus| describe_corpus(corpus, ground))
+            .collect();
+        for line in lay_out_rows(&corpora) {
+            print_line(out, &line)?;
         }
         let own = describe_own_definitions(ground);
         if !own.is_empty() {
             print_header(out, "== definitions of your own")?;
-            for line in own {
+            for line in lay_out_rows(&own) {
+                print_line(out, &line)?;
+            }
+        }
+        let by_hand = describe_given_instances(&ground.config);
+        if !by_hand.is_empty() {
+            print_header(out, "== instances of your own")?;
+            for line in lay_out_rows(&by_hand) {
                 print_line(out, &line)?;
             }
         }
         print_header(out, "== where these come from")?;
-        for line in describe_places(options, ground) {
+        for line in lay_out_rows(&describe_places(options, ground)) {
             print_line(out, &line)?;
         }
         let (lookups, warning) = looking.join().unwrap_or_default();
         print_header(out, "== counters")?;
         print_line(out, &describe_home(&counters_dir))?;
         print_line(out, "")?;
-        for definition in &ground.counters {
-            let line = describe_counter(
-                definition,
-                &manifest,
-                &lookups,
-                &counters_dir.path,
-                ground.platform,
-            );
-            print_line(out, &line)?;
+        // The staged builds stand under the counters they are builds of, so both are one table.
+        let mut counters: Vec<Vec<Cell>> = ground
+            .counters
+            .iter()
+            .map(|definition| {
+                describe_counter(
+                    definition,
+                    &manifest,
+                    &lookups,
+                    &counters_dir.path,
+                    ground.platform,
+                )
+            })
+            .collect();
+        let staged = describe_given(&counters_dir.path);
+        let how_many = counters.len();
+        counters.extend(staged);
+        let lines = lay_out_rows(&counters);
+        for line in lines.iter().take(how_many) {
+            print_line(out, line)?;
         }
-        if let Some(line) = describe_given(&counters_dir.path) {
+        for line in lines.iter().skip(how_many) {
             print_line(out, "")?;
-            print_line(out, &line)?;
+            print_line(out, line)?;
         }
         let strays = describe_strays(&manifest, &ground.counters);
         if !strays.is_empty() {
@@ -886,6 +932,38 @@ impl Drop for Scratch {
     }
 }
 
+// A dry fetch downloads nothing and creates nothing, not even the directory the binaries would
+// land in, so all it can do is name what it would have taken and where.
+fn say_what_fetch_would_take(
+    out: &mut dyn Write,
+    options: &Options,
+    plan: &FetchPlan,
+    definitions: &[Definition],
+) -> Result<i32, String> {
+    let wanted = choose_what_to_fetch(options, definitions);
+    print_header(out, "== dry run")?;
+    print_line(out, "   nothing is downloaded and nothing is written")?;
+    if !wanted.is_empty() {
+        print_line(
+            out,
+            &format!("   counters   {}", show_path(&plan.counters_dir)),
+        )?;
+        for definition in wanted {
+            print_line(out, &format!("      {}", definition.name))?;
+        }
+    }
+    if !plan.corpora.is_empty() {
+        print_line(out, "   corpora")?;
+        for (corpus, checkout) in &plan.corpora {
+            print_line(
+                out,
+                &format!("      {:<10} {}", corpus.name, show_path(checkout)),
+            )?;
+        }
+    }
+    Ok(0)
+}
+
 // Counters are fetched when they are asked for by name or with all, so a line that only names a
 // corpus leaves the binaries alone.
 fn choose_what_to_fetch<'a>(
@@ -988,7 +1066,8 @@ fn check_corpus(
     locations: &Locations,
     definitions: &[Definition],
     platform: Platform,
-) -> Result<i32, String> {
+    releases: Option<&[String]>,
+) -> Result<(i32, Vec<String>), String> {
     check_commit(&locations.corpus, &locations.checkout)?;
     let chosen = build_instances(definitions, locations, options, platform)?;
     print_how_the_counters_were_chosen(out, &chosen)?;
@@ -1003,12 +1082,9 @@ fn check_corpus(
     )?;
     let scratch = Scratch::create("check")?;
     let counters = choose_counters_to_look_up(instances.iter().map(|i| &i.definition));
-    let now = read_seconds_since_epoch();
-    let (checked, looked_up) = thread::scope(|scope| {
-        let lookups = scope.spawn(|| {
-            collect_latest_releases(&counters, &locations.counters_dir, now, find_latest_release)
-        });
-        let checked = check_everything(
+    let names: Vec<String> = counters.iter().map(|d| d.name.clone()).collect();
+    let (bad, nothing_compared) = match releases {
+        None => check_everything(
             out,
             options,
             locations,
@@ -1016,16 +1092,40 @@ fn check_corpus(
             control,
             platform,
             scratch.get_path(),
-        );
-        (checked, lookups.join())
-    });
-    let (bad, nothing_compared) = checked?;
-    let (lookups, warning) =
-        looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
-    print_latest_releases(out, &lookups)?;
-    if let Some(warning) = warning {
-        print_warning(out, &warning)?;
-    }
+        )?,
+        Some(earlier) => {
+            let asked = add_counters_of_earlier_corpora(counters, earlier, definitions);
+            let now = read_seconds_since_epoch();
+            let (checked, looked_up) = thread::scope(|scope| {
+                let lookups = scope.spawn(|| {
+                    collect_latest_releases(
+                        &asked,
+                        &locations.counters_dir,
+                        now,
+                        find_latest_release,
+                    )
+                });
+                let checked = check_everything(
+                    out,
+                    options,
+                    locations,
+                    &instances,
+                    control,
+                    platform,
+                    scratch.get_path(),
+                );
+                (checked, lookups.join())
+            });
+            let checked = checked?;
+            let (lookups, warning) =
+                looked_up.map_err(|_| "the release lookups stopped short".to_string())?;
+            print_latest_releases(out, &lookups)?;
+            if let Some(warning) = warning {
+                print_warning(out, &warning)?;
+            }
+            checked
+        }
+    };
     print_line(out, "")?;
     if bad.is_empty() {
         let verdict = if nothing_compared {
@@ -1034,7 +1134,7 @@ fn check_corpus(
             "all good."
         };
         print_line(out, &paint(Color::Green, verdict).to_string())?;
-        return Ok(0);
+        return Ok((0, names));
     }
     print_line(
         out,
@@ -1044,7 +1144,22 @@ fn check_corpus(
         )
         .to_string(),
     )?;
-    Ok(1)
+    Ok((1, names))
+}
+
+fn add_counters_of_earlier_corpora<'a>(
+    mut asked: Vec<&'a Definition>,
+    earlier: &[String],
+    definitions: &'a [Definition],
+) -> Vec<&'a Definition> {
+    for name in earlier {
+        if !asked.iter().any(|d| &d.name == name)
+            && let Some(found) = definitions.iter().find(|d| &d.name == name)
+        {
+            asked.push(found);
+        }
+    }
+    asked
 }
 
 fn measure_corpus(
@@ -1073,9 +1188,14 @@ fn measure_corpus(
     }
     let (instances, control) = (chosen.instances, chosen.control);
     let is_local = instances.iter().any(Instance::is_an_experiment);
-    let collected = collect_records(&locations.out);
+    let collected = collect_records(&locations.history);
     let against = match &options.against {
-        Some(stamp) => Some(find_named_run(&collected, stamp, &locations.out, is_local)?),
+        Some(stamp) => Some(find_named_run(
+            &collected,
+            stamp,
+            &locations.history,
+            is_local,
+        )?),
         None => None,
     };
     let settings = Settings {
@@ -2089,11 +2209,8 @@ fn check_the_page(out: &mut dyn Write, results: &Path, found: &[FoundRun]) -> Re
 }
 
 fn describe_home(chosen: &Chosen) -> String {
-    format!(
-        "   {}   {}",
-        show_path(&chosen.path),
-        paint(Color::Grey, &format!("from {}", chosen.said_by))
-    )
+    let said = paint(Color::Grey, &format!("from {}", chosen.said_by));
+    lay_out_rows(&[vec![cell(show_path(&chosen.path)), cell(said.to_string())]]).remove(0)
 }
 
 fn describe_counter(
@@ -2102,7 +2219,7 @@ fn describe_counter(
     lookups: &[Lookup],
     dir: &Path,
     platform: Platform,
-) -> String {
+) -> Vec<Cell> {
     let declared = match &definition.acquisition {
         Some(how) => how.version.clone(),
         None => String::new(),
@@ -2116,20 +2233,16 @@ fn describe_counter(
         Some(_) => paint(Color::Yellow, &declared).to_string(),
         None => declared.clone(),
     };
-    let (beside, plain) = match &latest {
-        Some(found) => {
-            let said = format!("latest {found}");
-            (said.clone(), said)
-        }
-        None => (String::new(), String::new()),
+    let beside = match &latest {
+        Some(found) => format!("latest {found}"),
+        None => String::new(),
     };
-    format!(
-        "   {:<10} {} {} {}",
-        definition.name,
-        hold_width(&painted, &declared, VERSION_WIDTH),
-        hold_width(&beside, &plain, LATEST_WIDTH),
-        describe_binary(definition, manifest, dir, platform)
-    )
+    vec![
+        cell(definition.name.clone()),
+        cell(painted),
+        cell(beside),
+        cell(describe_binary(definition, manifest, dir, platform)),
+    ]
 }
 
 fn describe_binary(
@@ -2191,7 +2304,7 @@ fn describe_strays(manifest: &Manifest, counters: &[Definition]) -> Vec<String> 
     lines
 }
 
-fn describe_given(dir: &Path) -> Option<String> {
+fn describe_given(dir: &Path) -> Option<Vec<Cell>> {
     let bytes = add_up_files(&dir.join(GIVEN_DIR));
     if bytes == 0 {
         return None;
@@ -2205,28 +2318,29 @@ fn describe_given(dir: &Path) -> Option<String> {
         bytes if bytes <= A_LOUD_GIVEN => paint(Color::Yellow, &size),
         _ => paint(Color::Red, &size),
     };
-    Some(format!(
-        "   {GIVEN_DIR:<10} {painted} of builds staged by --given"
-    ))
+    Some(vec![
+        cell(GIVEN_DIR.to_string()),
+        cell(format!("{painted} of builds staged by --given")),
+    ])
 }
 
-fn describe_corpus(corpus: &Corpus, ground: &crate::Ground) -> String {
+fn describe_corpus(corpus: &Corpus, ground: &crate::Ground) -> Vec<Cell> {
     let name = &corpus.name;
     let Some(home) = choose_corpus_home(name, &ground.config, ground.data_dir.as_deref()) else {
         let said = paint(Color::Yellow, "no place on this machine to keep it");
-        return format!("   {name:<10} {said}");
+        return vec![cell(name.clone()), cell(said.to_string())];
     };
-    let (state, plain) = describe_checkout(corpus, &home.path);
+    let (state, _) = describe_checkout(corpus, &home.path);
     let tail = match home.path.is_dir() {
         true => format!("from {}", home.said_by),
         false => format!("fetch --corpus {name}"),
     };
-    format!(
-        "   {name:<10} {} {} {}",
-        hold_width(&state, &plain, STATE_WIDTH),
-        hold_width(&paint(Color::Grey, &tail).to_string(), &tail, TAIL_WIDTH),
-        show_path(&home.path)
-    )
+    vec![
+        cell(name.clone()),
+        cell(state),
+        cell(paint(Color::Grey, &tail).to_string()),
+        cell(show_path(&home.path)),
+    ]
 }
 
 fn describe_checkout(corpus: &Corpus, checkout: &Path) -> (String, String) {
@@ -2281,43 +2395,139 @@ fn describe_changes(checkout: &Path) -> (String, bool) {
     (format!(", {changed} changed"), false)
 }
 
-fn describe_own_definitions(ground: &crate::Ground) -> Vec<String> {
-    let mut lines = Vec::new();
-    for definition in ground.counters.iter().filter(|d| d.added) {
-        lines.push(format!(
-            "   {:<10} {}",
-            definition.name,
-            show_path(&definition.path)
-        ));
+// The [given] tables of the conf name builds that no fetch knows about, so status is the only
+// place that can say they are there at all.
+fn describe_given_instances(config: &Config) -> Vec<Vec<Cell>> {
+    let mut rows = Vec::new();
+    for (name, entry) in &config.given {
+        let mut said: Vec<(&str, String)> = Vec::new();
+        if let Some(binary) = &entry.binary {
+            said.push(("binary", describe_where(binary)));
+        }
+        if let Some(definition) = &entry.definition {
+            said.push(("definition", describe_where(definition)));
+        }
+        if !entry.args.is_empty() {
+            said.push(("args", entry.args.join(" ")));
+        }
+        if said.is_empty() {
+            said.push((
+                "binary",
+                paint(
+                    Color::Yellow,
+                    "nothing named, so the counter of that name runs",
+                )
+                .to_string(),
+            ));
+        }
+        for (at, (what, where_it_sits)) in said.into_iter().enumerate() {
+            let head = match at {
+                0 => name.clone(),
+                _ => String::new(),
+            };
+            rows.push(vec![
+                cell(head),
+                cell(what.to_string()),
+                cell(where_it_sits),
+            ]);
+        }
     }
-    for corpus in ground.corpora.iter().filter(|c| c.added) {
-        lines.push(format!(
-            "   {:<10} {}",
-            corpus.name,
-            show_path(&corpus.path)
-        ));
-    }
-    lines
+    rows
 }
 
-fn describe_places(options: &Options, ground: &crate::Ground) -> Vec<String> {
-    let said = |what: &str, path: String| format!("   {what:<10} {path}");
+fn describe_where(path: &Path) -> String {
+    match path.exists() {
+        true => show_path(path),
+        false => paint(
+            Color::Yellow,
+            &format!("{}, which is not there", show_path(path)),
+        )
+        .to_string(),
+    }
+}
+
+fn describe_own_definitions(ground: &crate::Ground) -> Vec<Vec<Cell>> {
+    let mut rows = Vec::new();
+    for definition in ground.counters.iter().filter(|d| d.added) {
+        rows.push(vec![
+            cell(definition.name.clone()),
+            cell(show_path(&definition.path)),
+        ]);
+    }
+    for corpus in ground.corpora.iter().filter(|c| c.added) {
+        rows.push(vec![
+            cell(corpus.name.clone()),
+            cell(show_path(&corpus.path)),
+        ]);
+    }
+    rows
+}
+
+fn describe_places(options: &Options, ground: &crate::Ground) -> Vec<Vec<Cell>> {
+    let said = |what: &str, path: String| vec![cell(what.to_string()), cell(path)];
     let conf = match ground.config_path.is_file() {
         true => show_path(&ground.config_path),
         false => format!("{}, which is not there", show_path(&ground.config_path)),
     };
-    let mut lines = vec![said("conf", conf)];
+    let mut rows = vec![said("conf", conf)];
     if let Some(dir) = &ground.data_dir {
-        lines.push(said("data", show_path(dir)));
+        rows.push(said("data", show_path(dir)));
     }
     let results = resolve_out(options, &ground.config);
-    lines.push(said("results", show_path(&results)));
-    lines
+    rows.push(said("results", show_path(&results)));
+    rows
 }
 
-fn hold_width(painted: &str, plain: &str, width: usize) -> String {
-    let gap = width.saturating_sub(plain.chars().count());
-    format!("{painted}{}", " ".repeat(gap))
+// What one column of a status row holds: the text as it is printed, colour and all, and what it
+// is worth on the screen, since the bytes that carry colour take up none of it.
+struct Cell {
+    painted: String,
+    plain: String,
+}
+
+fn cell(text: String) -> Cell {
+    Cell {
+        plain: strip_ansi(&text),
+        painted: text,
+    }
+}
+
+// Every column is as wide as the widest cell under it and two spaces from the next. A cell that
+// ends its row is never padded, so how wide it is settles nothing, and a column every row left
+// empty takes no room at all.
+fn lay_out_rows(rows: &[Vec<Cell>]) -> Vec<String> {
+    let mut widths: Vec<usize> = Vec::new();
+    let mut filled: Vec<bool> = Vec::new();
+    for row in rows {
+        for (at, held) in row.iter().enumerate() {
+            if widths.len() == at {
+                widths.push(0);
+                filled.push(false);
+            }
+            let wide = held.plain.chars().count();
+            filled[at] |= wide > 0;
+            if at + 1 < row.len() {
+                widths[at] = widths[at].max(wide);
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    for row in rows {
+        let mut line = String::new();
+        for (at, held) in row.iter().enumerate() {
+            if !filled[at] {
+                continue;
+            }
+            if !line.is_empty() {
+                line.push_str(&" ".repeat(COLUMN_GAP));
+            }
+            line.push_str(&held.painted);
+            let gap = widths[at].saturating_sub(held.plain.chars().count());
+            line.push_str(&" ".repeat(gap));
+        }
+        lines.push(format!("{ROW_OPENING}{}", line.trim_end()));
+    }
+    lines
 }
 
 fn describe_exclusions(state: &DefenderState) -> String {
@@ -2381,6 +2591,8 @@ mod tests {
     fn a_command_that_takes_one_corpus_names_the_ones_it_was_handed() {
         let of = |name: &str| Locations {
             counters_dir: PathBuf::from("D:/c"),
+            staging: PathBuf::from("D:/c"),
+            history: PathBuf::from("D:/out"),
             corpus: linebench::corpus::parse_corpus(
                 &format!("name = \"{name}\"\nextensions = [\"c\"]\n"),
                 Path::new(&format!("{name}.toml")),
@@ -2442,17 +2654,43 @@ mod tests {
     }
 
     #[test]
+    fn every_status_column_is_as_wide_as_its_widest_cell_and_two_spaces_apart() {
+        let row = |cells: &[&str]| cells.iter().map(|text| cell(text.to_string())).collect();
+        let rows: Vec<Vec<Cell>> = vec![
+            row(&["cloc", "2.10", "latest 2.10", "here"]),
+            row(&["mezura", "3.1.1", "", "not here"]),
+            row(&["tokei", "15.0.0", "latest 15.0.0", "here"]),
+            row(&["given", "4 MB of builds staged by --given"]),
+        ];
+        assert_eq!(
+            lay_out_rows(&rows),
+            [
+                "   cloc    2.10    latest 2.10    here",
+                "   mezura  3.1.1                  not here",
+                "   tokei   15.0.0  latest 15.0.0  here",
+                "   given   4 MB of builds staged by --given",
+            ]
+        );
+        let alone = vec![row(&["linux", "no place on this machine to keep it"])];
+        assert_eq!(
+            lay_out_rows(&alone),
+            ["   linux  no place on this machine to keep it"]
+        );
+    }
+
+    #[test]
     fn a_staged_build_is_named_by_its_size_and_an_empty_given_says_nothing() {
         let dir = env::temp_dir().join("linebench-a_staged_build_is_named_by_its_size");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(GIVEN_DIR)).unwrap();
-        assert_eq!(describe_given(&dir), None, "an empty given spoke");
+        let one_line = |rows: Option<Vec<Cell>>| lay_out_rows(&[rows.unwrap()]).remove(0);
+        assert!(describe_given(&dir).is_none(), "an empty given spoke");
         let staged = dir.join(GIVEN_DIR).join("mezura@dev");
         fs::create_dir_all(&staged).unwrap();
         fs::write(staged.join("small"), vec![7u8; 64]).unwrap();
-        let little = describe_given(&dir).unwrap();
+        let little = one_line(describe_given(&dir));
         fs::write(staged.join("mezura"), vec![7u8; 3 * A_MEGABYTE as usize]).unwrap();
-        let said = describe_given(&dir).unwrap();
+        let said = one_line(describe_given(&dir));
         fs::remove_dir_all(&dir).unwrap();
         assert!(little.contains("under 1 MB"), "{little}");
         assert!(said.contains("3 MB"), "{said}");

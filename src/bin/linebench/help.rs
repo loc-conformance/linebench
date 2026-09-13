@@ -138,6 +138,10 @@ linebench version
 
     Prints this build's version.
 
+--dry-run can be used with any command and leaves nothing behind. Everything that would be written goes
+to a directory in the temp folder, which is cleaned up when the command finishes. No release is
+looked up and nothing is downloaded: a fetch only names what it would have taken. On the `run` command, the machine is is prepared as normal so that the results are accurate.
+
 A flag beats an environment variable, which beats linebench.conf. The conf is optional and holds
 what belongs to this machine: control, counters, out, skip, given and the corpora that sit
 somewhere other than where fetch puts them. A --help after a command prints that command alone.

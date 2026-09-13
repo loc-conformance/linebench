@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process;
 
 use serde::Deserialize;
 
@@ -24,6 +25,7 @@ const THE_CONF: &str = "the conf";
 const THE_DATA_DIR: &str = "the data directory";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
+pub const DRY_RUN_DIR: &str = "linebench-dry-run";
 pub const COMMANDS: [&str; 9] = [
     "run", "fetch", "check", "noise", "insights", "report", "status", "verify", "version",
 ];
@@ -115,6 +117,7 @@ pub struct Options {
     pub allow_elevated: bool,
     pub keep_raw: bool,
     pub latest: bool,
+    pub dry_run: bool,
     #[cfg(feature = "maintenance")]
     pub as_json: bool,
 }
@@ -135,9 +138,11 @@ pub struct Wanted {
 #[derive(Debug)]
 pub struct Locations {
     pub counters_dir: PathBuf,
+    pub staging: PathBuf,
     pub corpus: Corpus,
     pub checkout: PathBuf,
     pub out: PathBuf,
+    pub history: PathBuf,
     pub given: BTreeMap<String, GivenEntry>,
     pub control: Option<String>,
     pub skip: Vec<String>,
@@ -251,6 +256,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--allow-unequal-exclusions" => options.allow_unequal = true,
             "--allow-elevated" => options.allow_elevated = true,
             "--keep-raw" => options.keep_raw = true,
+            "--dry-run" => options.dry_run = true,
             "--latest" => options.latest = true,
             "--verify" => options.verify = true,
             other
@@ -326,8 +332,24 @@ pub fn read_config(path: &Path) -> Result<Config, String> {
     read_toml(path)
 }
 
-/// In full, so that every path the commands print can be pasted into another one.
+// Everything a dry run would write goes here, and main takes the whole directory away when the
+// command ends, so a run under --dry-run leaves the machine as it found it. The process id is in
+// the name, so two dry runs at once do not write over each other.
+pub fn find_dry_run_dir() -> PathBuf {
+    env::temp_dir().join(format!("{DRY_RUN_DIR}-{}", process::id()))
+}
+
 pub fn resolve_out(options: &Options, config: &Config) -> PathBuf {
+    match options.dry_run {
+        true => find_dry_run_dir().join(DEFAULT_OUT),
+        false => find_results_dir(options, config),
+    }
+}
+
+/// In full, so that every path the commands print can be pasted into another one. Where the runs
+/// that are already there are read from: a dry run writes somewhere else but still reads these,
+/// so what it says about earlier runs is what the real run would say.
+pub fn find_results_dir(options: &Options, config: &Config) -> PathBuf {
     let out = options
         .out
         .clone()
@@ -607,14 +629,21 @@ pub fn resolve_locations(
     let chosen = choose_corpora(options, config, config_path, corpora, data_dir)?;
     let given = build_given(options, config)?;
     let out = resolve_out(options, config);
+    let history = find_results_dir(options, config);
+    let staging = match options.dry_run {
+        true => find_dry_run_dir(),
+        false => counters_dir.clone(),
+    };
     let locations = chosen
         .taken
         .into_iter()
         .map(|(corpus, checkout)| Locations {
             counters_dir: counters_dir.clone(),
+            staging: staging.clone(),
             corpus,
             checkout,
             out: out.clone(),
+            history: history.clone(),
             given: given.clone(),
             control: config.control.clone(),
             skip: config.skip.clone(),
@@ -1567,6 +1596,29 @@ mod tests {
         );
         let declared = refused("run linux,jdk --extensions rs");
         assert!(declared.contains("linux declares its own"), "{declared}");
+    }
+
+    #[test]
+    fn a_dry_run_sends_the_results_and_the_staged_builds_to_a_place_of_its_own_and_the_conf_is_not_read_for_them()
+     {
+        let config: Config = toml::from_str("counters = \"D:/c\"\nout = \"D:/results\"\n").unwrap();
+        let corpora = [named_corpus("src")].to_vec();
+        let conf = Path::new("linebench.conf");
+        let wet = parse("run src --corpus-path .").unwrap();
+        let wet = resolve_locations(&wet, &config, conf, &corpora, None).unwrap();
+        assert!(wet.locations[0].out.ends_with("results"));
+        assert!(!wet.locations[0].out.starts_with(find_dry_run_dir()));
+        assert_eq!(wet.locations[0].staging, wet.locations[0].counters_dir);
+
+        let dry = parse("run src --corpus-path . --dry-run").unwrap();
+        assert!(dry.dry_run);
+        let dry = resolve_locations(&dry, &config, conf, &corpora, None).unwrap();
+        let home = find_dry_run_dir();
+        assert_eq!(dry.locations[0].out, home.join(DEFAULT_OUT));
+        assert_eq!(dry.locations[0].staging, home);
+        assert_eq!(dry.locations[0].checkout, Path::new(".").join("src"));
+        assert_eq!(dry.locations[0].history, wet.locations[0].out);
+        assert_eq!(wet.locations[0].history, wet.locations[0].out);
     }
 
     #[test]

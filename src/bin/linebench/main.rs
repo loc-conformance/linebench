@@ -31,8 +31,9 @@ use linebench::machine::{Platform, VERSION, detect_platform};
 use crate::config::COUNTERS_DIR_NAME;
 
 use crate::config::{
-    Command, Config, Locations, Options, check_skip_names, find_config, find_data_dir, parse_args,
-    read_config, resolve_fetch, resolve_locations, resolve_out,
+    Command, Config, Locations, Options, check_skip_names, find_config, find_data_dir,
+    find_dry_run_dir, find_results_dir, parse_args, read_config, resolve_fetch, resolve_locations,
+    resolve_out,
 };
 use crate::help::{find_help_of, get_help, paint_help};
 use crate::output::{Color, Output, enable_colors, paint, print_line};
@@ -67,6 +68,7 @@ fn dispatch() -> Result<i32, String> {
     let Some(command) = options.command else {
         return print_line(&mut out, &paint_help(&get_help())).map(|_| 0);
     };
+    let _swept_up = options.dry_run.then(DryRun::create);
     match command {
         Command::Version => print_line(&mut out, &format!("linebench {VERSION}")).map(|_| 0),
         #[cfg(feature = "maintenance")]
@@ -78,7 +80,12 @@ fn dispatch() -> Result<i32, String> {
         ),
         Command::Report => {
             let config = read_config(&find_config())?;
-            commands::run_report(&mut out, &resolve_out(&options, &config), options.verify)
+            commands::run_report(
+                &mut out,
+                &find_results_dir(&options, &config),
+                &resolve_out(&options, &config),
+                options.verify,
+            )
         }
         Command::Status => {
             let ground = read_ground(&mut out, &options)?;
@@ -144,10 +151,30 @@ struct Ground {
     corpora: Vec<Corpus>,
 }
 
+// A dry run writes where nobody looks and the directory goes when the command ends, however it
+// ends, so what the run would have left behind is never there to find.
+struct DryRun(PathBuf);
+
+impl DryRun {
+    fn create() -> DryRun {
+        let dir = find_dry_run_dir();
+        let _ = fs::remove_dir_all(&dir);
+        DryRun(dir)
+    }
+}
+
+impl Drop for DryRun {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn read_ground(out: &mut dyn Write, options: &Options) -> Result<Ground, String> {
     let platform = detect_platform()?;
     let data_dir = find_data_dir();
-    if let Some(dir) = &data_dir {
+    if let Some(dir) = &data_dir
+        && !options.dry_run
+    {
         let _ = fs::create_dir_all(dir);
     }
     let config_path = find_config();
