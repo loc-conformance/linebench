@@ -526,8 +526,9 @@ file count the corpus declares. Outside the tolerance the run still goes on, and
 page say what was found, because the times remain information, only no longer a comparison of equal
 work.
 
-**The JSON.** `--expect-identical mezura=mezura@dev` (pairs, comma separated) checks that two
-instances of one counter printed the same JSON, in both tables, before any timing starts. The
+**The JSON.** `--expect-identical mezura=mezura@dev` (pairs, comma separated), a flag of `run`,
+checks that two instances of one counter printed the same JSON, in both tables, before any timing
+starts. The
 fields the definition lists as `volatile` (a timestamp, its version, its own timing) are set aside,
 lists of objects are compared regardless of their order, and the first difference is named with
 both values. The verdict is printed, kept in the record and shown on the page, and a run where the

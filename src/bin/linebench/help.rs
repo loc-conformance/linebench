@@ -31,8 +31,8 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
 
 linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--control <instance>]
                 [--allow-unequal-exclusions] [--corpus-path <dir>] [--given <c>@<tag>=<path>]
-                [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--expect-identical a=b]
-                [--counters-dir <dir>] [--add <path>]
+                [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--counters-dir <dir>]
+                [--add <path>]
 
     Runs every counter once over the target, reads its counts back out of its own output, and
     holds them against each other and against the count the corpus definition declares. Nothing
@@ -50,7 +50,6 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--cont
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target
-    --expect-identical a=b     instances whose JSON output has to match, volatile fields aside
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
 
@@ -228,7 +227,7 @@ pub fn get_help() -> String {
 /// The flags a command takes, read off the usage line of its own help block, so that the text and
 /// what the parser allows cannot drift apart. ALWAYS is the handful that belong to no command.
 pub fn find_flags_of(named: &str) -> Vec<String> {
-    let block = find_help_of(named);
+    let block = find_block_of(named).unwrap_or_default();
     let usage = block
         .lines()
         .take_while(|line| !line.trim().is_empty())
@@ -247,6 +246,12 @@ pub fn find_flags_of(named: &str) -> Vec<String> {
 }
 
 pub fn find_help_of(named: &str) -> String {
+    find_block_of(named).unwrap_or_else(get_help)
+}
+
+/// Nothing for a command with no block of its own, which today is only the version behind its
+/// flag. A caller that would print the whole help in its place had better say nothing instead.
+pub fn find_block_of(named: &str) -> Option<String> {
     let whole = get_help();
     let bare = format!("{TOOL_AND_SPACE}{named}");
     let opening = format!("{bare} ");
@@ -261,8 +266,8 @@ pub fn find_help_of(named: &str) -> String {
         block.push(line);
     }
     match block.is_empty() {
-        true => whole,
-        false => format!("{}\n", block.join("\n").trim_end()),
+        true => None,
+        false => Some(format!("{}\n", block.join("\n").trim_end())),
     }
 }
 

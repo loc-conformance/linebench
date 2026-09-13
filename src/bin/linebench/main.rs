@@ -77,6 +77,7 @@ fn dispatch() -> Result<i32, String> {
             Path::new(COUNTERS_DIR_NAME),
             options.target.as_deref(),
             options.as_json,
+            options.dry_run,
         ),
         Command::Report => {
             let config = read_config(&find_config())?;

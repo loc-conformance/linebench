@@ -21,6 +21,7 @@ pub fn run_bump_versions(
     dir: &Path,
     only: Option<&str>,
     as_json: bool,
+    dry_run: bool,
 ) -> Result<i32, String> {
     let definitions = read_definitions(dir)?;
     if let Some(name) = only
@@ -63,16 +64,25 @@ pub fn run_bump_versions(
             say(describe_latest(&definition.name, how, None, &latest))?;
             continue;
         }
-        let file = match write_the_version_into(dir, &definition.name, &latest) {
-            Ok(file) => file,
-            Err(refused) => {
-                failed.push(definition.name.clone());
-                say(paint(Color::Red, &refused).to_string())?;
-                continue;
-            }
+        // A dry run asks the channels, since asking is the whole of this command, and stops
+        // before the definition on disk is touched.
+        let file = match dry_run {
+            true => dir.join(format!("{}.toml", definition.name)),
+            false => match write_the_version_into(dir, &definition.name, &latest) {
+                Ok(file) => file,
+                Err(refused) => {
+                    failed.push(definition.name.clone());
+                    say(paint(Color::Red, &refused).to_string())?;
+                    continue;
+                }
+            },
+        };
+        let would = match dry_run {
+            true => " would be",
+            false => "",
         };
         say(format!(
-            "{} raised to {} in {}",
+            "{}{would} raised to {} in {}",
             how.version,
             paint(Color::Green, &latest),
             file.display()

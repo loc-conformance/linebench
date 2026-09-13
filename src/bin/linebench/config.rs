@@ -12,7 +12,7 @@ use linebench::files::read_toml;
 use linebench::insight::INSIGHT_PARTS;
 use linebench::os::capture_with_status;
 
-use crate::help::{find_flags_of, find_help_of, get_help, name_every_command};
+use crate::help::{find_block_of, find_flags_of, find_help_of, get_help, name_every_command};
 
 pub const TOOL: &str = "linebench";
 pub const CONFIG_FILE: &str = "linebench.conf";
@@ -199,7 +199,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     None => get_help(),
                 });
             }
-            "--version" | "-V" => options.command = Some(Command::Version),
+            // Answered where it is read, like --help, so that it is the answer whatever else was
+            // typed beside it.
+            "--version" | "-V" => {
+                options.command = Some(Command::Version);
+                return Ok(options);
+            }
             "--counters" => {
                 let first = value()?;
                 let named = read_list(flag, first, &mut rest)?;
@@ -266,7 +271,13 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--against" => options.against = Some(value()?),
             "--control" => options.control = Some(value()?),
             "--warmup" => options.warmup = Some(parse_number(flag, &value()?)?),
-            "--runs" => options.runs = Some(parse_number(flag, &value()?)?),
+            "--runs" => {
+                let runs = parse_number(flag, &value()?)?;
+                if runs == 0 {
+                    return Err(format!("{flag} takes a number above zero"));
+                }
+                options.runs = Some(runs);
+            }
             "--settle" => options.settle = Some(parse_number(flag, &value()?)?),
             "--out" => options.out = Some(PathBuf::from(value()?)),
             "--no-prep" => options.no_prep = true,
@@ -990,10 +1001,10 @@ fn explain_the_unknown_argument(other: &str, command: Option<Command>) -> String
             name_every_command()
         );
     };
-    format!(
-        "{other} is not a flag of this command\n\n{}",
-        find_help_of(command.as_str())
-    )
+    match find_block_of(command.as_str()) {
+        Some(block) => format!("{other} is not a flag of this command\n\n{block}"),
+        None => format!("{other} is not a flag of this command"),
+    }
 }
 
 fn split_assignment(flag: &str, text: &str) -> Result<(String, String), String> {
@@ -1684,11 +1695,31 @@ mod tests {
             "status --dry-run",
             "verify /tmp/run --dry-run",
             "noise linux --runs 9",
+            "noise /tmp/tree --extensions rs",
             "insights linux --only floor",
             "run linux --expect-identical a=b",
+            "check linux --allow-unequal-exclusions",
+            "run linux -y",
+            "insights linux -y",
         ] {
             assert!(parse(line).is_ok(), "{line}: {:?}", parse(line));
         }
+        assert!(parse("check linux -y").is_err());
+        for line in [
+            "--version --out /tmp/x",
+            "run linux --runs 5 --version",
+            "fetch -V",
+        ] {
+            assert_eq!(
+                parse(line).unwrap().command,
+                Some(Command::Version),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            parse("run linux --runs 0").unwrap_err(),
+            "--runs takes a number above zero"
+        );
     }
 
     fn parse(line: &str) -> Result<Options, String> {

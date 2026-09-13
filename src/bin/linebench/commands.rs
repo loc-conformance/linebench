@@ -92,6 +92,7 @@ const SYSCALLS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const MEMORY_TABLE: Table = Table::SameWork;
 const NOISE_RUNS: u32 = 5;
+const LEAST_NOISE_RUNS: u32 = 3;
 const NOISE_RETRY_SECONDS: u64 = 5;
 const UNSTEADY_STEP: usize = 2;
 const UNREADABLE_OUTPUT_LINES: usize = 10;
@@ -312,6 +313,21 @@ pub fn run_noise(
     definitions: &[Definition],
     platform: Platform,
 ) -> Result<i32, String> {
+    // The runs and the settle are the run command's, since the point of noise is to time the
+    // control the way a run would and see how far apart the answers come out. The first time is
+    // dropped as cold, and a spread needs two of them, so three is the fewest that says anything.
+    let runs = options.runs.unwrap_or(NOISE_RUNS);
+    if runs < LEAST_NOISE_RUNS {
+        return Err(format!(
+            "--runs {runs} leaves nothing to compare, since the first run is cold and the spread \
+             is read off the rest. noise takes {LEAST_NOISE_RUNS} or more"
+        ));
+    }
+    let settings = Settings {
+        warmup: 0,
+        runs,
+        settle: options.settle.unwrap_or_default(),
+    };
     let locations = find_the_one_corpus("noise", locations)?;
     check_commit(&locations.corpus, &locations.checkout)?;
     let chosen = build_instances(definitions, locations, options, platform)?;
@@ -319,13 +335,6 @@ pub fn run_noise(
     let (instances, control) = (chosen.instances, chosen.control);
     let scratch = Scratch::create("noise")?;
     print_header(out, "== noise")?;
-    // The runs and the settle are the run command's, since the point of noise is to time the
-    // control the way a run would and see how far apart the answers come out.
-    let settings = Settings {
-        warmup: 0,
-        runs: options.runs.unwrap_or(NOISE_RUNS),
-        settle: options.settle.unwrap_or_default(),
-    };
     let Some(worst) = judge_noise(
         out, locations, &instances, control, platform, &scratch, settings,
     )?
