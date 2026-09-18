@@ -23,6 +23,11 @@ pub struct Curve {
     pub polls: usize,
     pub wall_ms: u64,
     pub peak_bytes: u64,
+    /// The pages the run was given. A platform that cannot report them leaves it at zero.
+    #[serde(default)]
+    pub faults: u64,
+    #[serde(default)]
+    pub from_disk: u64,
     pub samples: Vec<u64>,
 }
 
@@ -51,6 +56,8 @@ pub fn sample_memory(
     let step = Duration::from_millis(MEMORY_STEP_MS);
     let mut samples = Vec::new();
     let mut peak = 0;
+    let mut faults = 0;
+    let mut from_disk = 0;
     let mut first = started;
     let mut last = started;
     loop {
@@ -63,13 +70,15 @@ pub fn sample_memory(
             Some(status) if status.success() => break,
             Some(status) => return Err(format!("{instance} ended with {status}")),
             None => {
-                if let Some((resident, high)) = reading {
+                if let Some(held) = reading {
                     if samples.is_empty() {
                         first = at;
                     }
                     last = at;
-                    samples.push(resident);
-                    peak = peak.max(high);
+                    samples.push(held.resident);
+                    peak = peak.max(held.peak);
+                    faults = faults.max(held.faults);
+                    from_disk = from_disk.max(held.from_disk);
                 }
                 thread::sleep(step);
             }
@@ -77,9 +86,11 @@ pub fn sample_memory(
     }
     let wall_ms = started.elapsed().as_millis() as u64;
     if platform == Platform::Windows
-        && let Some((_, high)) = read_process_memory(platform, &child)
+        && let Some(held) = read_process_memory(platform, &child)
     {
-        peak = peak.max(high);
+        peak = peak.max(held.peak);
+        faults = faults.max(held.faults);
+        from_disk = from_disk.max(held.from_disk);
     }
     let polls = samples.len();
     let spacing_us = if polls > 1 {
@@ -95,6 +106,8 @@ pub fn sample_memory(
         polls,
         wall_ms,
         peak_bytes: peak,
+        faults,
+        from_disk,
         samples: fold_samples(samples),
     })
 }

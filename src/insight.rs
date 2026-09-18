@@ -48,7 +48,10 @@ const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends.
                           kept as they were laid out.";
 const FLOOR_MEANS: &str = "What a counter costs before it has counted anything.";
 const MEMORY_MEANS: &str = "What each counter held while it counted, sampled while it ran. The \
-                            axis under each curve is the wall time of that run.";
+                            axis under each curve is the wall time of that run, and the pages are \
+                            what the run was given, its own buffers along with the corpus it read.";
+const PAGES_GIVEN: &str = "pages";
+const PAGES_READ_IN: &str = "from disk";
 const SYSCALLS_MEANS: &str = "What each counter asked of the kernel, counted by the tracer.";
 const PMU_MEANS: &str = "What the cpu did while each counter counted, read through perf in three \
                          passes of four events.";
@@ -93,6 +96,7 @@ const BLOCKS: [char; 8] = [
 ];
 const EIGHTHS: usize = 8;
 const AXIS_TICKS: usize = 5;
+const COLUMN_STRIDE: usize = 2;
 const KILOBYTE: f64 = 1024.0;
 const MEGABYTE: u64 = 1024 * 1024;
 const LADDER: [u64; 7] = [
@@ -362,9 +366,11 @@ pub fn format_memory(curves: &[Curve], style: Style) -> Vec<String> {
     for curve in curves {
         lines.push(String::new());
         lines.push(format!(
-            "{INDENT}{}   peak {}   {} samples, {} ms apart",
+            "{INDENT}{}   peak {}{}{}   {} samples, {} ms apart",
             curve.instance,
             format_bytes(curve.peak_bytes),
+            describe_count_of(curve.faults, PAGES_GIVEN),
+            describe_count_of(curve.from_disk, PAGES_READ_IN),
             curve.polls,
             format_spacing(curve.spacing_us)
         ));
@@ -393,7 +399,7 @@ pub fn format_memory(curves: &[Curve], style: Style) -> Vec<String> {
                 tint(&row, edge, style)
             ));
         }
-        let (axis, ticks) = lay_out_ticks(curve.wall_ms, CHART_COLUMNS * 2);
+        let (axis, ticks) = lay_out_ticks(curve.wall_ms, CHART_COLUMNS);
         lines.push(format!("{INDENT}{:>gutter$} {axis}", "0"));
         lines.push(format!("{INDENT}{:>gutter$} {ticks}", ""));
     }
@@ -510,6 +516,17 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
             }
         })
         .collect()
+}
+
+pub fn describe_cold_cache(curve: &Curve) -> Option<String> {
+    match curve.from_disk {
+        0 => None,
+        pages => Some(format!(
+            "{} took {} pages from disk, so that run did not read a warm cache",
+            curve.instance,
+            format_thousands(pages)
+        )),
+    }
 }
 
 pub fn format_pmu(counted: &[Pmu], paranoid: Option<i64>, style: Style) -> Vec<String> {
@@ -702,10 +719,15 @@ fn get_label(top: u64, index: usize) -> String {
     }
 }
 
-fn lay_out_ticks(wall_ms: u64, width: usize) -> (String, String) {
-    let places: Vec<usize> = (0..AXIS_TICKS)
-        .map(|tick| tick * (width - 1) / (AXIS_TICKS - 1))
+/// A drawn column is a block and the space after it, and the row opens with a space the axis line
+/// spends on its corner, so a tick sits at one plus twice its column and its label is that column.
+fn lay_out_ticks(wall_ms: u64, columns: usize) -> (String, String) {
+    let width = columns * COLUMN_STRIDE;
+    let last = columns - 1;
+    let drawn: Vec<usize> = (0..AXIS_TICKS)
+        .map(|tick| tick * last / (AXIS_TICKS - 1))
         .collect();
+    let places: Vec<usize> = drawn.iter().map(|at| 1 + COLUMN_STRIDE * at).collect();
     let mut axis = String::from('\u{2514}');
     for place in 0..width {
         axis.push(if places.contains(&place) {
@@ -715,8 +737,8 @@ fn lay_out_ticks(wall_ms: u64, width: usize) -> (String, String) {
         });
     }
     let mut labels = String::new();
-    for (tick, place) in places.iter().enumerate() {
-        let at = wall_ms * tick as u64 / (AXIS_TICKS - 1) as u64;
+    for (tick, (column, place)) in drawn.iter().zip(&places).enumerate() {
+        let at = wall_ms * *column as u64 / last as u64;
         let text = if tick + 1 == AXIS_TICKS {
             format!("{at} ms")
         } else {
@@ -878,6 +900,13 @@ fn describe_count(count: u64) -> String {
         return String::new();
     }
     format_thousands(count)
+}
+
+fn describe_count_of(count: u64, what: &str) -> String {
+    match count {
+        0 => String::new(),
+        _ => format!("   {} {what}", format_thousands(count)),
+    }
 }
 
 fn describe_multiplexing(counted: &[Pmu]) -> String {
@@ -1109,6 +1138,8 @@ mod tests {
             polls: LEAST_SAMPLES,
             wall_ms: 100,
             peak_bytes,
+            faults: 27_071,
+            from_disk: 0,
             samples: (0..=last).map(|step| peak_bytes * step / last).collect(),
         }
     }
@@ -1551,15 +1582,43 @@ mod tests {
 
     #[test]
     fn the_axis_carries_a_time_at_every_tick_and_the_last_one_sits_on_the_end_of_the_line() {
-        let (axis, labels) = lay_out_ticks(400, 20);
-        assert_eq!(axis.chars().count(), 21);
+        let columns = 20;
+        let (axis, labels) = lay_out_ticks(400, columns);
+        assert_eq!(axis.chars().count(), columns * COLUMN_STRIDE + 1);
         assert_eq!(
             axis.chars().filter(|c| *c == '\u{252c}').count(),
             AXIS_TICKS
         );
-        assert!(labels.starts_with(" 0  100"), "{labels}");
+        assert!(labels.starts_with("  0"), "{labels}");
         let last = labels.rfind("400 ms").expect("the wall closes the axis");
         assert_eq!(last + "400 ms".len() / 2, axis.chars().count() - 1);
+    }
+
+    #[test]
+    fn every_tick_of_the_axis_stands_under_a_column_of_the_chart() {
+        let lines = format_memory(&[build_curve("scc", 100 * MEGABYTE)], Style::Plain);
+        let axis = lines
+            .iter()
+            .find(|line| line.contains('\u{2514}'))
+            .expect("the axis is drawn");
+        let places: Vec<usize> = axis
+            .chars()
+            .enumerate()
+            .filter(|(_, letter)| *letter == '\u{252c}')
+            .map(|(at, _)| at)
+            .collect();
+        let corner = axis
+            .chars()
+            .position(|letter| letter == '\u{2514}')
+            .expect("the axis opens on its corner");
+        assert_eq!(places.len(), AXIS_TICKS, "{axis}");
+        for place in places {
+            let along = place - corner;
+            assert!(
+                along >= COLUMN_STRIDE && along.is_multiple_of(COLUMN_STRIDE),
+                "a tick at {along} past the corner falls between two columns of {axis}"
+            );
+        }
     }
 
     #[test]

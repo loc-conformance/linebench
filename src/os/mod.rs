@@ -22,8 +22,22 @@ const RSS_LINE: &str = "VmRSS:";
 const PEAK_LINE: &str = "VmHWM:";
 const IDLE_COLUMN: usize = 3;
 const IOWAIT_COLUMN: usize = 4;
+/// The tenth and twelfth fields of the line, counted past the last bracket, since the command sits
+/// in the second field and can hold spaces and brackets of its own.
+const MINOR_FAULTS: usize = 7;
+const MAJOR_FAULTS: usize = 9;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
+
+/// What a process holds. The fault count only climbs, so the last reading of a run is its total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Footprint {
+    pub resident: u64,
+    pub peak: u64,
+    pub faults: u64,
+    /// The pages that had to be read in. Windows folds them into its one total, so there it is zero.
+    pub from_disk: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unfinished {
@@ -130,16 +144,28 @@ pub fn is_privileged(platform: Platform) -> bool {
 }
 
 #[cfg(windows)]
-pub fn read_process_memory(_platform: Platform, child: &Child) -> Option<(u64, u64)> {
+pub fn read_process_memory(_platform: Platform, child: &Child) -> Option<Footprint> {
     windows::read_process_memory(child)
 }
 
 #[cfg(unix)]
-pub fn read_process_memory(platform: Platform, child: &Child) -> Option<(u64, u64)> {
+pub fn read_process_memory(platform: Platform, child: &Child) -> Option<Footprint> {
     if !platform.is_linux() {
         return None;
     }
-    parse_proc_status(&fs::read_to_string(format!("/proc/{}/status", child.id())).ok()?)
+    let id = child.id();
+    let (resident, peak) =
+        parse_proc_status(&fs::read_to_string(format!("/proc/{id}/status")).ok()?)?;
+    let (faults, from_disk) = fs::read_to_string(format!("/proc/{id}/stat"))
+        .ok()
+        .and_then(|stat| parse_process_faults(&stat))
+        .unwrap_or_default();
+    Some(Footprint {
+        resident,
+        peak,
+        faults,
+        from_disk,
+    })
 }
 
 #[cfg(windows)]
@@ -164,6 +190,13 @@ pub fn parse_proc_status(text: &str) -> Option<(u64, u64)> {
             .map(|kilobytes| kilobytes * 1024)
     };
     Some((read(RSS_LINE)?, read(PEAK_LINE)?))
+}
+
+pub fn parse_process_faults(text: &str) -> Option<(u64, u64)> {
+    let (_, rest) = text.rsplit_once(')')?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let read = |at: usize| fields.get(at).and_then(|field| field.parse().ok());
+    Some((read(MINOR_FAULTS)?, read(MAJOR_FAULTS)?))
 }
 
 pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
@@ -191,6 +224,16 @@ mod tests {
         assert_eq!(parse_proc_stat(text), Some((16770, 22775)));
         assert_eq!(parse_proc_stat("cpu  1 2 3\n"), None);
         assert_eq!(parse_proc_stat("intr 5\n"), None);
+    }
+
+    #[test]
+    fn the_minor_faults_are_read_past_a_command_name_holding_spaces_and_brackets() {
+        let plain = "4242 (tokei) R 1 4242 4242 0 -1 4194304 61208 0 17 0 31 9 0 0 20 0";
+        assert_eq!(parse_process_faults(plain), Some((61_208, 17)));
+        let awkward = "4242 (my (odd) name) R 1 4242 4242 0 -1 4194304 27071 0 0 0 31 9 0";
+        assert_eq!(parse_process_faults(awkward), Some((27_071, 0)));
+        assert_eq!(parse_process_faults("4242 (tokei) R 1 2 3"), None);
+        assert_eq!(parse_process_faults("no brackets here at all"), None);
     }
 
     #[test]

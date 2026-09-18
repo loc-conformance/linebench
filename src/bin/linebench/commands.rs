@@ -23,8 +23,9 @@ use linebench::insight::{
     MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET, ask_for_everything,
 };
 use linebench::insight::{
-    build_insights_path, format_floor, format_memory, format_pmu, format_syscalls,
-    format_syscalls_summary, get_floor_set_name, write_insights, write_insights_page,
+    build_insights_path, describe_cold_cache, format_floor, format_memory, format_pmu,
+    format_syscalls, format_syscalls_summary, get_floor_set_name, write_insights,
+    write_insights_page,
 };
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
@@ -863,7 +864,12 @@ pub fn run_insights(
                 &args,
                 &scrub,
             ) {
-                Ok(curve) => curves.push(curve),
+                Ok(curve) => {
+                    if let Some(cold) = describe_cold_cache(&curve) {
+                        print_warning(out, &cold)?;
+                    }
+                    curves.push(curve);
+                }
                 Err(refused) => print_warning(out, &refused)?,
             }
         }

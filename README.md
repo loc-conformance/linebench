@@ -311,6 +311,18 @@ fits under, so heights compare directly only between panels with the same top, a
 printed above each one is what to compare. The time axis includes the polling and a cold start, so
 it runs longer than a timed run.
 
+The pages beside the peak are what the run was given, `PageFaultCount` on Windows and `minflt` from
+`/proc/<pid>/stat` on Linux, taken off the same poll. They count a page the first time it is
+touched, so they carry the counter's own buffers along with the corpus it read, and the two
+together separate a counter that holds one large arena from one that takes memory back and asks for
+it again, which the peak on its own never says.
+
+Linux splits off the pages that had to be read in, `majflt` from the same line, and a run with any
+of them carries a `from disk` count beside its pages and a warning while it measures, since a run
+that paid disk was reading a cold cache. Windows counts those inside its one total and offers no
+way to take them apart, so the pages compare between counters of one session and carry no meaning
+against a session from the other system.
+
 **The system calls** are `strace -c -f` once per instance, grouped into families, with the calls
 of a family under it and what each one answered with an error:
 

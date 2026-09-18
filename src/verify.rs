@@ -984,6 +984,8 @@ mod tests {
                 polls: 3,
                 wall_ms: 6,
                 peak_bytes: 4096,
+                faults: 12,
+                from_disk: 0,
                 samples: vec![1024, 4096, 2048],
             }],
             tracer: Some("strace -- version 6.13".to_string()),
