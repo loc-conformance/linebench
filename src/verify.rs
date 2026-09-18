@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 use crate::corpus::{Counted, Parity, judge_parity};
 use crate::files::read_text;
 use crate::insight::{
-    FLOOR_PART, INSIGHTS_FILE, Insights, MEMORY_PART, SYSCALLS_PART, read_insights,
+    FLOOR_PART, INSIGHTS_FILE, Insights, MEMORY_PART, PMU_PART, SYSCALLS_PART, read_insights,
 };
 use crate::measure::Table;
 use crate::measure::{CONTROL_END, CONTROL_START};
+use crate::pmu::Pmu;
+use crate::pmu::USER_ONLY;
+use crate::pmu::get_count;
+use crate::pmu::{BRANCH_INSTRUCTIONS, BRANCH_MISSES, CACHE_MISSES, CACHE_REFERENCES};
+use crate::pmu::{FULL_RUN, L1_LOADS, L1_MISSES, PASSES};
 use crate::record::{COUNTS_CSV, RECORD_FILE, SUMMARY_CSV, UNKNOWN_INSTANCE};
 use crate::record::{
     CountRecord, InstanceRecord, Measurement, Record, RunSettings, Timings, build_counts_csv,
@@ -164,6 +169,7 @@ pub fn check_insights(dir: &Path) -> Result<Verification, String> {
     level.held.push(check_who_was_measured(&insights));
     level.held.push(check_curves(&insights.curves));
     level.held.push(check_the_counted_calls(&insights.syscalls));
+    level.held.push(check_the_counted_events(&insights.pmu));
     level.held.push(check_the_parts_asked_for(&insights));
     let raw = check_exports(dir, &insights.floor);
     let reach = match (insights.floor.is_empty(), raw.absent.is_empty()) {
@@ -202,6 +208,12 @@ fn check_who_was_measured(insights: &Insights) -> Held {
                 .syscalls
                 .iter()
                 .map(|counted| ("the system calls", counted.instance.as_str())),
+        )
+        .chain(
+            insights
+                .pmu
+                .iter()
+                .map(|read| ("the hardware counters", read.instance.as_str())),
         );
     let mut broken = Vec::new();
     for (part, instance) in measured {
@@ -274,6 +286,59 @@ fn check_the_counted_calls(counted: &[Syscalls]) -> Held {
     Held::of(format!("{} traced instances add up", counted.len()), broken)
 }
 
+/// An event carrying the user-space suffix was opened under a sysctl that dropped the kernel, so
+/// its count covers half of what the counter did while saying nothing about it.
+fn check_the_counted_events(counted: &[Pmu]) -> Held {
+    let mut broken = Vec::new();
+    for one in counted {
+        for event in PASSES.into_iter().flatten() {
+            let read = one
+                .readings
+                .iter()
+                .filter(|reading| reading.event == event)
+                .count();
+            if read != 1 {
+                broken.push(format!(
+                    "{} carries {read} readings of {event}",
+                    one.instance
+                ));
+            }
+        }
+        for reading in &one.readings {
+            if reading.event.ends_with(USER_ONLY) {
+                broken.push(format!(
+                    "{} read {} over user space alone",
+                    one.instance, reading.event
+                ));
+            }
+            if reading.running_pct > FULL_RUN {
+                broken.push(format!(
+                    "{} ran {} for {:.2}% of the measurement",
+                    one.instance, reading.event, reading.running_pct
+                ));
+            }
+        }
+        for (part, whole) in [
+            (L1_MISSES, L1_LOADS),
+            (BRANCH_MISSES, BRANCH_INSTRUCTIONS),
+            (CACHE_MISSES, CACHE_REFERENCES),
+        ] {
+            if let (Some(missed), Some(asked)) = (get_count(one, part), get_count(one, whole))
+                && missed > asked
+            {
+                broken.push(format!(
+                    "{} counted {missed} of {part} out of {asked} of {whole}",
+                    one.instance
+                ));
+            }
+        }
+    }
+    Held::of(
+        format!("{} profiled instances hold together", counted.len()),
+        broken,
+    )
+}
+
 /// A part the session was never asked for carries nothing. The other way around does not hold: a
 /// part asked for can still come back empty, since the tool it needs may not be on the machine.
 fn check_the_parts_asked_for(insights: &Insights) -> Held {
@@ -283,6 +348,7 @@ fn check_the_parts_asked_for(insights: &Insights) -> Held {
         (FLOOR_PART, !insights.floor.is_empty()),
         (MEMORY_PART, !insights.curves.is_empty()),
         (SYSCALLS_PART, !insights.syscalls.is_empty()),
+        (PMU_PART, !insights.pmu.is_empty()),
     ] {
         if measured && !asked(part) {
             broken.push(format!(
@@ -814,6 +880,8 @@ mod tests {
     use crate::defender::DefenderState;
     use crate::fetch::{Identity, Origin};
     use crate::machine::{Machine, Platform};
+    use crate::pmu::PAGE_FAULTS;
+    use crate::pmu::Reading;
     use crate::record::CorpusRecord;
 
     use super::*;
@@ -932,6 +1000,10 @@ mod tests {
                     errors: 1,
                 }],
             }],
+            profiler: None,
+            paranoid: None,
+            pmu_unmeasured: None,
+            pmu: Vec::new(),
             asked: crate::insight::ask_for_everything(),
         }
     }
@@ -1063,6 +1135,76 @@ mod tests {
         assert!(refused.contains("nothing to read in"), "{refused}");
         assert!(refused.contains("further in"), "{refused}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn build_read() -> Pmu {
+        Pmu {
+            instance: "tokei".to_string(),
+            table: Table::SameWork.as_str().to_string(),
+            lines: Some(100),
+            wall_ms: 10,
+            readings: PASSES
+                .into_iter()
+                .flatten()
+                .map(|event| Reading {
+                    event: event.to_string(),
+                    count: Some(match event {
+                        L1_LOADS => 1000,
+                        L1_MISSES => 10,
+                        CACHE_REFERENCES => 500,
+                        CACHE_MISSES => 20,
+                        BRANCH_INSTRUCTIONS => 800,
+                        BRANCH_MISSES => 30,
+                        _ => 100,
+                    }),
+                    noise_pct: 0.0,
+                    running_pct: FULL_RUN,
+                })
+                .collect(),
+        }
+    }
+
+    fn find_at(read: &Pmu, event: &str) -> usize {
+        read.readings
+            .iter()
+            .position(|reading| reading.event == event)
+            .expect("the event is there")
+    }
+
+    #[test]
+    fn a_reading_that_could_not_have_happened_is_caught() {
+        let whole = build_read();
+        assert!(
+            check_the_counted_events(std::slice::from_ref(&whole))
+                .broken
+                .is_empty(),
+            "{whole:?}"
+        );
+        let mut impossible = whole.clone();
+        let at = find_at(&impossible, L1_MISSES);
+        impossible.readings[at].count = Some(1001);
+        let broken = check_the_counted_events(&[impossible]).broken;
+        assert_eq!(broken.len(), 1, "{broken:?}");
+        assert!(broken[0].contains(L1_MISSES), "{}", broken[0]);
+        let mut sliced = whole.clone();
+        sliced.readings[0].running_pct = FULL_RUN + 1.0;
+        assert_eq!(check_the_counted_events(&[sliced]).broken.len(), 1);
+        let mut halved = whole.clone();
+        let at = find_at(&halved, PAGE_FAULTS);
+        halved.readings[at].event = format!("{PAGE_FAULTS}{USER_ONLY}");
+        let broken = check_the_counted_events(&[halved]).broken;
+        assert_eq!(broken.len(), 2, "{broken:?}");
+        assert!(
+            broken.iter().any(|one| one.contains("user space")),
+            "{broken:?}"
+        );
+        let mut short = whole;
+        short
+            .readings
+            .retain(|reading| reading.event != CACHE_MISSES);
+        let broken = check_the_counted_events(&[short]).broken;
+        assert_eq!(broken.len(), 1, "{broken:?}");
+        assert!(broken[0].contains("0 readings"), "{}", broken[0]);
     }
 
     #[test]

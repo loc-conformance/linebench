@@ -115,18 +115,18 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     A run under an instance with args or a build of its own is written under results/local/,
     since its numbers answer for that build alone.
 
-linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls] [--yes]
+linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu] [--yes]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
                 [--counters-dir <dir>] [--add <path>] [--corpus-path <dir>]
 
     Measures what a run cannot measure about itself, since watching a process closely enough
     disturbs the times it would report. The floor is what a counter costs before it has counted
-    anything, the memory curve is what it held while it counted, and the system calls are how
-    much it asked of the kernel to do it.
+    anything, the memory curve is what it held while it counted, the system calls are how much it
+    asked of the kernel to do it, and the hardware counters are what the cpu did while it ran.
 
     --counters a,b,c           the instances, in the order they are measured
-    --only <parts>             which of floor, memory and syscalls to measure, default all
+    --only <parts>             which of floor, memory, syscalls and pmu to measure, default all
     --yes                      do not ask when a tool the section needs is missing
     --allow-unequal-exclusions measure even with uneven MS Defender exclusions
     --out <dir>                where the session goes, default results/ here

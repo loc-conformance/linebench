@@ -1666,10 +1666,14 @@ mod tests {
             parse("insights linux --only syscalls,memory").unwrap().only,
             Some(vec!["syscalls".to_string(), "memory".to_string()])
         );
+        assert_eq!(
+            parse("insights linux --only pmu").unwrap().only,
+            Some(vec!["pmu".to_string()])
+        );
         let refused = parse("insights linux --only floor,noise").unwrap_err();
         assert_eq!(
             refused,
-            "--only takes any of floor, memory, syscalls, and noise is none of them"
+            "--only takes any of floor, memory, syscalls, pmu, and noise is none of them"
         );
         let elsewhere = parse("run linux --only floor").unwrap_err();
         assert!(

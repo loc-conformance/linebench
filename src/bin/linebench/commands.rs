@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -20,11 +20,11 @@ use linebench::fetch::{GIVEN_DIR, Manifest, calculate_sha256, fetch_counter, rea
 use linebench::insight::Insights;
 use linebench::insight::{
     FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, INSIGHTS_PAGE,
-    MEMORY_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET, ask_for_everything,
+    MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET, ask_for_everything,
 };
 use linebench::insight::{
-    build_insights_path, format_floor, format_memory, format_syscalls, format_syscalls_summary,
-    get_floor_set_name, write_insights, write_insights_page,
+    build_insights_path, format_floor, format_memory, format_pmu, format_syscalls,
+    format_syscalls_summary, get_floor_set_name, write_insights, write_insights_page,
 };
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
@@ -40,6 +40,9 @@ use linebench::measure::{
 };
 use linebench::measure::{OUT_DIR, TABLES};
 use linebench::os::{capture_with_status, is_privileged};
+use linebench::pmu::{OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER};
+use linebench::pmu::{Pmu, Profiling};
+use linebench::pmu::{count_one_pass, find_profiler, read_paranoid, remove_raw_files};
 use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
@@ -88,9 +91,20 @@ const TRACER_REFUSED: &str = "strace is here and it was not allowed to trace, so
                               refuse.";
 const TRACER_ELSEWHERE: &str =
     "strace runs on linux alone, so the system calls cannot be measured here.";
+const PROFILER_MISSING: &str = "perf is not present on the system, or is not in the PATH, so \
+                                the hardware counters cannot be read. On Debian it is the \
+                                linux-perf package.";
+const PROFILER_REFUSED: &str = "perf is here and it read no event, so the hardware counters \
+                                cannot be read. A virtual machine commonly has no PMU to offer, \
+                                and WSL2 is one of them.";
+const PROFILER_ELSEWHERE: &str =
+    "perf runs on linux alone, so the hardware counters cannot be read here.";
 const SYSCALLS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const MEMORY_TABLE: Table = Table::SameWork;
+const PMU_TABLE: Table = Table::SameWork;
+const PMU_PROBE_FILE: &str = "pmu-probe.tsv";
+const LINE_BREAK: &str = "\n";
 const NOISE_RUNS: u32 = 5;
 const LEAST_NOISE_RUNS: u32 = 3;
 const NOISE_RETRY_SECONDS: u64 = 5;
@@ -707,9 +721,10 @@ pub fn run_insights(
     let chosen = build_instances(definitions, locations, options, platform)?;
     print_how_the_counters_were_chosen(out, &chosen)?;
     let instances = chosen.instances;
+    let privileged = is_privileged(platform);
     let defender = read_defender_state(
         platform,
-        is_privileged(platform),
+        privileged,
         &collect_binaries(&instances, platform)?,
     );
     let unequal = match find_unequal_exclusions(&defender) {
@@ -758,9 +773,23 @@ pub fn run_insights(
         (Tracing::Refused, _, _) => Some(TRACER_REFUSED),
         (Tracing::NotThere, _, _) => Some(TRACER_MISSING),
     };
-    if let Some(why) = unmeasured
+    let paranoid = platform.is_linux().then(read_paranoid).flatten();
+    let profiling = match platform.is_linux() && asked_for(PMU_PART) {
+        true => find_profiler(
+            &scratch.get_path().join(PMU_PROBE_FILE),
+            privileged,
+            paranoid,
+        ),
+        false => Profiling::NotThere,
+    };
+    let unread = describe_what_the_counters_want(&profiling, platform, asked_for(PMU_PART));
+    let stopping: Vec<&str> = [unmeasured, unread.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !stopping.is_empty()
         && platform.is_linux()
-        && !ask_to_go_on(out, why, options.yes)?
+        && !ask_to_go_on(out, &stopping.join(LINE_BREAK), options.yes)?
     {
         return Err("stopped.".to_string());
     }
@@ -867,6 +896,39 @@ pub fn run_insights(
             }
         }
     }
+    let mut pmu = Vec::new();
+    if asked_for(PMU_PART) {
+        print_header(out, "== pmu")?;
+        pmu = match &profiling {
+            Profiling::Ready(version) => {
+                print_line(out, &format!("   {version}"))?;
+                for (pass, events) in PASSES.iter().enumerate() {
+                    print_line(
+                        out,
+                        &format!("   pass {}   {}", pass + 1, events.join(", ")),
+                    )?;
+                }
+                let mut settle = Runner::new(
+                    scratch.get_path(),
+                    Settings::default(),
+                    platform,
+                    scrub.clone(),
+                    Style::Hidden,
+                );
+                collect_pmu(out, &mut settle, &instances, locations, &scrub, &res)?
+            }
+            _ => {
+                print_line(out, &format!("   {}", unread.clone().unwrap_or_default()))?;
+                Vec::new()
+            }
+        };
+        if !pmu.is_empty() {
+            print_header(out, "== pmu summary")?;
+            for line in format_pmu(&pmu, paranoid, get_report_style()) {
+                print_line(out, &paint_table_line(&line))?;
+            }
+        }
+    }
     let insights = Insights {
         format: INSIGHTS_FORMAT,
         stamp,
@@ -887,6 +949,13 @@ pub fn run_insights(
         },
         unmeasured: unmeasured.map(str::to_string),
         syscalls,
+        profiler: match profiling {
+            Profiling::Ready(version) => Some(version),
+            _ => None,
+        },
+        paranoid,
+        pmu_unmeasured: unread,
+        pmu,
         asked,
     };
     write_insights(&res, &insights)?;
@@ -1951,9 +2020,7 @@ fn collect_syscalls(
             false,
         )?;
         print_line(out, &format!(">> {}", instance.get_name()))?;
-        let into = scratch
-            .join(instance.get_name())
-            .with_extension(SYSCALLS_SUFFIX);
+        let into = scratch.join(format!("{}.{SYSCALLS_SUFFIX}", instance.get_name()));
         match count_syscalls(
             instance.get_name(),
             SYSCALLS_TABLE,
@@ -1976,6 +2043,119 @@ fn collect_syscalls(
         }
     }
     Ok(counted)
+}
+
+fn describe_what_the_counters_want(
+    profiling: &Profiling,
+    platform: Platform,
+    asked_for: bool,
+) -> Option<String> {
+    match (profiling, platform.is_linux(), asked_for) {
+        (Profiling::Ready(_), _, _) | (_, _, false) => None,
+        (_, false, _) => Some(PROFILER_ELSEWHERE.to_string()),
+        (Profiling::Shut(level), _, _) => Some(format!(
+            "{PROFILER} is here and {PARANOID_KEY} is {level}, so the hardware counters cannot \
+             be read. Run linebench as root, or open them until the next boot with \
+             sudo sysctl {PARANOID_KEY}={OPEN_PARANOID}"
+        )),
+        (Profiling::Refused, _, _) => Some(PROFILER_REFUSED.to_string()),
+        (Profiling::NotThere, _, _) => Some(PROFILER_MISSING.to_string()),
+    }
+}
+
+fn collect_pmu(
+    out: &mut dyn Write,
+    settle: &mut Runner,
+    instances: &[Instance],
+    locations: &Locations,
+    scrub: &[String],
+    into: &Path,
+) -> Result<Vec<Pmu>, String> {
+    let mut counted = Vec::new();
+    for instance in instances {
+        print_line(out, &format!(">> {}", instance.get_name()))?;
+        let lines = find_lines(out, settle, instance, locations)?;
+        let args = build_args(
+            instance,
+            &locations.checkout,
+            &locations.corpus.extensions,
+            PMU_TABLE,
+            false,
+        )?;
+        let mut readings = Vec::new();
+        let mut wall_ms = 0;
+        for pass in 0..PASSES.len() {
+            let started = Instant::now();
+            match count_one_pass(
+                instance.get_name(),
+                pass,
+                &instance.identity.binary,
+                &args,
+                scrub,
+                into,
+            ) {
+                Ok(read) => readings.extend(read),
+                Err(refused) => {
+                    print_warning(out, &refused)?;
+                    remove_raw_files(into, instance.get_name());
+                    readings.clear();
+                    break;
+                }
+            }
+            let took = started.elapsed().as_millis() as u64;
+            wall_ms += took;
+            print_line(
+                out,
+                &format!(
+                    "   pass {} of {}   {}",
+                    pass + 1,
+                    PASSES.len(),
+                    format_wall(took as f64 / 1000.0, 0.0)
+                ),
+            )?;
+        }
+        if readings.is_empty() {
+            continue;
+        }
+        counted.push(Pmu {
+            instance: instance.get_name().to_string(),
+            table: PMU_TABLE.as_str().to_string(),
+            lines,
+            wall_ms,
+            readings,
+        });
+    }
+    Ok(counted)
+}
+
+/// The counts come off a capture of the counter's own JSON, which is also what settles the page
+/// cache before the passes are timed, the way a run settles on its captures.
+fn find_lines(
+    out: &mut dyn Write,
+    settle: &mut Runner,
+    instance: &Instance,
+    locations: &Locations,
+) -> Result<Option<u64>, String> {
+    let args = build_args(
+        instance,
+        &locations.checkout,
+        &locations.corpus.extensions,
+        PMU_TABLE,
+        true,
+    )?;
+    let name = get_capture_name(PMU_TABLE, instance.get_name());
+    let capture = settle.capture_output(out, &name, &instance.identity.binary, &args, true)?;
+    let text = fs::read_to_string(&capture.path).unwrap_or_default();
+    match read_counts(&instance.definition, &text) {
+        Ok(counts) => Ok(Some(counts.lines)),
+        Err(refused) => {
+            print_warning(
+                out,
+                &format!("no line count for {}, {refused}", instance.get_name()),
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 fn ask_to_go_on(out: &mut dyn Write, why: &str, yes: bool) -> Result<bool, String> {

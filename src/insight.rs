@@ -10,6 +10,12 @@ use crate::files::read_json;
 use crate::machine::{Machine, Platform};
 use crate::measure::TABLES;
 use crate::measure::{Style, Table};
+use crate::pmu::Pmu;
+use crate::pmu::{BRANCH_INSTRUCTIONS, BRANCH_MISSES, CACHE_MISSES, CACHE_REFERENCES};
+use crate::pmu::{CONTEXT_SWITCHES, CYCLES, DTLB_MISSES, FULL_RUN};
+use crate::pmu::{INSTRUCTIONS, ITLB_MISSES, L1_LOADS, L1_MISSES};
+use crate::pmu::{OPEN_PARANOID, PAGE_FAULTS, PARANOID_KEY, RUNS};
+use crate::pmu::{find_reading, get_count};
 use crate::record::LOCAL_DIR;
 use crate::record::{CorpusRecord, InstanceRecord, Measurement};
 use crate::record::{format_thousands, format_utc_minute, format_versions};
@@ -30,9 +36,12 @@ pub const INSIGHTS_FORMAT: u32 = 1;
 pub const FLOOR_PART: &str = "floor";
 pub const MEMORY_PART: &str = "memory";
 pub const SYSCALLS_PART: &str = "syscalls";
-/// What `insights` measures, and what `--only` names. A run does all three unless it says otherwise.
-pub const INSIGHT_PARTS: [&str; 3] = [FLOOR_PART, MEMORY_PART, SYSCALLS_PART];
+pub const PMU_PART: &str = "pmu";
+/// What `insights` measures, and what `--only` names. A run does all of them unless it says
+/// otherwise.
+pub const INSIGHT_PARTS: [&str; 4] = [FLOOR_PART, MEMORY_PART, SYSCALLS_PART, PMU_PART];
 pub const SYSCALLS_HEADING: &str = "family / call";
+const PMU_HEADING: &str = "instance";
 const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends. What a run cannot \
                           measure about itself, since watching a process closely enough disturbs \
                           the times it would report. The tables are the ones the command printed, \
@@ -41,8 +50,36 @@ const FLOOR_MEANS: &str = "What a counter costs before it has counted anything."
 const MEMORY_MEANS: &str = "What each counter held while it counted, sampled while it ran. The \
                             axis under each curve is the wall time of that run.";
 const SYSCALLS_MEANS: &str = "What each counter asked of the kernel, counted by the tracer.";
+const PMU_MEANS: &str = "What the cpu did while each counter counted, read through perf in three \
+                         passes of four events.";
 const NO_SYSCALLS: &str = "The system calls were not counted in this session.";
+const NO_PMU: &str = "The hardware counters were not read in this session.";
 const NOT_ASKED: &str = "Not asked for in this session.";
+const PMU_TITLE: &str = "Hardware counters";
+const PMU_LINES: &str = "lines";
+const PMU_WORK: &str = "work";
+const PMU_BRANCHES: &str = "branches";
+const PMU_MEMORY: &str = "memory";
+const PMU_SYSTEM: &str = "system";
+const PER_LINE: &str = "per line";
+const PER_CYCLE: &str = "insn per cycle";
+const PER_THOUSAND_INSTRUCTIONS: &str = "per 1k instructions";
+const PER_THOUSAND_LOADS: &str = "per 1k loads";
+const PER_THOUSAND_REFS: &str = "per 1k refs";
+const SCALE_MEANS: &str = "M is a million, G is a billion, T is a trillion";
+const NOTHING_SLICED: &str = "nothing was multiplexed, every event counted for the whole of \
+                              every run";
+const LAST_LEVEL_MEANS: [&str; 2] = [
+    "cache-references and cache-misses are whatever this kernel maps them to,",
+    "so they compare inside this table alone",
+];
+const SCALES: [(f64, &str); 3] = [(1e12, "T"), (1e9, "G"), (1e6, "M")];
+const THOUSAND: f64 = 1000.0;
+const NO_NOISE: &str = "the instructions and the cycles are absent, so the spread between \
+                        runs is unknown";
+const STEADY_PCT: f64 = 1.0;
+const TWO_PLACES: f64 = 10.0;
+const ONE_PLACE: f64 = 100.0;
 const FLOOR_PREFIX: &str = "floor-";
 const VERSION_HEADING: &str = "--version";
 const FIRST_HEADINGS: [&str; 2] = ["instance", VERSION_HEADING];
@@ -102,6 +139,16 @@ pub struct Insights {
     #[serde(default)]
     pub unmeasured: Option<String>,
     pub syscalls: Vec<Syscalls>,
+    #[serde(default)]
+    pub profiler: Option<String>,
+    /// What the sysctl said when the session started. A session that read the counters with this
+    /// above the open level was running as root, which is the one way past it.
+    #[serde(default)]
+    pub paranoid: Option<i64>,
+    #[serde(default)]
+    pub pmu_unmeasured: Option<String>,
+    #[serde(default)]
+    pub pmu: Vec<Pmu>,
     /// The parts this run was asked for. A record written before --only was there asked for all of
     /// them, which is what an empty field would otherwise look like.
     #[serde(default = "ask_for_everything")]
@@ -218,6 +265,20 @@ pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -
             String::new(),
         ]),
         (true, false) => lines.extend(wrap_in_fence("System calls", SYSCALLS_MEANS, counted)),
+    }
+    let read = format_pmu(&insights.pmu, insights.paranoid, Style::Hidden);
+    match (asked_for(PMU_PART), read.is_empty()) {
+        (false, _) => lines.extend(say_it_was_not_asked_for(PMU_TITLE)),
+        (true, true) => lines.extend([
+            format!("## {PMU_TITLE}"),
+            String::new(),
+            insights
+                .pmu_unmeasured
+                .clone()
+                .unwrap_or_else(|| NO_PMU.to_string()),
+            String::new(),
+        ]),
+        (true, false) => lines.extend(wrap_in_fence(PMU_TITLE, PMU_MEANS, read)),
     }
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
@@ -451,6 +512,159 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
         .collect()
 }
 
+pub fn format_pmu(counted: &[Pmu], paranoid: Option<i64>, style: Style) -> Vec<String> {
+    if counted.is_empty() {
+        return Vec::new();
+    }
+    let count = |event: &str| -> Vec<String> {
+        counted
+            .iter()
+            .map(|one| get_count(one, event).map_or(String::new(), format_count))
+            .collect()
+    };
+    let per_line = |event: &str| -> Vec<String> {
+        counted
+            .iter()
+            .map(|one| match (get_count(one, event), one.lines) {
+                (Some(value), Some(lines)) if lines > 0 => {
+                    format_derived(value as f64 / lines as f64)
+                }
+                _ => String::new(),
+            })
+            .collect()
+    };
+    let per_thousand = |event: &str, of: &str| -> Vec<String> {
+        counted
+            .iter()
+            .map(|one| match (get_count(one, event), get_count(one, of)) {
+                (Some(value), Some(whole)) if whole > 0 => {
+                    format_derived(value as f64 * THOUSAND / whole as f64)
+                }
+                _ => String::new(),
+            })
+            .collect()
+    };
+    let ratio = |over: &str, under: &str| -> Vec<String> {
+        counted
+            .iter()
+            .map(|one| match (get_count(one, over), get_count(one, under)) {
+                (Some(value), Some(whole)) if whole > 0 => {
+                    format_derived(value as f64 / whole as f64)
+                }
+                _ => String::new(),
+            })
+            .collect()
+    };
+    let names: Vec<String> = counted.iter().map(|one| one.instance.clone()).collect();
+    let mut table: Vec<(String, Vec<String>)> = vec![
+        (PMU_HEADING.to_string(), names),
+        (
+            PMU_LINES.to_string(),
+            counted
+                .iter()
+                .map(|one| one.lines.map_or(String::new(), format_thousands))
+                .collect(),
+        ),
+    ];
+    for (group, members) in [
+        (
+            PMU_WORK,
+            vec![
+                (INSTRUCTIONS, count(INSTRUCTIONS)),
+                (PER_LINE, per_line(INSTRUCTIONS)),
+                (CYCLES, count(CYCLES)),
+                (PER_LINE, per_line(CYCLES)),
+                (PER_CYCLE, ratio(INSTRUCTIONS, CYCLES)),
+            ],
+        ),
+        (
+            PMU_BRANCHES,
+            vec![
+                (BRANCH_INSTRUCTIONS, count(BRANCH_INSTRUCTIONS)),
+                (BRANCH_MISSES, count(BRANCH_MISSES)),
+                (
+                    PER_THOUSAND_INSTRUCTIONS,
+                    per_thousand(BRANCH_MISSES, INSTRUCTIONS),
+                ),
+                (PER_LINE, per_line(BRANCH_MISSES)),
+            ],
+        ),
+        (
+            PMU_MEMORY,
+            vec![
+                (L1_LOADS, count(L1_LOADS)),
+                (L1_MISSES, count(L1_MISSES)),
+                (PER_THOUSAND_LOADS, per_thousand(L1_MISSES, L1_LOADS)),
+                (PER_LINE, per_line(L1_MISSES)),
+                (CACHE_REFERENCES, count(CACHE_REFERENCES)),
+                (CACHE_MISSES, count(CACHE_MISSES)),
+                (
+                    PER_THOUSAND_REFS,
+                    per_thousand(CACHE_MISSES, CACHE_REFERENCES),
+                ),
+                (PER_LINE, per_line(CACHE_MISSES)),
+                (DTLB_MISSES, count(DTLB_MISSES)),
+                (ITLB_MISSES, count(ITLB_MISSES)),
+            ],
+        ),
+        (
+            PMU_SYSTEM,
+            vec![
+                (PAGE_FAULTS, count(PAGE_FAULTS)),
+                (CONTEXT_SWITCHES, count(CONTEXT_SWITCHES)),
+            ],
+        ),
+    ] {
+        let held: Vec<(String, Vec<String>)> = members
+            .into_iter()
+            .filter(|(_, cells)| cells.iter().any(|cell| !cell.is_empty()))
+            .map(|(label, cells)| (format!("{MEMBER_INDENT}{label}"), cells))
+            .collect();
+        if held.is_empty() {
+            continue;
+        }
+        table.push((group.to_string(), vec![String::new(); counted.len()]));
+        table.extend(held);
+    }
+    let gutter = measure_gutter("", table.iter().map(|(label, _)| label.as_str()));
+    let rows: Vec<Vec<String>> = table
+        .iter()
+        .skip(1)
+        .map(|(_, cells)| cells.clone())
+        .collect();
+    let widths = measure_columns(&table[0].1, &rows);
+    let mut lines: Vec<String> = table
+        .into_iter()
+        .enumerate()
+        .map(|(at, (label, cells))| {
+            let line = lay_out_numbers(&label, &cells, gutter, &widths);
+            match (at, label.starts_with(MEMBER_INDENT)) {
+                (0, _) => line,
+                (_, true) => fade(&line, style),
+                (_, false) => line.replacen(&label, &embolden(&label, style), 1),
+            }
+        })
+        .collect();
+    lines.push(String::new());
+    lines.push(format!("{INDENT}{SCALE_MEANS}"));
+    lines.push(format!("{INDENT}{}", describe_multiplexing(counted)));
+    lines.push(format!("{INDENT}{}", describe_noise(counted)));
+    for shaky in find_shaky_instances(counted) {
+        lines.push(format!("{INDENT}{shaky}"));
+    }
+    for means in LAST_LEVEL_MEANS {
+        lines.push(format!("{INDENT}{means}"));
+    }
+    if let Some(level) = paranoid
+        && level > OPEN_PARANOID
+    {
+        lines.push(format!(
+            "{INDENT}read as root, so the events opened with {PARANOID_KEY} at {level}"
+        ));
+    }
+    lines
+}
+
 /// The tables are laid out for a terminal, so the page keeps them in a fence as they are.
 // A part left out keeps its heading, so the page says the measuring was not asked for rather than
 // leaving a reader to wonder where the section went.
@@ -666,6 +880,93 @@ fn describe_count(count: u64) -> String {
     format_thousands(count)
 }
 
+fn describe_multiplexing(counted: &[Pmu]) -> String {
+    let mut sliced: Vec<&str> = Vec::new();
+    for one in counted {
+        for reading in &one.readings {
+            if reading.running_pct < FULL_RUN && !sliced.contains(&reading.event.as_str()) {
+                sliced.push(&reading.event);
+            }
+        }
+    }
+    match sliced.is_empty() {
+        true => NOTHING_SLICED.to_string(),
+        false => format!(
+            "{} did not count for the whole run, so those counts are estimates",
+            sliced.join(", ")
+        ),
+    }
+}
+
+fn describe_noise(counted: &[Pmu]) -> String {
+    let worst = |event: &str| find_worst_noise(counted, event);
+    match (worst(INSTRUCTIONS), worst(CYCLES)) {
+        (Some(instructions), Some(cycles)) => format!(
+            "over {RUNS} runs the instructions of an instance moved at most {instructions:.2}% \
+             and its cycles {cycles:.2}%"
+        ),
+        (Some(instructions), None) => format!(
+            "over {RUNS} runs the instructions of an instance moved at most {instructions:.2}%, \
+             and no cycles were read"
+        ),
+        (None, Some(cycles)) => format!(
+            "over {RUNS} runs the cycles of an instance moved at most {cycles:.2}%, and no \
+             instructions were read"
+        ),
+        (None, None) => NO_NOISE.to_string(),
+    }
+}
+
+fn find_worst_noise(counted: &[Pmu], event: &str) -> Option<f64> {
+    counted
+        .iter()
+        .filter_map(|one| find_reading(one, event))
+        .map(|reading| reading.noise_pct)
+        .reduce(f64::max)
+}
+
+fn find_shaky_instances(counted: &[Pmu]) -> Vec<String> {
+    counted
+        .iter()
+        .filter_map(|one| find_reading(one, INSTRUCTIONS).map(|reading| (one, reading.noise_pct)))
+        .filter(|(_, noise)| *noise > STEADY_PCT)
+        .map(|(one, noise)| {
+            format!(
+                "{} moved its instruction count by {noise:.2}% over its runs, so they were doing \
+                 more than counting",
+                one.instance
+            )
+        })
+        .collect()
+}
+
+fn format_count(count: u64) -> String {
+    let value = count as f64;
+    for (scale, name) in SCALES {
+        if value >= scale {
+            return format!("{} {name}", format_places(value / scale));
+        }
+    }
+    format_thousands(count)
+}
+
+fn format_derived(value: f64) -> String {
+    if value >= ONE_PLACE {
+        return format_thousands(value.round() as u64);
+    }
+    format_places(value)
+}
+
+fn format_places(value: f64) -> String {
+    if value < TWO_PLACES {
+        format!("{value:.2}")
+    } else if value < ONE_PLACE {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.0}")
+    }
+}
+
 fn format_per_file(total: u64, files: Option<u64>) -> String {
     match files {
         Some(files) if files > 0 => format!("{:.1}", total as f64 / files as f64),
@@ -753,6 +1054,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::fetch::{Identity, Origin};
+    use crate::pmu::Reading;
 
     use super::*;
 
@@ -830,7 +1132,25 @@ mod tests {
         }
     }
 
-    fn build_insights(syscalls: Vec<Syscalls>) -> Insights {
+    fn build_pmu(instance: &str, lines: Option<u64>, counted: &[(&str, u64)]) -> Pmu {
+        Pmu {
+            instance: instance.to_string(),
+            table: Table::SameWork.as_str().to_string(),
+            lines,
+            wall_ms: 1000,
+            readings: counted
+                .iter()
+                .map(|(event, count)| Reading {
+                    event: (*event).to_string(),
+                    count: Some(*count),
+                    noise_pct: 0.0,
+                    running_pct: FULL_RUN,
+                })
+                .collect(),
+        }
+    }
+
+    fn build_insights(syscalls: Vec<Syscalls>, pmu: Vec<Pmu>) -> Insights {
         Insights {
             format: INSIGHTS_FORMAT,
             stamp: "20260911-005944".to_string(),
@@ -888,6 +1208,10 @@ mod tests {
             tracer: None,
             unmeasured: Some("strace runs on linux alone".to_string()),
             syscalls,
+            profiler: None,
+            paranoid: None,
+            pmu_unmeasured: None,
+            pmu,
             asked: ask_for_everything(),
         }
     }
@@ -906,7 +1230,8 @@ mod tests {
 
     #[test]
     fn the_page_closes_every_fence_and_writes_none_around_a_table_that_was_never_measured() {
-        let bare = build_insights_page(&build_insights(Vec::new()), &only_tokei()).join("\n");
+        let bare =
+            build_insights_page(&build_insights(Vec::new(), Vec::new()), &only_tokei()).join("\n");
         assert_eq!(bare.matches("```").count(), 4, "{bare}");
         assert!(
             bare.contains("measured 2026-09-11 00:59 UTC by linebench 0.1.0"),
@@ -925,7 +1250,7 @@ mod tests {
             bare.contains("## System calls\n\nstrace runs on linux alone"),
             "{bare}"
         );
-        let mut silent = build_insights(Vec::new());
+        let mut silent = build_insights(Vec::new(), Vec::new());
         silent.unmeasured = None;
         let silent = build_insights_page(&silent, &only_tokei()).join("\n");
         assert!(
@@ -933,13 +1258,147 @@ mod tests {
             "{silent}"
         );
         let counted = build_insights_page(
-            &build_insights(vec![build_syscalls("tokei", &[("openat", 10)])]),
+            &build_insights(vec![build_syscalls("tokei", &[("openat", 10)])], Vec::new()),
             &only_tokei(),
         )
         .join("\n");
         assert_eq!(counted.matches("```").count(), 6, "{counted}");
         assert!(counted.contains("opening"), "{counted}");
         assert!(!counted.contains(NO_SYSCALLS), "{counted}");
+    }
+
+    #[test]
+    fn a_count_over_a_million_carries_its_scale_and_a_smaller_one_keeps_its_digits() {
+        assert_eq!(format_count(27_071), "27,071");
+        assert_eq!(format_count(999_999), "999,999");
+        assert_eq!(format_count(1_000_000), "1.00 M");
+        assert_eq!(format_count(91_400_000), "91.4 M");
+        assert_eq!(format_count(180_000_000), "180 M");
+        assert_eq!(format_count(14_923_456_789), "14.9 G");
+        assert_eq!(format_count(1_204_000_000_000), "1.20 T");
+        assert_eq!(format_derived(0.4612), "0.46");
+        assert_eq!(format_derived(46.91), "46.9");
+        assert_eq!(format_derived(416.2), "416");
+        assert_eq!(format_derived(1375.9), "1,376");
+    }
+
+    #[test]
+    fn a_row_per_line_is_divided_by_the_lines_that_instance_itself_counted() {
+        let read = vec![
+            build_pmu(
+                "mezura",
+                Some(35_800_000),
+                &[(INSTRUCTIONS, 14_900_000_000), (CYCLES, 7_000_000_000)],
+            ),
+            build_pmu(
+                "scc",
+                Some(40_000_000),
+                &[(INSTRUCTIONS, 55_000_000_000), (CYCLES, 23_400_000_000)],
+            ),
+            build_pmu(
+                "cloc",
+                None,
+                &[(INSTRUCTIONS, 1_204_000_000_000), (CYCLES, 481_000_000_000)],
+            ),
+        ];
+        let lines = format_pmu(&read, None, Style::Hidden);
+        let counts = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with(INSTRUCTIONS))
+            .expect("the instructions are counted");
+        assert!(counts.ends_with("1.20 T"), "{counts}");
+        let divided: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.trim_start().starts_with(PER_LINE))
+            .collect();
+        assert_eq!(divided.len(), 2, "{divided:?}");
+        assert!(divided[0].contains("416"), "{}", divided[0]);
+        assert!(divided[0].ends_with("1,375"), "{}", divided[0]);
+        assert!(divided[1].ends_with("585"), "{}", divided[1]);
+    }
+
+    #[test]
+    fn a_group_of_events_no_instance_answered_leaves_no_heading_behind() {
+        let read = vec![build_pmu(
+            "tokei",
+            Some(100),
+            &[(INSTRUCTIONS, 1000), (CYCLES, 500)],
+        )];
+        let page = format_pmu(&read, None, Style::Hidden).join("\n");
+        assert!(page.contains(PMU_WORK), "{page}");
+        assert!(page.contains(PER_CYCLE), "{page}");
+        assert!(!page.contains(PMU_BRANCHES), "{page}");
+        assert!(!page.contains(PMU_SYSTEM), "{page}");
+        assert!(!page.contains(PER_THOUSAND_LOADS), "{page}");
+    }
+
+    #[test]
+    fn an_event_that_did_not_count_for_the_whole_run_is_named_under_the_table() {
+        let whole = build_pmu(
+            "mezura",
+            Some(100),
+            &[(INSTRUCTIONS, 1000), (DTLB_MISSES, 4)],
+        );
+        assert!(
+            format_pmu(std::slice::from_ref(&whole), None, Style::Hidden)
+                .join("\n")
+                .contains(NOTHING_SLICED)
+        );
+        let mut sliced = whole;
+        sliced.readings[1].running_pct = 82.0;
+        let page = format_pmu(&[sliced], None, Style::Hidden).join("\n");
+        assert!(
+            page.contains(&format!("{DTLB_MISSES} did not count for the whole run")),
+            "{page}"
+        );
+        assert!(!page.contains(NOTHING_SLICED), "{page}");
+    }
+
+    #[test]
+    fn an_instance_whose_instruction_count_wandered_between_its_runs_is_named() {
+        let mut steady = build_pmu("scc", Some(100), &[(INSTRUCTIONS, 1000)]);
+        steady.readings[0].noise_pct = 0.02;
+        let mut shaky = build_pmu("cloc", Some(100), &[(INSTRUCTIONS, 2000)]);
+        shaky.readings[0].noise_pct = 3.40;
+        let quiet = format_pmu(&[steady.clone()], None, Style::Hidden).join("\n");
+        assert!(quiet.contains("moved at most 0.02%"), "{quiet}");
+        assert!(!quiet.contains("moved its instruction count"), "{quiet}");
+        let loud = format_pmu(&[steady, shaky], None, Style::Hidden).join("\n");
+        assert!(
+            loud.contains("cloc moved its instruction count by 3.40%"),
+            "{loud}"
+        );
+        assert!(loud.contains("moved at most 3.40%"), "{loud}");
+    }
+
+    #[test]
+    fn a_session_that_read_the_events_over_the_open_level_says_it_was_root() {
+        let read = vec![build_pmu("mezura", Some(100), &[(INSTRUCTIONS, 1000)])];
+        let open = format_pmu(&read, Some(OPEN_PARANOID), Style::Hidden).join("\n");
+        let shut = format_pmu(&read, Some(3), Style::Hidden).join("\n");
+        assert!(!open.contains("as root"), "{open}");
+        assert!(shut.contains(&format!("{PARANOID_KEY} at 3")), "{shut}");
+    }
+
+    #[test]
+    fn the_page_carries_the_hardware_counters_or_says_why_it_carries_none() {
+        let mut refused = build_insights(Vec::new(), Vec::new());
+        refused.pmu_unmeasured = Some("perf is not here".to_string());
+        let page = build_insights_page(&refused, &only_tokei()).join("\n");
+        assert!(
+            page.contains(&format!("## {PMU_TITLE}\n\nperf is not here")),
+            "{page}"
+        );
+        assert!(!page.contains(NO_PMU), "{page}");
+        let mut read = build_insights(
+            Vec::new(),
+            vec![build_pmu("tokei", Some(100), &[(INSTRUCTIONS, 1000)])],
+        );
+        read.paranoid = Some(OPEN_PARANOID);
+        let with = build_insights_page(&read, &only_tokei()).join("\n");
+        assert!(with.contains(PMU_MEANS), "{with}");
+        assert!(with.contains(PMU_WORK), "{with}");
+        assert_eq!(with.matches("```").count(), 6, "{with}");
     }
 
     #[test]
@@ -964,7 +1423,8 @@ mod tests {
 
     #[test]
     fn a_part_the_session_was_not_asked_for_keeps_its_heading_and_says_so() {
-        let mut insights = build_insights(vec![build_syscalls("tokei", &[("openat", 10)])]);
+        let mut insights =
+            build_insights(vec![build_syscalls("tokei", &[("openat", 10)])], Vec::new());
         insights.asked = vec![MEMORY_PART.to_string()];
         let page = build_insights_page(&insights, &only_tokei()).join("\n");
         assert!(page.contains(&format!("## Floor\n\n{NOT_ASKED}")), "{page}");

@@ -273,6 +273,7 @@ lengthen and disturb it. What each system can answer:
 | the floor | yes | yes | yes |
 | peak memory and the curve | yes, `/proc/<pid>/status` | yes, `GetProcessMemoryInfo` | no samples yet |
 | the counts of system calls | yes, `strace -c -f` | no | no |
+| the hardware counters | yes, `perf stat` | no | no |
 
 **The floor** is what a counter costs before it has counted anything. Three timings per instance,
 thirty runs and no settle: the version answer, `<counter> --version`, and the two ready floors,
@@ -315,9 +316,18 @@ of a family under it and what each one answered with an error:
 
 ![the system calls of each counter over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/syscalls.png)
 
+**The hardware counters** are three passes of `perf stat` per instance, four events a pass and five
+runs each. A cpu can count only a handful of events at once, and asking for more makes the kernel
+share the hardware out in turns and scale the counts up to cover what each event missed, which
+turns a count into an estimate. Four at a time leaves every count exact. Each instance is captured
+once before its passes, which settles the page cache and gives the line count the table divides by.
+Linux only, and it wants root or
+`kernel.perf_event_paranoid` at 1, since above that perf drops the kernel and the counts would
+cover user space alone.
+
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
-needs is missing. `--only floor,memory,syscalls` names which of the three to measure, in any
-combination, and with nothing named all three run. A part left out is named as left out in the
+needs is missing. `--only floor,memory,syscalls,pmu` names which of the insights to measure.
+A part left out is named as left out in the
 record and on the page, so an empty section is never read as a measurement that found nothing.
 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
@@ -580,7 +590,7 @@ flag belongs to the commands whose help names it, and a command refuses one that
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
-| what `insights` measures | `--only floor,memory,syscalls` | | | all three |
+| what `insights` measures | `--only floor,memory,syscalls,pmu` | | | all four |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | cloc |

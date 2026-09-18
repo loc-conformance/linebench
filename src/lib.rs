@@ -10,6 +10,7 @@ pub mod latest;
 pub mod machine;
 pub mod measure;
 pub mod os;
+pub mod pmu;
 pub mod read;
 pub mod record;
 pub mod sample;
