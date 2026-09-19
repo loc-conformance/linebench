@@ -70,12 +70,9 @@ const PER_THOUSAND_INSTRUCTIONS: &str = "per 1k instructions";
 const PER_THOUSAND_LOADS: &str = "per 1k loads";
 const PER_THOUSAND_REFS: &str = "per 1k refs";
 const SCALE_MEANS: &str = "M is a million, G is a billion, T is a trillion";
-const NOTHING_SLICED: &str = "nothing was multiplexed, every event counted for the whole of \
-                              every run";
-const LAST_LEVEL_MEANS: [&str; 2] = [
-    "cache-references and cache-misses are whatever this kernel maps them to,",
-    "so they compare inside this table alone",
-];
+const NOTHING_SLICED: &str = "every event counted for the whole of every run";
+const LAST_LEVEL_MEANS: &str = "cache-references and cache-misses name a different level of \
+                                cache on each processor";
 const SCALES: [(f64, &str); 3] = [(1e12, "T"), (1e9, "G"), (1e6, "M")];
 const THOUSAND: f64 = 1000.0;
 const NO_NOISE: &str = "the instructions and the cycles are absent, so the spread between \
@@ -669,9 +666,7 @@ pub fn format_pmu(counted: &[Pmu], paranoid: Option<i64>, style: Style) -> Vec<S
     for shaky in find_shaky_instances(counted) {
         lines.push(format!("{INDENT}{shaky}"));
     }
-    for means in LAST_LEVEL_MEANS {
-        lines.push(format!("{INDENT}{means}"));
-    }
+    lines.push(format!("{INDENT}{LAST_LEVEL_MEANS}"));
     if let Some(level) = paranoid
         && level > OPEN_PARANOID
     {
