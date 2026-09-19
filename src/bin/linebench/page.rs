@@ -1201,16 +1201,33 @@ fn find_instance_record<'a>(record: &'a Record, instance: &str) -> Option<&'a In
         .find(|i| i.identity.instance == instance)
 }
 
+fn is_known(value: &str) -> bool {
+    !value.is_empty() && value != UNKNOWN
+}
+
+fn read_filesystem_type(record: &Record) -> &str {
+    let filesystem = record.machine.corpus_fs.as_str();
+    if record.machine.platform.is_linux() {
+        filesystem.split_whitespace().next().unwrap_or(filesystem)
+    } else {
+        filesystem
+    }
+}
+
 fn find_disk_difference(then: &Record, now: &Record) -> Option<String> {
-    let (fs_then, fs_now) = (&then.machine.corpus_fs, &now.machine.corpus_fs);
+    let (fs_then, fs_now) = (read_filesystem_type(then), read_filesystem_type(now));
     let (device_then, device_now) = (&then.machine.corpus_device, &now.machine.corpus_device);
     let on_disk = || {
-        let known: Vec<&str> = [fs_then.as_str(), device_then.as_str()]
+        let known: Vec<&str> = [then.machine.corpus_fs.as_str(), device_then.as_str()]
             .into_iter()
             .filter(|part| *part != UNKNOWN)
             .collect();
         format!("with the corpus on {}", known.join(", "))
     };
+    let (volume_then, volume_now) = (&then.machine.corpus_volume, &now.machine.corpus_volume);
+    if is_known(volume_then) && is_known(volume_now) {
+        return (volume_then != volume_now).then(on_disk);
+    }
     if fs_then != UNKNOWN && fs_now != UNKNOWN && fs_then != fs_now {
         return Some(on_disk());
     }
@@ -1872,6 +1889,46 @@ mod tests {
     }
 
     #[test]
+    fn the_same_disk_under_a_new_kernel_name_is_still_the_same_disk() {
+        let lexar = "Lexar SSD NQ790 2TB, 16.0 GT/s PCIe x4";
+        let mut then = build_record("20260901-100000", &[("mezura", 0.30)], lexar);
+        then.machine.platform = Platform::Linux;
+        then.machine.corpus_fs = "ext4 /dev/nvme1n1p3".to_string();
+        let mut now = build_record("20260902-100000", &[("mezura", 0.31)], lexar);
+        now.machine.platform = Platform::Linux;
+        now.machine.corpus_fs = "ext4 /dev/nvme0n1p3".to_string();
+
+        assert!(find_hard_differences(&then, &now).is_empty());
+
+        now.machine.corpus_fs = "btrfs /dev/nvme0n1p3".to_string();
+        assert_eq!(
+            vec!["with the corpus on ext4 /dev/nvme1n1p3, ".to_string() + lexar],
+            find_hard_differences(&then, &now)
+        );
+    }
+
+    #[test]
+    fn the_volume_decides_it_whenever_both_runs_recorded_one() {
+        let lexar = "Lexar SSD NQ790 2TB, 16.0 GT/s PCIe x4";
+        let mut then = build_record("20260901-100000", &[("mezura", 0.30)], lexar);
+        then.machine.platform = Platform::Linux;
+        then.machine.corpus_fs = "ext4 /dev/nvme1n1p3".to_string();
+        then.machine.corpus_volume = "6a161305-1bb6-4ee3-9d7f-1ea0d2ab0af9".to_string();
+        let mut now = build_record("20260902-100000", &[("mezura", 0.31)], lexar);
+        now.machine.platform = Platform::Linux;
+        now.machine.corpus_fs = "ext4 /dev/nvme0n1p3".to_string();
+        now.machine.corpus_volume = then.machine.corpus_volume.clone();
+
+        assert!(find_hard_differences(&then, &now).is_empty());
+
+        now.machine.corpus_volume = "282c509e-2c50-68b8-0000-000000000000".to_string();
+        assert_eq!(1, find_hard_differences(&then, &now).len());
+
+        now.machine.corpus_volume = UNKNOWN.to_string();
+        assert!(find_hard_differences(&then, &now).is_empty());
+    }
+
+    #[test]
     fn context_differences_are_listed_for_every_anchor() {
         let mut monday = build_record("20260901-100000", &[("scc", 0.50)], "nvme0");
         monday.machine.cpu_scaling = "High performance".to_string();
@@ -2226,6 +2283,7 @@ mod tests {
                 cpu_scaling: "Balanced".to_string(),
                 corpus_fs: "ext4".to_string(),
                 corpus_device: device.to_string(),
+                corpus_volume: UNKNOWN.to_string(),
                 global_gitignore: "none".to_string(),
                 linebench: "0.1.0".to_string(),
                 hyperfine: "hyperfine 1.20.0".to_string(),

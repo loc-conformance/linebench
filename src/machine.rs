@@ -81,6 +81,8 @@ pub struct Machine {
     pub cpu_scaling: String,
     pub corpus_fs: String,
     pub corpus_device: String,
+    #[serde(default)]
+    pub corpus_volume: String,
     pub global_gitignore: String,
     #[serde(default)]
     pub linebench: String,
@@ -205,6 +207,7 @@ pub fn collect_machine(platform: Platform, corpus: &Path) -> Machine {
         cpu_scaling: read_cpu_scaling(platform),
         corpus_fs: read_filesystem_of(platform, corpus),
         corpus_device: read_device_of(platform, corpus),
+        corpus_volume: read_volume_of(platform, corpus),
         global_gitignore: capture_output("git", &["config", "--get", "core.excludesFile"])
             .unwrap_or_else(|| "none".to_string()),
         linebench: VERSION.to_string(),
@@ -413,6 +416,23 @@ fn read_df_row(out: &str) -> Option<String> {
         [source, ..] => Some(source.to_string()),
         [] => None,
     }
+}
+
+fn read_volume_of(platform: Platform, path: &Path) -> String {
+    let shown = path.to_string_lossy();
+    match platform {
+        Platform::Windows => find_drive_letter(path).and_then(|drive| {
+            run_powershell(&format!("(Get-Volume -DriveLetter {drive}).UniqueId"))
+        }),
+        Platform::Macos => capture_output("diskutil", &["info", &shown])
+            .and_then(|out| find_value_after(&out, "Volume UUID:")),
+        Platform::Linux | Platform::Wsl => {
+            capture_output("findmnt", &["-no", "UUID", "-T", &shown])
+        }
+    }
+    .map(|found| found.trim().to_string())
+    .filter(|found| !found.is_empty())
+    .unwrap_or_else(|| UNKNOWN.to_string())
 }
 
 fn read_device_of(platform: Platform, path: &Path) -> String {

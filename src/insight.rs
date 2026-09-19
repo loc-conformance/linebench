@@ -1197,6 +1197,7 @@ mod tests {
                 cpu_scaling: "performance".to_string(),
                 corpus_fs: "ext4".to_string(),
                 corpus_device: "nvme0".to_string(),
+                corpus_volume: "a-volume".to_string(),
                 global_gitignore: "none".to_string(),
                 linebench: "0.1.0".to_string(),
                 hyperfine: "hyperfine 1.19.0".to_string(),
