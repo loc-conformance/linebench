@@ -513,6 +513,21 @@ pub fn shorten_version(printed: &str) -> String {
     printed.to_string()
 }
 
+fn lay_out_labelled(rows: &[(String, String)]) -> Vec<String> {
+    let width = widest(rows.iter().map(|(label, _)| label)) + 2;
+    rows.iter()
+        .map(|(label, text)| format!("{label:<width$}{text}").trim_end().to_string())
+        .collect()
+}
+
+pub fn widest(cells: impl IntoIterator<Item = impl AsRef<str>>) -> usize {
+    cells
+        .into_iter()
+        .map(|cell| cell.as_ref().chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 pub fn format_thousands(number: u64) -> String {
     let digits = number.to_string();
     let mut grouped = String::new();
@@ -623,41 +638,67 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
         .as_deref()
         .map(shorten_hash)
         .unwrap_or_else(|| "no commit".to_string());
-    let mut lines = vec![
-        format!("# Benchmark session notes {}", record.stamp),
-        String::new(),
-        format!("corpus:   {} @ {head}, {pin}", record.corpus.name),
-        format!("          {}", record.corpus.checkout.display()),
-        format!(
-            "          {}, {}",
-            record.machine.corpus_fs, record.machine.corpus_device
+    let mut rows = vec![
+        (
+            "corpus:".to_string(),
+            format!("{} @ {head}, {pin}", record.corpus.name),
         ),
-        format!("machine:  {prepared}"),
-        format!("          control drift start to end: {drift}"),
-        format!(
-            "          background before the run: {}",
-            format_busy(record.background_busy_percent)
+        (
+            String::new(),
+            record.corpus.checkout.display().to_string(),
         ),
-        format!(
-            "MS Defender: realtime {}, {}",
-            record.defender.realtime,
-            describe_exclusions(record)
+        (
+            String::new(),
+            format!(
+                "{}, {}",
+                record.machine.corpus_fs, record.machine.corpus_device
+            ),
+        ),
+        ("machine:".to_string(), prepared),
+        (
+            String::new(),
+            format!("control drift start to end: {drift}"),
+        ),
+        (
+            String::new(),
+            format!(
+                "background before the run: {}",
+                format_busy(record.background_busy_percent)
+            ),
+        ),
+        (
+            "MS Defender:".to_string(),
+            format!(
+                "realtime {}, {}",
+                record.defender.realtime,
+                describe_exclusions(record)
+            ),
         ),
     ];
     for instance in &record.instances {
-        lines.push(format!(
-            "{:<10}{} {}",
+        rows.push((
             format!("{}:", instance.identity.instance),
-            instance.identity.version,
-            instance.identity.describe_origin()
+            format!(
+                "{} {}",
+                instance.identity.version,
+                instance.identity.describe_origin()
+            ),
         ));
     }
     if let Some(parity) = &record.parity {
-        lines.push(format!("parity:   {}", parity.describe()));
+        rows.push(("parity:".to_string(), parity.describe()));
     }
     if !record.capture_failures.is_empty() {
-        lines.push(format!("counters: {}", record.capture_failures.join("; ")));
+        rows.push((
+            "counters:".to_string(),
+            record.capture_failures.join("; "),
+        ));
     }
+    let mut lines = vec![
+        format!("# Benchmark session notes {}", record.stamp),
+        String::new(),
+    ];
+    lines.extend(lay_out_labelled(&rows));
     lines.extend([
         String::new(),
         "- [ ] machine quiet during the run".to_string(),
@@ -828,6 +869,28 @@ mod tests {
     use std::env;
 
     use super::*;
+
+    #[test]
+    fn a_label_longer_than_the_others_widens_the_column_instead_of_pushing_its_own_text() {
+        let row = |label: &str, text: &str| (label.to_string(), text.to_string());
+        let rows = [
+            row("corpus:", "linux"),
+            row("", "the second line of the same field"),
+            row("mezura@dev-v3.2.0:", "3.2.0"),
+            row("counters:", "none"),
+        ];
+        let laid_out = lay_out_labelled(&rows);
+
+        assert_eq!(format!("corpus:{}linux", " ".repeat(13)), laid_out[0]);
+        for (line, (_, text)) in laid_out.iter().zip(&rows) {
+            assert!(line.ends_with(text.as_str()), "{line}");
+            assert_eq!(
+                line.chars().count() - text.chars().count(),
+                20,
+                "{laid_out:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_drift_is_the_ratio_of_the_two_control_means_whichever_is_larger() {

@@ -13,7 +13,7 @@ use linebench::record::{
     InstanceRecord, Pooled, Record, calculate_drift, collect_table_rows,
     describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_utc_minute,
     format_versions, format_wall, pool_orders, propagate_ratio_stddev, read_record,
-    shorten_version,
+    shorten_version, widest,
 };
 use linebench::record::{LOCAL_DIR, RECORD_FILE};
 use linebench::verify::compare_lines;
@@ -322,39 +322,64 @@ fn format_comparison(
         sameness
     )];
     let control = find_control_mean(current);
+    let names = rows
+        .iter()
+        .map(|row| match row {
+            Row::Compared(comparison) => comparison.now.instance.as_str(),
+            Row::New(now) => now.instance.as_str(),
+        })
+        .chain(["control", "differs"]);
+    let name_width = widest(names);
     for row in &rows {
         lines.push(match row {
             Row::Compared(comparison) => {
-                format_compared_row(current, comparison, main, control.as_ref())
+                format_compared_row(current, comparison, main, control.as_ref(), name_width)
             }
             Row::New(now) => format!(
-                "  {:<14} t1   {}   {}",
+                "  {:<name_width$} t1   {}   {}",
                 now.instance,
                 format_wall(now.mean_s, 0.0),
                 block.describe_new_instance(!set_aside.is_empty())
             ),
         });
     }
-    lines.extend(format_control_shift(current, &comparable, main, block));
-    for anchor in &anchors {
-        let differences = find_context_differences(anchor, current);
-        if differences.is_empty() {
-            continue;
-        }
+    lines.extend(format_control_shift(
+        current,
+        &comparable,
+        main,
+        block,
+        name_width,
+    ));
+    let differences: Vec<_> = anchors
+        .iter()
+        .map(|anchor| (*anchor, find_context_differences(anchor, current)))
+        .filter(|(_, found)| !found.is_empty())
+        .collect();
+    let label_width = widest(
+        differences
+            .iter()
+            .flat_map(|(_, found)| found.iter().map(|(label, _, _)| label)),
+    );
+    for (anchor, found) in &differences {
         if anchor.stamp != main.stamp {
             lines.push(format!("  differs from {}", anchor.stamp));
         }
-        for (i, (label, then, now)) in differences.iter().enumerate() {
+        for (i, (label, then, now)) in found.iter().enumerate() {
             let lead = if i == 0 && anchor.stamp == main.stamp {
                 "differs"
             } else {
                 ""
             };
             if then.len() + now.len() > LONG_CONTEXT_VALUE {
-                lines.push(format!("  {lead:<14} {label:<14} was  {then}"));
-                lines.push(format!("  {:<14} {:<14} now  {now}", "", ""));
+                lines.push(format!("  {lead:<name_width$} {label:<label_width$} was  {then}"));
+                lines.push(format!(
+                    "  {:<name_width$} {:<label_width$} now  {now}",
+                    "", ""
+                ));
             } else {
-                lines.push(format!("  {lead:<14} {label:<14} {then} -> {now}"));
+                lines.push(format!(
+                    "  {lead:<name_width$} {label:<label_width$} {then} -> {now}"
+                ));
             }
         }
     }
@@ -952,6 +977,7 @@ fn format_compared_row(
     comparison: &Comparison,
     main: &Record,
     control: Option<&(String, String, Pooled)>,
+    name_width: usize,
 ) -> String {
     let Comparison {
         anchor,
@@ -969,7 +995,7 @@ fn format_compared_row(
             now_wall.push_str(" (one order)");
         }
         let mut line = format!(
-            "  {:<14} t1   {} -> {}   {}",
+            "  {:<name_width$} t1   {} -> {}   {}",
             now.instance,
             format_wall(*then_mean_s, 0.0),
             now_wall,
@@ -989,7 +1015,7 @@ fn format_compared_row(
         line
     } else {
         format!(
-            "  {:<14} t1   the languages, the same-work flags or the instance's own \
+            "  {:<name_width$} t1   the languages, the same-work flags or the instance's own \
              arguments changed, so the times do not compare",
             now.instance
         )
@@ -1018,6 +1044,7 @@ fn format_control_shift(
     comparable: &[&Record],
     main: &Record,
     block: &Block,
+    name_width: usize,
 ) -> Vec<String> {
     let Some((name, sha, now)) = find_control_mean(current) else {
         return vec![
@@ -1047,7 +1074,7 @@ fn format_control_shift(
                 now.mean_stddev_s,
             );
             let mut line = format!(
-                "  {:<14} {:<26} {}",
+                "  {:<name_width$} {}   {}",
                 "control",
                 name,
                 format_change(then.mean_s, now.mean_s)
@@ -1071,8 +1098,8 @@ fn format_control_shift(
             lines
         }
         (None, Some((record, _, _))) => vec![format!(
-            "  {:<14} {:<26} timed under another build in {}, so the machine's own shift is \
-             not known",
+            "  {:<name_width$} {}   timed under another build in {}, so the machine's own \
+             shift is not known",
             "control", name, record.stamp
         )],
         (None, None) => vec![block.describe_no_shared_control()],
@@ -1339,17 +1366,17 @@ mod tests {
         );
         assert_eq!(
             since[1],
-            "  mezura         t1   310 ms -> 320 ms   +3.2% ± 0.8%   within the noise"
+            "  mezura  t1   310 ms -> 320 ms   +3.2% ± 0.8%   within the noise"
         );
         assert!(
-            since[2].starts_with("  scc            t1   500 ms -> 550 ms   +10.0% ± 0.5%"),
+            since[2].starts_with("  scc     t1   500 ms -> 550 ms   +10.0% ± 0.5%"),
             "{}",
             since[2]
         );
         assert!(!since[2].contains("within the noise"), "{}", since[2]);
         assert!(since[2].ends_with("(from 20260901-100000)"), "{}", since[2]);
         assert!(
-            since[3].starts_with("  control        mezura"),
+            since[3].starts_with("  control mezura"),
             "{}",
             since[3]
         );
@@ -1450,7 +1477,7 @@ mod tests {
         now.measurements.retain(|m| m.set != reverse);
         let since = format_since(&now, &[&then]);
         assert!(
-            since[1].starts_with("  mezura         t1   300 ms -> 310 ms (one order)   +3.3% ±"),
+            since[1].starts_with("  mezura  t1   300 ms -> 310 ms (one order)   +3.3% ±"),
             "{}",
             since[1]
         );
@@ -1476,23 +1503,23 @@ mod tests {
             "against 20260901-100000 (same machine, same corpus commit, same builds)"
         );
         assert!(
-            against[1].starts_with("  mezura         t1   300 ms -> 330 ms   +10.0% ±")
+            against[1].starts_with("  mezura  t1   300 ms -> 330 ms   +10.0% ±")
                 && against[1].ends_with("within the noise"),
             "{}",
             against[1]
         );
         assert!(
-            against[2].starts_with("  scc            t1   500 ms -> 550 ms   +10.0% ±")
+            against[2].starts_with("  scc     t1   500 ms -> 550 ms   +10.0% ±")
                 && against[2].ends_with("within the noise"),
             "{}",
             against[2]
         );
         assert_eq!(
             against[3],
-            "  tokei          t1   600 ms   not in 20260901-100000"
+            "  tokei   t1   600 ms   not in 20260901-100000"
         );
         assert!(
-            against[4].starts_with("  control        mezura") && against[4].contains("+10.0% ±"),
+            against[4].starts_with("  control mezura") && against[4].contains("+10.0% ±"),
             "{}",
             against[4]
         );
@@ -1512,7 +1539,7 @@ mod tests {
         );
         assert_eq!(
             partly_above[2],
-            "  scc            t1   550 ms   not in 20260902-100000"
+            "  scc     t1   550 ms   not in 20260902-100000"
         );
         assert_eq!(
             format_against(&wednesday, &monday, &[&monday]),
@@ -1664,7 +1691,7 @@ mod tests {
         let since = format_since(&now, &[&then]);
         assert_eq!(
             since[2],
-            "  scc            t1   500 ms   never measured before on this machine"
+            "  scc     t1   500 ms   never measured before on this machine"
         );
         assert!(since[3].starts_with("  control"), "{}", since[3]);
         let mut other_cpu = build_record("20260901-110000", &[("scc", 0.50)], "nvme0");
@@ -1672,7 +1699,7 @@ mod tests {
         let since = format_since(&now, &[&then, &other_cpu]);
         assert_eq!(
             since[2],
-            "  scc            t1   500 ms   not in any comparable earlier run"
+            "  scc     t1   500 ms   not in any comparable earlier run"
         );
     }
 
@@ -1741,7 +1768,9 @@ mod tests {
         let was = since
             .iter()
             .position(|line| {
-                line.starts_with("  differs        prepared       was  cpu governor on 16 cpus")
+                line.starts_with("  differs ")
+                    && line.contains("prepared")
+                    && line.contains("was  cpu governor on 16 cpus")
             })
             .unwrap_or_else(|| panic!("{since:?}"));
         assert_eq!(since[was + 1].trim_start(), "now  none");
@@ -1812,6 +1841,37 @@ mod tests {
     }
 
     #[test]
+    fn a_name_longer_than_the_others_widens_the_column_instead_of_pushing_its_own_row() {
+        let long = "mezura@dev-v3.2.0";
+        let mut then = build_record("20260901-100000", &[(long, 0.30), ("scc", 0.50)], "nvme0");
+        then.machine.cpu_scaling = "High performance".to_string();
+        let now = build_record("20260902-100000", &[(long, 0.31), ("scc", 0.55)], "nvme0");
+        let since = format_since(&now, &[&then]);
+
+        let second_column = |line: &str| {
+            let rest = line.trim_start();
+            let label = rest.split_whitespace().next().unwrap_or_default();
+            let after = line.len() - rest.len() + label.len();
+            after + line[after..].len() - line[after..].trim_start().len()
+        };
+        let leads = [long, "scc", "control", "differs"];
+        let rows: Vec<&String> = since
+            .iter()
+            .filter(|line| {
+                leads.contains(&line.split_whitespace().next().unwrap_or_default())
+            })
+            .collect();
+        assert_eq!(4, rows.len(), "{since:?}");
+        for row in &rows {
+            assert_eq!(
+                second_column(row),
+                second_column(rows[0]),
+                "{row}\namong {since:?}"
+            );
+        }
+    }
+
+    #[test]
     fn context_differences_are_listed_for_every_anchor() {
         let mut monday = build_record("20260901-100000", &[("scc", 0.50)], "nvme0");
         monday.machine.cpu_scaling = "High performance".to_string();
@@ -1827,12 +1887,15 @@ mod tests {
             .position(|line| line == "  differs from 20260901-100000")
             .expect("a block for the older anchor");
         assert!(
-            since[differs + 1].contains("power          High performance -> Balanced"),
+            since[differs + 1].contains("power High performance -> Balanced"),
             "{}",
             since[differs + 1]
         );
         assert!(
-            !since.iter().any(|line| line.starts_with("  differs  ")),
+            !since
+                .iter()
+                .any(|line| line.starts_with("  differs ")
+                    && !line.starts_with("  differs from ")),
             "{since:?}"
         );
     }
@@ -1849,7 +1912,7 @@ mod tests {
             since[1]
         );
         assert!(
-            since[2].starts_with("  control        mezura")
+            since[2].starts_with("  control mezura")
                 && since[2].contains("timed under another build in 20260901-100000"),
             "{}",
             since[2]

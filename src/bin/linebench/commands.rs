@@ -49,7 +49,7 @@ use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
     calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
     format_summary_tables, format_thousands, format_utc_date, format_utc_stamp, format_wall,
-    read_seconds_since_epoch, shorten_version, write_csvs, write_notes, write_record,
+    read_seconds_since_epoch, shorten_version, widest, write_csvs, write_notes, write_record,
 };
 use linebench::record::{LOCAL_DIR, RECORD_FILE, RECORD_FORMAT};
 use linebench::sample::sample_memory;
@@ -1106,10 +1106,11 @@ fn say_what_fetch_would_take(
     }
     if !plan.corpora.is_empty() {
         print_line(out, "   corpora")?;
+        let width = widest(plan.corpora.iter().map(|(corpus, _)| &corpus.name));
         for (corpus, checkout) in &plan.corpora {
             print_line(
                 out,
-                &format!("      {:<10} {}", corpus.name, show_path(checkout)),
+                &format!("      {:<width$} {}", corpus.name, show_path(checkout)),
             )?;
         }
     }
@@ -1774,9 +1775,14 @@ fn check_everything(
     let mut bad = Vec::new();
     let mut counted = Vec::new();
     let extensions = &locations.corpus.extensions;
+    let name_width = widest(instances.iter().map(|instance| instance.get_name()));
     for table in TABLES {
         for instance in instances {
-            let label = format!("   {:<14} {}  ", instance.get_name(), table.as_str());
+            let label = format!(
+                "   {:<name_width$} {}  ",
+                instance.get_name(),
+                table.as_str()
+            );
             let args = build_args(instance, &locations.checkout, extensions, table, true)?;
             let failures_before = runner.capture_failures.len();
             let capture = runner.capture_output(
@@ -2251,6 +2257,7 @@ fn print_latest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), 
     }
     print_line(out, "")?;
     print_line(out, ">> releases")?;
+    let width = widest(lookups.iter().map(|lookup| &lookup.definition.name)) + 2;
     for lookup in lookups {
         let Some(how) = &lookup.definition.acquisition else {
             continue;
@@ -2281,7 +2288,7 @@ fn print_latest_releases(out: &mut dyn Write, lookups: &[Lookup]) -> Result<(), 
                 paint(Color::Yellow, &text).to_string()
             }
         };
-        print_line(out, &format!("   {:<12}{text}", lookup.definition.name))?;
+        print_line(out, &format!("   {:<width$}{text}", lookup.definition.name))?;
     }
     Ok(())
 }
