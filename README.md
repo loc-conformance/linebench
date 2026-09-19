@@ -329,13 +329,14 @@ of a family under it and what each one answered with an error:
 ![the system calls of each counter over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/syscalls.png)
 
 **The hardware counters** are three passes of `perf stat` per instance, four events a pass and five
-runs each. A cpu can count only a handful of events at once, and asking for more makes the kernel
-share the hardware out in turns and scale the counts up to cover what each event missed, which
-turns a count into an estimate. Four at a time leaves every count exact. Each instance is captured
-once before its passes, which settles the page cache and gives the line count the table divides by.
-Linux only, and it wants root or
-`kernel.perf_event_paranoid` at 1, since above that perf drops the kernel and the counts would
-cover user space alone.
+runs each:
+
+![what the cpu did while each counter ran over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/pmu.png)
+
+Past four events the cpu shares the hardware out in turns and every count becomes an estimate.
+Each instance is captured once before its passes, which settles the page cache and gives the line
+count the table divides by. Linux only, and it wants root or `kernel.perf_event_paranoid` at 1,
+since above that perf drops the kernel and the counts would cover user space alone.
 
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
 needs is missing. `--only floor,memory,syscalls,pmu` names which of the insights to measure.
