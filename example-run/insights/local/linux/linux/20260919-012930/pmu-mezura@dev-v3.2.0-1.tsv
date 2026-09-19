@@ -1,6 +1,0 @@
-# started on Sat Sep 19 04:29:32 2026
-
-13781629391		instructions	0,01%	1316826400	100,00	2	insn per cycle
-6205506515		cycles	0,29%	1316826400	100,00		
-2598972726		branch-instructions	0,01%	1316826400	100,00		
-42599489		branch-misses	0,12%	1316826400	100,00	1	of all branches
