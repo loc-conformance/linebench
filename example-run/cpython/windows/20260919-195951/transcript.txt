@@ -1,0 +1,144 @@
+
+== machine preparation
+   power scheme: Balanced -> high performance
+   if this run dies without putting it back, by hand:
+   powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e
+
+== phase 0: machine state
+   background: 4.6% busy
+   arch: x86_64
+   corpus_device: Lexar SSD NQ790 2TB, SSD, NVMe
+   corpus_fs: NTFS
+   corpus_volume: \\?\Volume{9a5063c3-7a0b-48db-bb5a-162a19054826}\
+   cpu: AMD Ryzen 7 9700X 8-Core Processor
+   cpu_scaling: High performance
+   global_gitignore: none
+   hyperfine: hyperfine 1.20.0
+   kernel: 10.0.26200.0
+   linebench: 0.2.0
+   logical_cores: 16
+   os: Microsoft Windows 11 Pro
+   platform: windows
+   ram_bytes: 66203877376
+   mezura: v3.2.0 (2026-09-19) (fetched, mezura-v3.2.0-windows-x86_64.zip)
+   scc: scc version 4.1.0 (fetched, scc_Windows_x86_64.zip)
+   tokei: tokei 15.0.0 compiled with serialization support: json (built with rustc 1.97.1 (8bab26f4f 2026-07-14))
+
+== JSON captures (also the settling runs)
+
+== opening control run
+>> control-start
+   Benchmark 1: mezura
+     Time (mean ± σ):      26.5 ms ±   0.4 ms    [User: 114.6 ms, System: 120.8 ms]
+     Range (min … max):    25.8 ms …  27.4 ms    15 runs
+
+== Same work
+>> t1-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):      23.4 ms ±   0.4 ms    [User: 95.8 ms, System: 78.1 ms]
+     Range (min … max):    23.0 ms …  24.1 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):      40.6 ms ±   0.9 ms    [User: 183.3 ms, System: 183.3 ms]
+     Range (min … max):    39.4 ms …  42.0 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):      66.7 ms ±   1.7 ms    [User: 511.5 ms, System: 282.3 ms]
+     Range (min … max):    64.3 ms …  69.9 ms    15 runs
+
+   Summary
+     mezura ran
+       1.73 ± 0.05 times faster than scc
+       2.85 ± 0.09 times faster than tokei
+
+>> t1-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):      67.3 ms ±   3.9 ms    [User: 475.0 ms, System: 350.0 ms]
+     Range (min … max):    64.4 ms …  80.9 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):      40.7 ms ±   0.7 ms    [User: 207.3 ms, System: 162.5 ms]
+     Range (min … max):    39.8 ms …  41.8 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):      23.4 ms ±   0.4 ms    [User: 122.9 ms, System: 125.0 ms]
+     Range (min … max):    23.0 ms …  24.5 ms    15 runs
+
+   Summary
+     mezura ran
+       1.74 ± 0.04 times faster than scc
+       2.87 ± 0.17 times faster than tokei
+
+== Out of the box
+>> t2-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):      26.4 ms ±   0.6 ms    [User: 113.5 ms, System: 102.1 ms]
+     Range (min … max):    25.0 ms …  27.2 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):      57.9 ms ±   0.6 ms    [User: 343.8 ms, System: 292.7 ms]
+     Range (min … max):    56.7 ms …  58.5 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):      81.2 ms ±   1.7 ms    [User: 611.5 ms, System: 386.5 ms]
+     Range (min … max):    79.5 ms …  86.0 ms    15 runs
+
+   Summary
+     mezura ran
+       2.19 ± 0.05 times faster than scc
+       3.08 ± 0.09 times faster than tokei
+
+>> t2-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):      81.2 ms ±   2.1 ms    [User: 642.7 ms, System: 386.5 ms]
+     Range (min … max):    78.8 ms …  85.4 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):      57.9 ms ±   0.5 ms    [User: 353.1 ms, System: 280.2 ms]
+     Range (min … max):    57.2 ms …  59.0 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):      26.8 ms ±   0.4 ms    [User: 122.9 ms, System: 79.2 ms]
+     Range (min … max):    26.0 ms …  27.6 ms    15 runs
+
+   Summary
+     mezura ran
+       2.17 ± 0.04 times faster than scc
+       3.04 ± 0.09 times faster than tokei
+
+== closing control run
+>> control-end
+   Benchmark 1: mezura
+     Time (mean ± σ):      27.1 ms ±   1.9 ms    [User: 108.3 ms, System: 94.8 ms]
+     Range (min … max):    26.1 ms …  33.6 ms    15 runs
+WARNING: hyperfine on control-end: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+== summary
+   drift         1.0219
+
+   Same work
+   instance  wall       vs fastest    user cpu  system cpu  parallelism  files  lines
+   mezura    23 ms ± 0  1.00x         0.11 s    0.10 s      9.00         3,559  2,230,164
+   scc       41 ms ± 1  1.73x ± 0.04  0.20 s    0.17 s      9.06         3,556  2,229,545
+   tokei     67 ms ± 3  2.86x ± 0.14  0.49 s    0.32 s      12.07        3,583  2,230,905
+
+   Out of the box
+   instance  wall       vs fastest    user cpu  system cpu  parallelism  files  lines
+   mezura    27 ms ± 1  1.00x         0.12 s    0.09 s      7.86         3,577  2,127,111
+   scc       58 ms ± 1  2.18x ± 0.05  0.35 s    0.29 s      10.96        5,780  3,047,697
+   tokei     81 ms ± 2  3.06x ± 0.09  0.63 s    0.39 s      12.48        5,659  2,998,726
+
+   equal work    within 1.0% of the corpus
+
+   since 20260913-052216 (same machine, same corpus commit)
+     mezura  t1   27 ms -> 23 ms   -13.1% ± 0.3%   version v3.1.1 (2026-09-11) -> v3.2.0 (2026-09-19)
+     scc     t1   40 ms -> 41 ms   +2.1% ± 0.5%
+     tokei   t1   65 ms -> 67 ms   +2.5% ± 1.0%
+     control mezura   timed under another build in 20260913-052216, so the machine's own shift is not known
+     differs background 0.2% busy -> 4.6% busy
+             linebench  0.1.0 -> 0.2.0
+             drift      7.5% -> 2.2%
+
+WARNING: Statistical outliers were detected, on control-end
+
+done. everything is in D:\dev\Rusty\linebench\results\cpython\windows\20260919-195951
