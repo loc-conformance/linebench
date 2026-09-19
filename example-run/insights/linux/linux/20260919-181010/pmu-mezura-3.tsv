@@ -1,0 +1,6 @@
+# started on Sat Sep 19 21:10:16 2026
+
+612772		dTLB-load-misses	2,51%	1145846677	100,00		
+145248		iTLB-load-misses	4,09%	1145846677	100,00		
+13870		page-faults	1,05%	1145846677	100,00		
+1715		context-switches	31,26%	1145846677	100,00		

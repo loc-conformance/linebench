@@ -557,11 +557,10 @@ one fetch wrote is refused, with the two ways out, fetch again or measure it as 
 ## Where results go
 
 No official benchmarks live in this repository. There is one example run under
-[example-run/](example-run/README.md), and the variability between machines is too great for it to
-say anything about yours. It is the same machine under two systems, Windows and native Linux: the
-three shipped corpora and an insights session on each, plus a local run putting the mezura release
-that `fetch` downloaded that day against a newer working build of it. Every section speaks for the
-day it was measured and says nothing about where the counters stand today.
+[example-run/](example-run/README.md), there to show what a machine leaves behind once it has been
+measured, not to be held against your own numbers: the variability between machines is too great
+for that. Its page says which machines, corpora and counters are in it, and every section of it
+speaks for the day it was measured and says nothing about where the counters stand today.
 
 Each counter that uses linebench publishes results of its own in its own repository, which is
 where to see how the numbers move between machines.

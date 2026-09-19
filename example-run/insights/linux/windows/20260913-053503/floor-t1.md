@@ -1,6 +1,0 @@
-| Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
-|:---|---:|---:|---:|---:|
-| `D:/dev/tools/linebench-counters/mezura.exe C:/Users/Petros/AppData/Local/Temp/linebench-insights-20260913-053503/floor --languages c,h,s,asm,py,pl,pm,rs,sh --no-gitignore --no-ignore-files --search-in-dotted --no-local --no-default-config --hide keywords --count-minified --count-generated --count-not-code --counting region --no-shebang` | 11.0 ± 0.1 | 10.7 | 11.2 | 1.18 ± 0.12 |
-| `D:/dev/tools/linebench-counters/scc.exe C:/Users/Petros/AppData/Local/Temp/linebench-insights-20260913-053503/floor -i c,h,s,asm,py,pl,pm,rs,sh --no-gitignore --no-ignore --no-scc-ignore -c --no-cocomo --no-config` | 13.1 ± 0.4 | 12.6 | 14.2 | 1.41 ± 0.15 |
-| `D:/dev/tools/linebench-counters/tokei.exe C:/Users/Petros/AppData/Local/Temp/linebench-insights-20260913-053503/floor -t "C,C Header,GNU Style Assembly,Assembly,Python,Perl,Perl,Rust,Shell" --no-ignore --hidden` | 9.3 ± 0.9 | 8.2 | 11.7 | 1.00 |
-| `D:/dev/tools/linebench-counters/cloc.exe C:/Users/Petros/AppData/Local/Temp/linebench-insights-20260913-053503/floor --include-ext=c,C,h,H,s,S,asm,ASM,py,PY,pl,PL,pm,PM,rs,RS,sh,SH --skip-uniqueness` | 137.9 ± 0.9 | 136.1 | 139.7 | 14.84 ± 1.48 |

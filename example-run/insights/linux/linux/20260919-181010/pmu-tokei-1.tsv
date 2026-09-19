@@ -1,0 +1,6 @@
+# started on Sat Sep 19 21:10:20 2026
+
+63365817678		instructions	0,04%	6165733557	100,00	2	insn per cycle
+29555831767		cycles	0,42%	6165733557	100,00		
+14694476367		branch-instructions	0,03%	6165733557	100,00		
+100218279		branch-misses	0,21%	6165733557	100,00	0	of all branches

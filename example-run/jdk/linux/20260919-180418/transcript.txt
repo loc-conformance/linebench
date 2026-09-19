@@ -1,0 +1,143 @@
+
+== phase 0: machine state
+   background: 0.1% busy
+   arch: x86_64
+   corpus_device: Lexar SSD NQ790 2TB, 16.0 GT/s PCIe x4
+   corpus_fs: ext4 /dev/nvme1n1p3
+   corpus_volume: 6a161305-1bb6-4ee3-9d7f-1ea0d2ab0af9
+   cpu: AMD Ryzen 7 9700X 8-Core Processor
+   cpu_scaling: performance
+   global_gitignore: none
+   hyperfine: hyperfine 1.19.0
+   kernel: 6.12.107+deb13-amd64
+   linebench: 0.2.0
+   logical_cores: 16
+   os: Debian GNU/Linux 13 (trixie)
+   platform: linux
+   ram_bytes: 64950505472
+   mezura: v3.2.0 (2026-09-19) (fetched, mezura-v3.2.0-linux-x86_64.tar.gz)
+   scc: scc version 4.1.0 (fetched, scc_Linux_x86_64.tar.gz)
+   tokei: tokei 15.0.0 compiled with serialization support: json (built with rustc 1.97.1 (8bab26f4f 2026-07-14))
+
+== JSON captures (also the settling runs)
+
+== opening control run
+>> control-start
+   Benchmark 1: mezura
+     Time (mean ± σ):      61.2 ms ±   0.5 ms    [User: 585.7 ms, System: 268.4 ms]
+     Range (min … max):    60.1 ms …  62.0 ms    15 runs
+
+== Same work
+>> t1-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):      51.5 ms ±   0.6 ms    [User: 464.2 ms, System: 259.2 ms]
+     Range (min … max):    50.1 ms …  52.3 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     114.1 ms ±   6.6 ms    [User: 1364.0 ms, System: 324.1 ms]
+     Range (min … max):   110.3 ms … 133.5 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):     304.5 ms ±   3.6 ms    [User: 4060.6 ms, System: 435.4 ms]
+     Range (min … max):   298.6 ms … 311.7 ms    15 runs
+
+   Summary
+     mezura ran
+       2.22 ± 0.13 times faster than scc
+       5.92 ± 0.10 times faster than tokei
+WARNING: hyperfine on t1-fwd: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+>> t1-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):     303.5 ms ±   2.6 ms    [User: 4079.8 ms, System: 424.6 ms]
+     Range (min … max):   298.7 ms … 307.4 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     115.3 ms ±  12.4 ms    [User: 1371.6 ms, System: 316.6 ms]
+     Range (min … max):   110.8 ms … 160.1 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):      51.8 ms ±   1.0 ms    [User: 471.1 ms, System: 252.6 ms]
+     Range (min … max):    49.8 ms …  53.9 ms    15 runs
+
+   Summary
+     mezura ran
+       2.23 ± 0.24 times faster than scc
+       5.86 ± 0.13 times faster than tokei
+WARNING: hyperfine on t1-rev: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+== Out of the box
+>> t2-fwd
+   Benchmark 1: mezura
+     Time (mean ± σ):      61.6 ms ±   0.6 ms    [User: 590.9 ms, System: 261.4 ms]
+     Range (min … max):    60.4 ms …  62.5 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     184.6 ms ±   9.8 ms    [User: 2342.6 ms, System: 374.3 ms]
+     Range (min … max):   177.5 ms … 209.1 ms    15 runs
+
+   Benchmark 3: tokei
+     Time (mean ± σ):     371.5 ms ±   3.4 ms    [User: 5156.3 ms, System: 410.3 ms]
+     Range (min … max):   366.5 ms … 378.5 ms    15 runs
+
+   Summary
+     mezura ran
+       3.00 ± 0.16 times faster than scc
+       6.03 ± 0.08 times faster than tokei
+
+>> t2-rev
+   Benchmark 1: tokei
+     Time (mean ± σ):     371.1 ms ±   2.7 ms    [User: 5148.8 ms, System: 421.0 ms]
+     Range (min … max):   367.5 ms … 376.5 ms    15 runs
+
+   Benchmark 2: scc
+     Time (mean ± σ):     184.1 ms ±   9.7 ms    [User: 2383.5 ms, System: 351.0 ms]
+     Range (min … max):   179.8 ms … 216.7 ms    15 runs
+
+   Benchmark 3: mezura
+     Time (mean ± σ):      61.7 ms ±   0.8 ms    [User: 598.0 ms, System: 254.6 ms]
+     Range (min … max):    60.2 ms …  62.9 ms    15 runs
+
+   Summary
+     mezura ran
+       2.99 ± 0.16 times faster than scc
+       6.02 ± 0.09 times faster than tokei
+WARNING: hyperfine on t2-rev: Statistical outliers were detected. Consider re-running this benchmark on a quiet system without any interferences from other programs. It might help to use the '--warmup' or '--prepare' options.
+
+== closing control run
+>> control-end
+   Benchmark 1: mezura
+     Time (mean ± σ):      61.2 ms ±   0.7 ms    [User: 601.2 ms, System: 254.0 ms]
+     Range (min … max):    60.0 ms …  62.4 ms    15 runs
+
+== summary
+   drift         1.0003
+
+   Same work
+   instance  wall         vs fastest    user cpu  system cpu  parallelism  files   lines
+   mezura    52 ms ± 1    1.00x         0.47 s    0.26 s      14.02        61,425  13,226,930
+   scc       115 ms ± 10  2.22x ± 0.20  1.37 s    0.32 s      14.72        61,420  13,226,395
+   tokei     304 ms ± 3   5.89x ± 0.12  4.07 s    0.43 s      14.80        61,421  13,226,397
+
+   Out of the box
+   instance  wall         vs fastest    user cpu  system cpu  parallelism  files   lines
+   mezura    62 ms ± 1    1.00x         0.59 s    0.26 s      13.83        61,950  13,740,143
+   scc       184 ms ± 10  2.99x ± 0.16  2.36 s    0.36 s      14.79        66,301  15,818,623
+   tokei     371 ms ± 3   6.02x ± 0.09  5.15 s    0.42 s      15.00        65,042  15,688,680
+
+   equal work    within 1.0% of the corpus
+
+   since 20260912-134711 (same machine, same corpus commit)
+     mezura  t1   82 ms -> 52 ms   -36.7% ± 1.0%   version v3.1.1 (2026-09-11) -> v3.2.0 (2026-09-19)
+     scc     t1   114 ms -> 115 ms   +0.3% ± 2.3%   within the noise
+     tokei   t1   304 ms -> 304 ms   -0.2% ± 0.3%   within the noise
+     control mezura   timed under another build in 20260912-134711, so the machine's own shift is not known
+     differs background 0% busy -> 0.1% busy
+             linebench  0.1.0 -> 0.2.0
+             drift      2.0% -> 0.0%
+
+WARNING: Statistical outliers were detected, on t1-fwd
+WARNING: Statistical outliers were detected, on t1-rev
+WARNING: Statistical outliers were detected, on t2-rev
+
+done. everything is in /home/petros/Documents/dev/Rusty/linebench/results/jdk/linux/20260919-180418
