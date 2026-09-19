@@ -2,6 +2,112 @@
 
 Written by `linebench report` after every run, and rewritten whole each time. One section per machine, and under it the newest run over each corpus, biggest corpus first. Older runs are listed in the "Every run" table further down. A run holding a build or arguments of your own is kept apart, under its own headings. What every term means and how this was measured: the last two sections.
 
+## Windows, AMD Ryzen 7 9700X 8-Core Processor
+
+16 threads, 62 GB usable RAM, Microsoft Windows 11 Pro
+
+### linux corpus, 20260919-200315
+
+measured 2026-09-19 20:03 UTC by linebench 0.2.0  
+corpus at `0ff41df1c` on NTFS, Lexar SSD NQ790 2TB, SSD, NVMe  
+mezura v3.2.0 (2026-09-19), scc 4.1.0, tokei 15.0.0  
+3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
+
+#### Same work (every counter pinned to the same languages and settings)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 197 ms ± 12 | 1.00x | 1.27 s | 1.31 s | 13.06 | 182.5M | 14.0M | 63,767 | 36,017,775 |
+| scc | 526 ms ± 29 | 2.67x ± 0.22 | 3.54 s | 3.92 s | 14.18 | 68.5M | 4.8M | 63,767 | 36,017,775 |
+| tokei | 617 ms ± 19 | 3.13x ± 0.22 | 6.02 s | 2.70 s | 14.13 | 58.4M | 4.1M | 63,822 | 36,026,522 |
+
+#### Out of the box (each counter at its own defaults)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 235 ms ± 15 | 1.00x | 1.53 s | 1.53 s | 13.01 | 152.5M | 11.7M | 66,568 | 35,815,794 |
+| tokei | 736 ms ± 26 | 3.13x ± 0.23 | 6.97 s | 3.38 s | 14.08 | 54.4M | 3.9M | 83,891 | 39,991,863 |
+| scc | 749 ms ± 39 | 3.19x ± 0.26 | 5.66 s | 4.99 s | 14.21 | 53.4M | 3.8M | 83,832 | 39,992,940 |
+
+Trust checks for this run:
+- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 0.6%.
+- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 4.7%.
+- **Power**: set for the run and restored after: power scheme: Balanced -> high performance.
+- **Quiet machine**: everything other than the benchmark was using 0.1% of the cpu when the run started, about 0.0 of 16 cores.
+- **Antivirus**: real-time protection True, every counter equally excluded from real-time scanning.
+- **Equal work**: every file count sat within 1.0% of the 63,779 files the corpus declares, and the line counts within 1.0% of each other.
+
+### jdk corpus, 20260919-200059
+
+measured 2026-09-19 20:00 UTC by linebench 0.2.0  
+corpus at `b96680ca9` on NTFS, Lexar SSD NQ790 2TB, SSD, NVMe  
+mezura v3.2.0 (2026-09-19), scc 4.1.0, tokei 15.0.0  
+3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
+
+#### Same work (every counter pinned to the same languages and settings)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 140 ms ± 8 | 1.00x | 0.82 s | 1.21 s | 14.56 | 94.6M | 6.5M | 61,425 | 13,226,930 |
+| scc | 280 ms ± 16 | 2.00x ± 0.16 | 1.83 s | 1.93 s | 13.47 | 47.3M | 3.5M | 61,420 | 13,226,395 |
+| tokei | 448 ms ± 23 | 3.20x ± 0.24 | 4.00 s | 2.10 s | 13.63 | 29.5M | 2.2M | 61,421 | 13,226,397 |
+
+#### Out of the box (each counter at its own defaults)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 158 ms ± 10 | 1.00x | 1.01 s | 1.21 s | 14.09 | 87.0M | 6.2M | 61,950 | 13,740,143 |
+| scc | 394 ms ± 19 | 2.50x ± 0.20 | 2.94 s | 2.58 s | 14.02 | 40.1M | 2.9M | 66,301 | 15,818,623 |
+| tokei | 541 ms ± 20 | 3.42x ± 0.25 | 5.30 s | 2.32 s | 14.09 | 29.0M | 2.1M | 65,042 | 15,688,680 |
+
+Trust checks for this run:
+- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 0.6%.
+- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 2.6%.
+- **Power**: set for the run and restored after: power scheme: Balanced -> high performance.
+- **Quiet machine**: everything other than the benchmark was using 0.4% of the cpu when the run started, about 0.1 of 16 cores.
+- **Antivirus**: real-time protection True, every counter equally excluded from real-time scanning.
+- **Equal work**: every file count sat within 1.0% of the 61,420 files the corpus declares, and the line counts within 1.0% of each other.
+- **hyperfine warning**: control-start: Statistical outliers were detected.
+- **hyperfine warning**: t1-fwd: Statistical outliers were detected.
+- **hyperfine warning**: t1-fwd: Statistical outliers were detected.
+- **hyperfine warning**: t1-rev: Statistical outliers were detected.
+- **hyperfine warning**: t1-rev: Statistical outliers were detected.
+- **hyperfine warning**: t2-fwd: Statistical outliers were detected.
+- **hyperfine warning**: t2-rev: Statistical outliers were detected.
+- **hyperfine warning**: control-end: Statistical outliers were detected.
+
+### cpython corpus, 20260919-195951
+
+measured 2026-09-19 19:59 UTC by linebench 0.2.0  
+corpus at `34439b8a2` on NTFS, Lexar SSD NQ790 2TB, SSD, NVMe  
+mezura v3.2.0 (2026-09-19), scc 4.1.0, tokei 15.0.0  
+3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
+
+#### Same work (every counter pinned to the same languages and settings)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 23 ms ± 0 | 1.00x | 0.11 s | 0.10 s | 9.00 | 95.2M | 10.6M | 3,559 | 2,230,164 |
+| scc | 41 ms ± 1 | 1.73x ± 0.04 | 0.20 s | 0.17 s | 9.06 | 54.8M | 6.1M | 3,556 | 2,229,545 |
+| tokei | 67 ms ± 3 | 2.86x ± 0.14 | 0.49 s | 0.32 s | 12.07 | 33.3M | 2.8M | 3,583 | 2,230,905 |
+
+#### Out of the box (each counter at its own defaults)
+
+| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
+|---|---|---|---|---|---|---|---|---|---|
+| mezura | 27 ms ± 1 | 1.00x | 0.12 s | 0.09 s | 7.86 | 80.1M | 10.2M | 3,577 | 2,127,111 |
+| scc | 58 ms ± 1 | 2.18x ± 0.05 | 0.35 s | 0.29 s | 10.96 | 52.6M | 4.8M | 5,780 | 3,047,697 |
+| tokei | 81 ms ± 2 | 3.06x ± 0.09 | 0.63 s | 0.39 s | 12.48 | 36.9M | 3.0M | 5,659 | 2,998,726 |
+
+Trust checks for this run:
+- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 2.2%.
+- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 1.4%.
+- **Power**: set for the run and restored after: power scheme: Balanced -> high performance.
+- **Quiet machine**: everything other than the benchmark was using 4.6% of the cpu when the run started, about 0.7 of 16 cores.
+- **Antivirus**: real-time protection True, every counter equally excluded from real-time scanning.
+- **Equal work**: every file count sat within 1.0% of the 3,556 files the corpus declares, and the line counts within 1.0% of each other.
+- **hyperfine warning**: control-end: Statistical outliers were detected.
+
 ## Native Linux, AMD Ryzen 7 9700X 8-Core Processor
 
 16 threads, 60 GB usable RAM, Debian GNU/Linux 13 (trixie)
@@ -138,65 +244,15 @@ Same-work times, the sections above show only the newest run per machine and cor
 
 | run | platform | corpus | mezura | scc | tokei | machine steadiness |
 |---|---|---|---|---|---|---|
+| [20260919-200315](linux/windows/20260919-200315/) | Windows | linux | 197 ms (v3.2.0 (2026-09-19)) | 526 ms | 617 ms | 0.6% |
+| [20260919-200059](jdk/windows/20260919-200059/) | Windows | jdk | 140 ms (v3.2.0 (2026-09-19)) | 280 ms | 448 ms | 0.6% |
+| [20260919-195951](cpython/windows/20260919-195951/) | Windows | cpython | 23 ms (v3.2.0 (2026-09-19)) | 41 ms | 67 ms | 2.2% |
 | [20260919-180551](linux/linux/20260919-180551/) | Native Linux | linux | 86 ms (v3.2.0 (2026-09-19)) | 208 ms | 414 ms | 2.4% |
 | [20260919-180418](jdk/linux/20260919-180418/) | Native Linux | jdk | 52 ms (v3.2.0 (2026-09-19)) | 115 ms | 304 ms | 0.0% |
 | [20260919-180321](cpython/linux/20260919-180321/) | Native Linux | cpython | 10 ms (v3.2.0 (2026-09-19)) | 20 ms | 45 ms | 0.2% |
 | [20260912-134847](linux/linux/20260912-134847/) | Native Linux | linux | 166 ms (v3.1.1 (2026-09-11)) | 210 ms | 414 ms | 0.9% |
 | [20260912-134711](jdk/linux/20260912-134711/) | Native Linux | jdk | 82 ms (v3.1.1 (2026-09-11)) | 114 ms | 304 ms | 2.0% |
 | [20260912-134614](cpython/linux/20260912-134614/) | Native Linux | cpython | 17 ms (v3.1.1 (2026-09-11)) | 20 ms | 45 ms | 15.4% |
-
-## Local builds, Native Linux, AMD Ryzen 7 9700X 8-Core Processor
-
-16 threads, 60 GB usable RAM, Debian GNU/Linux 13 (trixie)
-
-Runs holding an instance given by hand, a build of your own or a release carrying arguments of its own. They compare one build with another on this machine and say nothing about the released counters.
-
-### linux corpus, 20260919-005226
-
-measured 2026-09-19 00:52 UTC by linebench 0.1.0  
-corpus at `0ff41df1c` on ext4 /dev/nvme0n1p3, Lexar SSD NQ790 2TB, 16.0 GT/s PCIe x4  
-mezura@dev-v3.2.0 v3.2.0 (unreleased) (local build dev-v3.2.0), scc 4.1.0  
-3 warmups, 30 timed runs per command (15 in the first pass + 15 in the reverse pass), 3 s of pause before each command
-
-#### Same work (every counter pinned to the same languages and settings)
-
-| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
-|---|---|---|---|---|---|---|---|---|---|
-| mezura@dev-v3.2.0 | 96 ms ± 4 | 1.00x | 1.05 s | 0.25 s | 13.56 | 375.3M | 27.7M | 63,738 | 36,018,801 |
-| scc | 208 ms ± 3 | 2.17x ± 0.09 | 2.77 s | 0.35 s | 15.00 | 172.8M | 11.5M | 63,738 | 36,018,801 |
-
-#### Out of the box (each counter at its own defaults)
-
-| counter | wall | vs fastest | user cpu | system cpu | parallelism | lines/s | lines per cpu second | files | lines |
-|---|---|---|---|---|---|---|---|---|---|
-| mezura@dev-v3.2.0 | 118 ms ± 4 | 1.00x | 1.36 s | 0.27 s | 13.87 | 303.9M | 21.9M | 66,539 | 35,816,820 |
-| scc | 321 ms ± 2 | 2.72x ± 0.09 | 4.46 s | 0.44 s | 15.27 | 124.8M | 8.2M | 83,784 | 39,993,947 |
-
-Trust checks for this run:
-- **Machine steadiness**: the same binary, timed at the start of the run and again at the end, differed by 0.1%.
-- **Command order**: every table ran in both command orders and the numbers above pool the two. Swapping the order moved no counter by more than 1.8%.
-- **Power**: set for the run and restored after: cpu governor on 16 cpus: powersave -> performance.
-- **Quiet machine**: everything other than the benchmark was using 0.1% of the cpu when the run started, about 0.0 of 16 cores.
-- **Equal work**: every file count sat within 1.0% of the 63,779 files the corpus declares, and the line counts within 1.0% of each other.
-
-```
-since 20260912-134847 (same machine, same corpus commit, same builds)
-  mezura@dev-v3.2.0 t1   96 ms   never measured before on this machine
-  scc               t1   210 ms -> 208 ms   -0.8% ± 0.5%
-  no earlier run shares this run's control, so the machine's own shift is not known
-  differs           background 0% busy -> 0.1% busy
-                    drift      0.9% -> 0.1%
-  measured in the runs above and not in this run   mezura, tokei
-```
-
-## Every local run
-
-Same-work times, the sections above show only the newest run per machine and corpus. A column whose runs measured different versions of the counter says which beside each time. Commits, machine state and everything else: inside each run's directory.
-
-| run | platform | corpus | mezura | mezura@dev-v3.2.0 | mezura@v3.1.0 | scc | machine steadiness |
-|---|---|---|---|---|---|---|---|
-| [20260919-005226](local/linux/linux/20260919-005226/) | Native Linux | linux |  | 96 ms |  | 208 ms | 0.1% |
-| [20260906-220447](local/linux/linux/20260906-220447/) | Native Linux | linux | 224 ms |  | 167 ms |  | 0.2% |
 
 ## Methodology
 
