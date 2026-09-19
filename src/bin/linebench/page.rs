@@ -371,7 +371,9 @@ fn format_comparison(
                 ""
             };
             if then.len() + now.len() > LONG_CONTEXT_VALUE {
-                lines.push(format!("  {lead:<name_width$} {label:<label_width$} was  {then}"));
+                lines.push(format!(
+                    "  {lead:<name_width$} {label:<label_width$} was  {then}"
+                ));
                 lines.push(format!(
                     "  {:<name_width$} {:<label_width$} now  {now}",
                     "", ""
@@ -1392,11 +1394,7 @@ mod tests {
         );
         assert!(!since[2].contains("within the noise"), "{}", since[2]);
         assert!(since[2].ends_with("(from 20260901-100000)"), "{}", since[2]);
-        assert!(
-            since[3].starts_with("  control mezura"),
-            "{}",
-            since[3]
-        );
+        assert!(since[3].starts_with("  control mezura"), "{}", since[3]);
         assert!(
             since[3].contains("+3.2% ± 0.8%   the machine itself"),
             "{}",
@@ -1531,10 +1529,7 @@ mod tests {
             "{}",
             against[2]
         );
-        assert_eq!(
-            against[3],
-            "  tokei   t1   600 ms   not in 20260901-100000"
-        );
+        assert_eq!(against[3], "  tokei   t1   600 ms   not in 20260901-100000");
         assert!(
             against[4].starts_with("  control mezura") && against[4].contains("+10.0% ±"),
             "{}",
@@ -1874,9 +1869,7 @@ mod tests {
         let leads = [long, "scc", "control", "differs"];
         let rows: Vec<&String> = since
             .iter()
-            .filter(|line| {
-                leads.contains(&line.split_whitespace().next().unwrap_or_default())
-            })
+            .filter(|line| leads.contains(&line.split_whitespace().next().unwrap_or_default()))
             .collect();
         assert_eq!(4, rows.len(), "{since:?}");
         for row in &rows {
@@ -1951,8 +1944,7 @@ mod tests {
         assert!(
             !since
                 .iter()
-                .any(|line| line.starts_with("  differs ")
-                    && !line.starts_with("  differs from ")),
+                .any(|line| line.starts_with("  differs ") && !line.starts_with("  differs from ")),
             "{since:?}"
         );
     }

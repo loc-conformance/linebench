@@ -643,10 +643,7 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
             "corpus:".to_string(),
             format!("{} @ {head}, {pin}", record.corpus.name),
         ),
-        (
-            String::new(),
-            record.corpus.checkout.display().to_string(),
-        ),
+        (String::new(), record.corpus.checkout.display().to_string()),
         (
             String::new(),
             format!(
@@ -689,10 +686,7 @@ pub fn write_notes(res: &Path, record: &Record) -> Result<(), String> {
         rows.push(("parity:".to_string(), parity.describe()));
     }
     if !record.capture_failures.is_empty() {
-        rows.push((
-            "counters:".to_string(),
-            record.capture_failures.join("; "),
-        ));
+        rows.push(("counters:".to_string(), record.capture_failures.join("; ")));
     }
     let mut lines = vec![
         format!("# Benchmark session notes {}", record.stamp),
