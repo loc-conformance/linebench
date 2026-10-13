@@ -8,7 +8,7 @@ use linebench::files::read_text;
 use linebench::insight::INSIGHTS_DIR;
 use linebench::machine::UNKNOWN;
 use linebench::measure::Table;
-use linebench::measure::{CONTROL_END, CONTROL_START, TABLES};
+use linebench::measure::{CONTROL_END, CONTROL_START, TABLES, describe_env};
 use linebench::record::{
     InstanceRecord, Pooled, Record, calculate_drift, collect_table_rows,
     describe_empty_bare_counts, format_busy, format_relative, format_thousands, format_utc_minute,
@@ -946,11 +946,7 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         } else {
             instance.same_work_note.clone()
         };
-        let with = if instance.args.is_empty() {
-            String::new()
-        } else {
-            format!(", run with `{}`", instance.args.join(" "))
-        };
+        let with = describe_what_it_ran_with(&instance.args, &instance.env);
         lines.push(format!("  - {}: {note}{with}", instance.identity.instance));
     }
     lines.extend([
@@ -989,8 +985,8 @@ fn format_compared_row(
     } = comparison;
     let before = find_instance_record(anchor, &now.instance);
     let after = find_instance_record(current, &now.instance);
-    let same_flags = before.map(|i| (&i.languages, &i.same_work, &i.args))
-        == after.map(|i| (&i.languages, &i.same_work, &i.args));
+    let same_flags = before.map(|i| (&i.languages, &i.same_work, &i.args, &i.env))
+        == after.map(|i| (&i.languages, &i.same_work, &i.args, &i.env));
     let mut line = if same_flags {
         let mut now_wall = format_wall(now.mean_s, 0.0);
         if now.single_order {
@@ -1194,6 +1190,21 @@ fn find_control_mean(record: &Record) -> Option<(String, String, Pooled)> {
     };
     let (start, end) = (measurement_of(CONTROL_START)?, measurement_of(CONTROL_END)?);
     Some((name, sha, pool_orders(start, Some(end))))
+}
+
+fn describe_what_it_ran_with(args: &[String], env: &BTreeMap<String, String>) -> String {
+    let mut parts = Vec::new();
+    if !args.is_empty() {
+        parts.push(format!("run with `{}`", args.join(" ")));
+    }
+    if !env.is_empty() {
+        parts.push(format!("under `{}`", describe_env(env)));
+    }
+    parts
+        .iter()
+        .map(|part| format!(", {part}"))
+        .collect::<Vec<String>>()
+        .join("")
 }
 
 fn find_instance_record<'a>(record: &'a Record, instance: &str) -> Option<&'a InstanceRecord> {
@@ -2241,6 +2252,7 @@ mod tests {
                 same_work_note: String::new(),
                 scrub_env: Vec::new(),
                 args: Vec::new(),
+                env: Default::default(),
             })
             .collect();
         let mut measurements = Vec::new();

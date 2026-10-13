@@ -23,6 +23,9 @@ const PERFORMANCE: &str = "performance";
 const CPU_DIR: &str = "/sys/devices/system/cpu";
 const GOVERNOR_FILE: &str = "cpufreq/scaling_governor";
 const AVAILABLE_GOVERNORS_FILE: &str = "scaling_available_governors";
+/// AMD and the acpi driver keep the boost switch here, Intel's pstate driver keeps its opposite.
+const BOOST_FILE: &str = "cpufreq/boost";
+const NO_TURBO_FILE: &str = "intel_pstate/no_turbo";
 const PROC_VERSION: &str = "/proc/version";
 const PROC_MEMINFO: &str = "/proc/meminfo";
 const OS_RELEASE: &str = "/etc/os-release";
@@ -271,7 +274,22 @@ pub fn find_power_scheme_name(powercfg_output: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-fn plan_cpu_governor() -> Option<PrepStep> {
+/// The cpu governor and whether boost is on, read off the first cpu, for a command that measures
+/// on the machine as it is. None on a system that shows no governor.
+pub fn describe_cpu_frequency() -> Option<String> {
+    let governor = read_trimmed_file(find_governor_files()?.first()?)?;
+    let cpus = Path::new(CPU_DIR);
+    let boost = read_trimmed_file(&cpus.join(BOOST_FILE))
+        .map(|flag| flag == "1")
+        .or_else(|| read_trimmed_file(&cpus.join(NO_TURBO_FILE)).map(|flag| flag == "0"));
+    Some(match boost {
+        Some(true) => format!("cpu governor {governor}, boost on"),
+        Some(false) => format!("cpu governor {governor}, boost off"),
+        None => format!("cpu governor {governor}"),
+    })
+}
+
+fn find_governor_files() -> Option<Vec<PathBuf>> {
     let mut paths: Vec<PathBuf> = fs::read_dir(CPU_DIR)
         .ok()?
         .flatten()
@@ -281,6 +299,11 @@ fn plan_cpu_governor() -> Option<PrepStep> {
         .filter(|path| path.is_file())
         .collect();
     paths.sort();
+    Some(paths)
+}
+
+fn plan_cpu_governor() -> Option<PrepStep> {
+    let paths = find_governor_files()?;
     let first = paths.first()?;
     let available = read_trimmed_file(&first.with_file_name(AVAILABLE_GOVERNORS_FILE))?;
     if !available

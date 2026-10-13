@@ -105,6 +105,8 @@ pub struct InstanceRecord {
     pub scrub_env: Vec<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 impl InstanceRecord {
@@ -116,6 +118,7 @@ impl InstanceRecord {
             same_work_note: instance.definition.run.same_work_note.clone(),
             scrub_env: instance.definition.run.scrub_env.clone(),
             args: instance.args.clone(),
+            env: instance.env.clone(),
         })
     }
 }

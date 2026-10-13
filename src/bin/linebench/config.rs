@@ -27,8 +27,8 @@ const THE_DATA_DIR: &str = "the data directory";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
 pub const DRY_RUN_DIR: &str = "linebench-dry-run";
-pub const COMMANDS: [&str; 8] = [
-    "run", "fetch", "check", "noise", "insights", "report", "status", "verify",
+pub const COMMANDS: [&str; 9] = [
+    "run", "fetch", "check", "noise", "insights", "ab", "report", "status", "verify",
 ];
 
 #[derive(Debug, Default, Deserialize)]
@@ -54,6 +54,8 @@ pub struct GivenEntry {
     pub definition: Option<PathBuf>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,7 @@ pub enum Command {
     Check,
     Noise,
     Insights,
+    Ab,
     Report,
     Status,
     Verify,
@@ -79,6 +82,7 @@ impl Command {
             Command::Check => "check",
             Command::Noise => "noise",
             Command::Insights => "insights",
+            Command::Ab => "ab",
             Command::Report => "report",
             Command::Status => "status",
             Command::Verify => "verify",
@@ -105,6 +109,8 @@ pub struct Options {
     pub given: BTreeMap<String, PathBuf>,
     pub definition_of: BTreeMap<String, PathBuf>,
     pub args_of: BTreeMap<String, Vec<String>>,
+    pub env_of: BTreeMap<String, BTreeMap<String, String>>,
+    pub same_work: bool,
     pub expect_identical: Vec<(String, String)>,
     pub against: Option<String>,
     pub control: Option<String>,
@@ -173,7 +179,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
         };
         match flag {
-            "run" | "fetch" | "check" | "noise" | "insights" | "report" | "status" | "verify"
+            "run" | "fetch" | "check" | "noise" | "insights" | "ab" | "report" | "status"
+            | "verify"
                 if options.command.is_none() =>
             {
                 options.command = Some(match flag {
@@ -182,6 +189,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     "check" => Command::Check,
                     "noise" => Command::Noise,
                     "insights" => Command::Insights,
+                    "ab" => Command::Ab,
                     "report" => Command::Report,
                     "status" => Command::Status,
                     _ => Command::Verify,
@@ -252,6 +260,27 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 let args = text.split_whitespace().map(String::from).collect();
                 options.args_of.insert(instance, args);
             }
+            "--env" => {
+                let text = value()?;
+                let mut parts = text.splitn(3, '=');
+                match (parts.next(), parts.next(), parts.next()) {
+                    (Some(instance), Some(name), Some(given))
+                        if !instance.is_empty() && !name.is_empty() =>
+                    {
+                        options
+                            .env_of
+                            .entry(instance.to_string())
+                            .or_default()
+                            .insert(name.to_string(), given.to_string());
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{flag} takes <instance>=<NAME>=<value>, and {text} is not that"
+                        ));
+                    }
+                }
+            }
+            "--same-work" => options.same_work = true,
             "--expect-identical" => {
                 let first = value()?;
                 for pair in read_list(flag, first, &mut rest)? {
@@ -878,12 +907,20 @@ fn build_given(options: &Options, config: &Config) -> Result<BTreeMap<String, Gi
         binary: None,
         definition: None,
         args: Vec::new(),
+        env: BTreeMap::new(),
     };
     for (instance, binary) in &options.given {
         given.entry(instance.clone()).or_insert_with(empty).binary = Some(binary.clone());
     }
     for (instance, args) in &options.args_of {
         given.entry(instance.clone()).or_insert_with(empty).args = args.clone();
+    }
+    for (instance, env) in &options.env_of {
+        given
+            .entry(instance.clone())
+            .or_insert_with(empty)
+            .env
+            .extend(env.clone());
     }
     for (instance, definition) in &options.definition_of {
         match given.get_mut(instance) {
@@ -897,15 +934,17 @@ fn build_given(options: &Options, config: &Config) -> Result<BTreeMap<String, Gi
         }
     }
     for (instance, entry) in &given {
-        if entry.binary.is_none() && entry.args.is_empty() {
+        if entry.binary.is_none() && entry.args.is_empty() && entry.env.is_empty() {
             return Err(format!(
-                "[given.\"{instance}\"] names neither a binary nor args, so there is nothing of \
-                 its own to measure"
+                "[given.\"{instance}\"] names neither a binary, args nor env, so there is nothing \
+                 of its own to measure"
             ));
         }
-        if !entry.args.is_empty() && !instance.contains(INSTANCE_SEPARATOR) {
+        if (!entry.args.is_empty() || !entry.env.is_empty())
+            && !instance.contains(INSTANCE_SEPARATOR)
+        {
             return Err(format!(
-                "args make an instance of their own: name it {instance}@<tag>"
+                "args and env make an instance of their own: name it {instance}@<tag>"
             ));
         }
     }
@@ -1363,7 +1402,10 @@ mod tests {
         .unwrap();
         let refusal =
             resolve_one(&parse("run linux").unwrap(), &hollow, conf, &corpora, data).unwrap_err();
-        assert!(refusal.contains("neither a binary nor args"), "{refusal}");
+        assert!(
+            refusal.contains("neither a binary, args nor env"),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -1705,10 +1747,23 @@ mod tests {
             "check linux --allow-unequal-exclusions",
             "run linux -y",
             "insights linux -y",
+            "ab linux --runs 9 --same-work",
+            "ab linux,cpython --counters mezura,mezura@dev --env mezura@dev=ONE=1",
+            "check linux --env mezura@dev=ONE=1",
+            "insights linux --env mezura@dev=ONE=1",
         ] {
             assert!(parse(line).is_ok(), "{line}: {:?}", parse(line));
         }
         assert!(parse("check linux -y").is_err());
+        for line in [
+            "run linux --same-work",
+            "run linux --env mezura@dev=ONE=1",
+            "ab linux --out /tmp/x",
+            "ab linux --control mezura",
+        ] {
+            let refused = parse(line).unwrap_err();
+            assert!(refused.contains("is not a flag of this command"), "{line}");
+        }
         for line in [
             "--version --out /tmp/x",
             "run linux --runs 5 --version",
@@ -1724,6 +1779,43 @@ mod tests {
             parse("run linux --runs 0").unwrap_err(),
             "--runs takes a number above zero"
         );
+    }
+
+    #[test]
+    fn an_instance_s_env_comes_from_the_flag_and_the_conf_and_the_flag_wins_by_name() {
+        let options = parse(
+            "ab linux --env mezura@a=MEZURA_DATA_DIR=/x/a --env mezura@a=ONE=1 \
+             --env mezura@b=MEZURA_DATA_DIR=/x/b=c",
+        )
+        .unwrap();
+        assert_eq!(options.env_of["mezura@a"]["MEZURA_DATA_DIR"], "/x/a");
+        assert_eq!(options.env_of["mezura@a"]["ONE"], "1");
+        assert_eq!(options.env_of["mezura@b"]["MEZURA_DATA_DIR"], "/x/b=c");
+        for line in ["ab linux --env mezura@a=ONE", "ab linux --env =ONE=1"] {
+            let refused = parse(line).unwrap_err();
+            assert!(refused.contains("<instance>=<NAME>=<value>"), "{refused}");
+        }
+        let config: Config = toml::from_str(
+            "counters = \"D:/c\"\n[corpora]\nlinux = \"D:/linux\"\n\
+             [given.\"mezura@a\"]\nbinary = \"D:/a.exe\"\n\
+             env = { MEZURA_DATA_DIR = \"D:/data/a\", TWO = \"2\" }\n",
+        )
+        .unwrap();
+        let corpora = vec![named_corpus("linux")];
+        let conf = Path::new("linebench.conf");
+        let data = Some(Path::new("D:/data/linebench"));
+        let locations = resolve_one(&options, &config, conf, &corpora, data).unwrap();
+        let a = &locations.given["mezura@a"];
+        assert_eq!(a.binary, Some(PathBuf::from("D:/a.exe")));
+        assert_eq!(a.env["MEZURA_DATA_DIR"], "/x/a");
+        assert_eq!(a.env["ONE"], "1");
+        assert_eq!(a.env["TWO"], "2");
+        let b = &locations.given["mezura@b"];
+        assert_eq!(b.binary, None);
+        assert_eq!(b.env.len(), 1);
+        let untagged = parse("ab linux --env mezura=ONE=1").unwrap();
+        let refused = resolve_one(&untagged, &config, conf, &corpora, data).unwrap_err();
+        assert!(refused.contains("mezura@<tag>"), "{refused}");
     }
 
     fn parse(line: &str) -> Result<Options, String> {

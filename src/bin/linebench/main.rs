@@ -118,7 +118,7 @@ fn dispatch() -> Result<i32, String> {
             )?;
             commands::run_fetch(&mut out, &options, &plan, &ground.counters, ground.platform)
         }
-        Command::Check | Command::Noise | Command::Insights | Command::Run => {
+        Command::Check | Command::Noise | Command::Insights | Command::Ab | Command::Run => {
             let resolved = resolve_everything(&mut out, &options)?;
             let (options, locations) = (&options, &resolved.locations);
             let definitions = &resolved.definitions;
@@ -132,6 +132,9 @@ fn dispatch() -> Result<i32, String> {
                 }
                 Command::Insights => {
                     commands::run_insights(&mut out, options, locations, definitions, platform)
+                }
+                Command::Ab => {
+                    commands::run_ab(&mut out, options, locations, definitions, platform)
                 }
                 _ => commands::run_benchmark(&mut out, options, locations, definitions, platform),
             }?;

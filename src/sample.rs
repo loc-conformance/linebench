@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -37,6 +38,7 @@ pub fn sample_memory(
     table: Table,
     binary: &Path,
     args: &[String],
+    env: &BTreeMap<String, String>,
     scrub: &[String],
 ) -> Result<Curve, String> {
     let mut command = Command::new(binary);
@@ -48,6 +50,7 @@ pub fn sample_memory(
     for name in scrub {
         command.env_remove(name);
     }
+    command.envs(env);
     let refuse = |what: &str, error: &dyn std::fmt::Display| {
         format!("{instance} could not be {what}: {error}")
     };

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -33,17 +34,21 @@ use linebench::latest::{
     judge_latest, remember_latest,
 };
 use linebench::machine::{
-    Platform, collect_machine, detect_arch, plan_prep, sample_background_busy,
+    Platform, collect_machine, describe_cpu_frequency, detect_arch, plan_prep,
+    sample_background_busy,
 };
 use linebench::measure::{
     Instance, Runner, Settings, Style, Table, build_args, build_command, capture_json_outputs,
-    capture_plain_output, get_capture_name, join_command, run_phases, strip_ansi,
+    capture_plain_output, describe_env, explain_one_environment, get_capture_name, join_command,
+    run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
 use linebench::os::{capture_with_status, is_privileged};
-use linebench::pmu::{OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER};
-use linebench::pmu::{Pmu, Profiling};
-use linebench::pmu::{count_one_pass, find_profiler, read_paranoid, remove_raw_files};
+use linebench::pmu::{AB_RUNS, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER, USER_PARANOID};
+use linebench::pmu::{Pmu, Profiling, Subject, UserCounts};
+use linebench::pmu::{
+    count_one_pass, count_user_events, find_profiler, read_paranoid, remove_raw_files, run_once,
+};
 use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
@@ -57,8 +62,8 @@ use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 use linebench::verify::{Session, Verification, check_insights, check_run, find_run};
 
 use crate::config::{
-    Chosen, Config, FetchPlan, Locations, Options, choose_corpus_home, choose_counters_dir,
-    find_settled_results_dir, show_path,
+    Chosen, Config, FetchPlan, GivenEntry, Locations, Options, choose_corpus_home,
+    choose_counters_dir, find_settled_results_dir, show_path,
 };
 use crate::instances::{ChosenInstances, build_instances};
 use crate::output::{
@@ -125,6 +130,8 @@ const A_MEGABYTE: u64 = 1024 * 1024;
 const STAGED_DELETING: &str = "Delete them manually when you wish";
 const IDENTICAL: &str = "identical";
 const DIFFER: &str = "differ";
+const AB_ORDER: [usize; 4] = [0, 1, 1, 0];
+const A_HUNDRED_MILLION: u64 = 100_000_000;
 
 pub fn run_fetch(
     out: &mut dyn Write,
@@ -366,6 +373,182 @@ pub fn run_noise(
     )? {
         Some(worst) if worst < UNSTEADY_STEP => Ok(0),
         _ => Ok(1),
+    }
+}
+
+pub fn run_ab(
+    out: &mut dyn Write,
+    options: &Options,
+    locations: &[Locations],
+    definitions: &[Definition],
+    platform: Platform,
+) -> Result<i32, String> {
+    if !platform.is_linux() {
+        return Err(PROFILER_ELSEWHERE.to_string());
+    }
+    let runs = options.runs.unwrap_or(AB_RUNS);
+    let scratch = Scratch::create("ab")?;
+    let profiling = find_profiler(
+        &scratch.get_path().join(PMU_PROBE_FILE),
+        is_privileged(platform),
+        read_paranoid(),
+        USER_PARANOID,
+    );
+    let Profiling::Ready(version) = &profiling else {
+        return Err(
+            describe_what_the_counters_want(&profiling, platform, true, USER_PARANOID)
+                .unwrap_or_default(),
+        );
+    };
+    let table = match options.same_work {
+        true => Table::SameWork,
+        false => Table::OutOfTheBox,
+    };
+    let width = widest(locations.iter().map(|one| one.corpus.name.as_str()));
+    let mut described = false;
+    for one in locations {
+        check_commit(&one.corpus, &one.checkout)?;
+        let chosen = build_instances(definitions, one, options, platform)?;
+        for warning in &chosen.warnings {
+            print_warning(out, warning)?;
+        }
+        let pair = choose_pair(chosen.instances, options.counters.is_some(), &one.given)?;
+        if !described {
+            for (letter, instance) in [("a", &pair[0]), ("b", &pair[1])] {
+                print_line(
+                    out,
+                    &format!("   {letter}  {}", describe_instance(instance)),
+                )?;
+            }
+            let frequency =
+                describe_cpu_frequency().map_or(String::new(), |said| format!(", {said}"));
+            print_line(
+                out,
+                &format!("   {version}, {runs} runs x 4 (a b b a){frequency}"),
+            )?;
+            print_line(out, "")?;
+            described = true;
+        }
+        let scrub = collect_scrub(&pair);
+        let args: Vec<Vec<String>> = pair
+            .iter()
+            .map(|instance| {
+                build_args(
+                    instance,
+                    &one.checkout,
+                    &one.corpus.extensions,
+                    table,
+                    false,
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        let subjects: Vec<Subject> = pair
+            .iter()
+            .zip(&args)
+            .map(|(instance, args)| Subject {
+                instance: instance.get_name(),
+                binary: &instance.identity.binary,
+                args,
+                env: &instance.env,
+                scrub: &scrub,
+            })
+            .collect();
+        for subject in &subjects {
+            run_once(subject)?;
+        }
+        let mut blocks = Vec::new();
+        for (block, which) in AB_ORDER.into_iter().enumerate() {
+            let path = scratch
+                .get_path()
+                .join(format!("ab-{}-{block}.tsv", pair[which].get_name()));
+            blocks.push(count_user_events(&subjects[which], runs, &path)?);
+        }
+        let a = [blocks[0], blocks[3]];
+        let b = [blocks[1], blocks[2]];
+        for line in lay_out_ab(&one.corpus.name, width, &a, &b, runs) {
+            print_line(out, &line)?;
+        }
+    }
+    Ok(0)
+}
+
+/// The two instances ab compares, in the order they were named: the first is a, the second b.
+/// Without --counters, the two given instances are the pair, in the order of their names.
+fn choose_pair(
+    instances: Vec<Instance>,
+    named: bool,
+    given: &BTreeMap<String, GivenEntry>,
+) -> Result<[Instance; 2], String> {
+    let candidates: Vec<Instance> = match named {
+        true => instances,
+        false => instances
+            .into_iter()
+            .filter(|instance| given.contains_key(instance.get_name()))
+            .collect(),
+    };
+    let names: Vec<&str> = candidates.iter().map(Instance::get_name).collect();
+    let said = match names.len() {
+        0 => "ab compares two instances: name them with --counters a,b, or give two with --given"
+            .to_string(),
+        count => format!(
+            "ab compares two instances, and {count} came up ({}): name two with --counters a,b",
+            names.join(", ")
+        ),
+    };
+    <[Instance; 2]>::try_from(candidates).map_err(|_| said)
+}
+
+fn describe_instance(instance: &Instance) -> String {
+    let mut said = format!(
+        "{}  {} ({})",
+        instance.get_name(),
+        instance.identity.version,
+        instance.identity.describe_origin()
+    );
+    if !instance.args.is_empty() {
+        said.push_str(&format!("  with {}", instance.args.join(" ")));
+    }
+    if !instance.env.is_empty() {
+        said.push_str(&format!("  under {}", describe_env(&instance.env)));
+    }
+    said
+}
+
+/// b over a: the instructions of both orders together, the cycles of each order on its own, then
+/// the means each side was read at.
+fn lay_out_ab(
+    tree: &str,
+    width: usize,
+    a: &[UserCounts; 2],
+    b: &[UserCounts; 2],
+    runs: u32,
+) -> [String; 2] {
+    let instructions = |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
+    let cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
+    let ratio = |over: u64, under: u64| over as f64 / under as f64;
+    [
+        format!(
+            "{ROW_OPENING}{tree:<width$}   instructions {:.4}   cycles {:.3} | {:.3}",
+            ratio(instructions(b), instructions(a)),
+            ratio(b[0].cycles, a[0].cycles),
+            ratio(b[1].cycles, a[1].cycles)
+        ),
+        format!(
+            "{ROW_OPENING}{:<width$}   a {} instr {} cyc   b {} instr {} cyc   {runs} runs x 4",
+            "",
+            format_millions(instructions(a) / 2),
+            format_millions(cycles(a) / 2),
+            format_millions(instructions(b) / 2),
+            format_millions(cycles(b) / 2)
+        ),
+    ]
+}
+
+fn format_millions(count: u64) -> String {
+    let millions = count as f64 / 1e6;
+    match count < A_HUNDRED_MILLION {
+        true => format!("{millions:.1}M"),
+        false => format!("{}M", millions.round()),
     }
 }
 
@@ -764,6 +947,11 @@ pub fn run_insights(
         None => ask_for_everything(),
     };
     let asked_for = |part: &str| asked.iter().any(|held| held == part);
+    if asked_for(FLOOR_PART)
+        && let Some(with) = instances.iter().find(|i| !i.env.is_empty())
+    {
+        return Err(explain_one_environment(with.get_name(), "the floor"));
+    }
     let tracing = match platform.is_linux() && asked_for(SYSCALLS_PART) {
         true => find_tracer(&scratch.get_path().join(PROBE_FILE)),
         false => Tracing::NotThere,
@@ -780,10 +968,12 @@ pub fn run_insights(
             &scratch.get_path().join(PMU_PROBE_FILE),
             privileged,
             paranoid,
+            OPEN_PARANOID,
         ),
         false => Profiling::NotThere,
     };
-    let unread = describe_what_the_counters_want(&profiling, platform, asked_for(PMU_PART));
+    let unread =
+        describe_what_the_counters_want(&profiling, platform, asked_for(PMU_PART), OPEN_PARANOID);
     let stopping: Vec<&str> = [unmeasured, unread.as_deref()]
         .into_iter()
         .flatten()
@@ -822,7 +1012,7 @@ pub fn run_insights(
     if asked_for(FLOOR_PART) {
         let target = create_floor_target(scratch.get_path())?;
         print_header(out, "== floor")?;
-        runner.run_hyperfine(out, VERSION_SET, &distinct)?;
+        runner.run_hyperfine(out, VERSION_SET, &distinct, &BTreeMap::new())?;
         for table in TABLES {
             let commands: Vec<(String, String)> = instances
                 .iter()
@@ -831,7 +1021,7 @@ pub fn run_insights(
                 })
                 .collect::<Result<_, _>>()?;
             print_line(out, "")?;
-            runner.run_hyperfine(out, &get_floor_set_name(table), &commands)?;
+            runner.run_hyperfine(out, &get_floor_set_name(table), &commands, &BTreeMap::new())?;
         }
         let (found, skipped) = collect_measurements(&res, &runner.commands, &[])?;
         measurements = found;
@@ -862,6 +1052,7 @@ pub fn run_insights(
                 MEMORY_TABLE,
                 &instance.identity.binary,
                 &args,
+                &instance.env,
                 &scrub,
             ) {
                 Ok(curve) => {
@@ -1197,6 +1388,9 @@ fn check_the_corpus_is_ready(
     check_commit(&locations.corpus, &locations.checkout)?;
     check_declares_files(&locations.corpus)?;
     let chosen = build_instances(definitions, locations, options, platform)?;
+    if let Some(with) = chosen.instances.iter().find(|i| !i.env.is_empty()) {
+        return Err(explain_one_environment(with.get_name(), "run"));
+    }
     check_identical_pairs(&options.expect_identical, &chosen.instances)?;
     let binaries = collect_binaries(&chosen.instances, platform)?;
     let defender = read_defender_state(platform, privileged, &binaries);
@@ -1790,6 +1984,7 @@ fn check_everything(
                 &get_capture_name(table, instance.get_name()),
                 &instance.identity.binary,
                 &args,
+                &instance.env,
                 true,
             )?;
             if runner.capture_failures.len() > failures_before {
@@ -1877,7 +2072,12 @@ fn check_everything(
         Table::OutOfTheBox,
     )?;
     let failures_before = runner.failures.len();
-    runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
+    runner.run_hyperfine(
+        out,
+        "check",
+        std::slice::from_ref(&bare),
+        &instances[control].env,
+    )?;
     if runner.failures.len() > failures_before {
         print_line(
             out,
@@ -1994,7 +2194,12 @@ fn time_the_control(
         &locations.corpus.extensions,
         Table::OutOfTheBox,
     )?;
-    runner.run_hyperfine(out, "noise", std::slice::from_ref(&bare))?;
+    runner.run_hyperfine(
+        out,
+        "noise",
+        std::slice::from_ref(&bare),
+        &instances[control].env,
+    )?;
     Ok(fs::read_to_string(scratch.join("noise.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
@@ -2038,6 +2243,7 @@ fn collect_syscalls(
             SYSCALLS_TABLE,
             &instance.identity.binary,
             &args,
+            &instance.env,
             scrub,
             &into,
         ) {
@@ -2061,6 +2267,7 @@ fn describe_what_the_counters_want(
     profiling: &Profiling,
     platform: Platform,
     asked_for: bool,
+    open: i64,
 ) -> Option<String> {
     match (profiling, platform.is_linux(), asked_for) {
         (Profiling::Ready(_), _, _) | (_, _, false) => None,
@@ -2068,7 +2275,7 @@ fn describe_what_the_counters_want(
         (Profiling::Shut(level), _, _) => Some(format!(
             "{PROFILER} is here and {PARANOID_KEY} is {level}, so the hardware counters cannot \
              be read. Run linebench as root, or open them until the next boot with \
-             sudo sysctl {PARANOID_KEY}={OPEN_PARANOID}"
+             sudo sysctl {PARANOID_KEY}={open}"
         )),
         (Profiling::Refused, _, _) => Some(PROFILER_REFUSED.to_string()),
         (Profiling::NotThere, _, _) => Some(PROFILER_MISSING.to_string()),
@@ -2094,18 +2301,18 @@ fn collect_pmu(
             PMU_TABLE,
             false,
         )?;
+        let subject = Subject {
+            instance: instance.get_name(),
+            binary: &instance.identity.binary,
+            args: &args,
+            env: &instance.env,
+            scrub,
+        };
         let mut readings = Vec::new();
         let mut wall_ms = 0;
         for pass in 0..PASSES.len() {
             let started = Instant::now();
-            match count_one_pass(
-                instance.get_name(),
-                pass,
-                &instance.identity.binary,
-                &args,
-                scrub,
-                into,
-            ) {
+            match count_one_pass(&subject, pass, into) {
                 Ok(read) => readings.extend(read),
                 Err(refused) => {
                     print_warning(out, &refused)?;
@@ -2156,7 +2363,14 @@ fn find_lines(
         true,
     )?;
     let name = get_capture_name(PMU_TABLE, instance.get_name());
-    let capture = settle.capture_output(out, &name, &instance.identity.binary, &args, true)?;
+    let capture = settle.capture_output(
+        out,
+        &name,
+        &instance.identity.binary,
+        &args,
+        &instance.env,
+        true,
+    )?;
     let text = fs::read_to_string(&capture.path).unwrap_or_default();
     match read_counts(&instance.definition, &text) {
         Ok(counts) => Ok(Some(counts.lines)),
@@ -2245,7 +2459,7 @@ fn print_how_the_counters_were_chosen(
     for line in &chosen.left_out {
         print_line(out, line)?;
     }
-    for warning in &chosen.warnings {
+    for warning in chosen.warnings.iter().chain(&chosen.stand_in_control) {
         print_warning(out, warning)?;
     }
     Ok(())
@@ -2822,6 +3036,41 @@ mod tests {
             .map(String::from)
             .collect();
         crate::config::parse_args(&args).unwrap()
+    }
+
+    #[test]
+    fn the_ab_lines_carry_b_over_a_for_instructions_and_the_cycles_of_each_order() {
+        let a = [
+            UserCounts {
+                instructions: 2_000_000_000,
+                cycles: 800_000_000,
+            },
+            UserCounts {
+                instructions: 2_000_000_000,
+                cycles: 820_000_000,
+            },
+        ];
+        let b = [
+            UserCounts {
+                instructions: 1_990_000_000,
+                cycles: 792_000_000,
+            },
+            UserCounts {
+                instructions: 1_990_000_000,
+                cycles: 824_100_000,
+            },
+        ];
+        let [first, second] = lay_out_ab("linux", 8, &a, &b, 15);
+        assert_eq!(
+            first,
+            "   linux      instructions 0.9950   cycles 0.990 | 1.005"
+        );
+        assert_eq!(
+            second,
+            "              a 2000M instr 810M cyc   b 1990M instr 808M cyc   15 runs x 4"
+        );
+        assert_eq!(format_millions(12_345_678), "12.3M");
+        assert_eq!(format_millions(15_787_520_396), "15788M");
     }
 
     #[test]

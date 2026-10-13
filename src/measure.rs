@@ -67,6 +67,7 @@ pub struct Instance {
     pub definition: Definition,
     pub identity: Identity,
     pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 impl Instance {
@@ -75,7 +76,7 @@ impl Instance {
     }
 
     pub fn is_an_experiment(&self) -> bool {
-        self.identity.is_a_local_build() || !self.args.is_empty()
+        self.identity.is_a_local_build() || !self.args.is_empty() || !self.env.is_empty()
     }
 }
 
@@ -159,6 +160,7 @@ impl Runner {
         out: &mut dyn Write,
         name: &str,
         commands: &[(String, String)],
+        env: &BTreeMap<String, String>,
     ) -> Result<(), String> {
         print_line(out, &format!(">> {name}"))?;
         let export = self.res.join(format!("{name}.json"));
@@ -185,6 +187,7 @@ impl Runner {
         for name in &self.scrub {
             hyperfine.env_remove(name);
         }
+        hyperfine.envs(env);
         let report = if self.style.is_shown() {
             Stdio::piped()
         } else {
@@ -228,6 +231,7 @@ impl Runner {
         name: &str,
         program: &Path,
         args: &[String],
+        env: &BTreeMap<String, String>,
         as_json: bool,
     ) -> Result<Capture, String> {
         let suffix = if as_json { "json" } else { "txt" };
@@ -243,6 +247,7 @@ impl Runner {
         for name in &self.scrub {
             command.env_remove(name);
         }
+        command.envs(env);
         let finished = command
             .output()
             .map_err(|error| format!("{} could not be run: {error}", program.display()))?;
@@ -312,21 +317,34 @@ pub fn run_phases(
     extensions: &[String],
 ) -> Result<(), String> {
     let bare = build_command(&instances[control], corpus, extensions, Table::OutOfTheBox)?;
+    let own = &instances[control].env;
+    // A set times every instance under one hyperfine process, which has one environment, so an
+    // instance's own env rides on the control sets alone and run refuses an instance that has one.
+    let shared = BTreeMap::new();
     print_line(out, "\n== opening control run")?;
-    runner.run_hyperfine(out, CONTROL_START, std::slice::from_ref(&bare))?;
+    runner.run_hyperfine(out, CONTROL_START, std::slice::from_ref(&bare), own)?;
     for table in TABLES {
         print_line(out, &format!("\n== {}", table.describe()))?;
         let commands: Vec<(String, String)> = instances
             .iter()
             .map(|instance| build_command(instance, corpus, extensions, table))
             .collect::<Result<_, _>>()?;
-        runner.run_hyperfine(out, &get_set_name(table, FORWARD), &commands)?;
+        runner.run_hyperfine(out, &get_set_name(table, FORWARD), &commands, &shared)?;
         print_line(out, "")?;
         let reversed: Vec<(String, String)> = commands.into_iter().rev().collect();
-        runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed)?;
+        runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed, &shared)?;
     }
     print_line(out, "\n== closing control run")?;
-    runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare))
+    runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare), own)
+}
+
+/// What stops an instance with an env of its own from being timed in a set with the others.
+pub fn explain_one_environment(instance: &str, command: &str) -> String {
+    format!(
+        "{instance} carries env, and {command} times every instance under one hyperfine process, \
+         which has one environment. ab, check, noise and insights without the floor run each \
+         instance on its own and take it"
+    )
 }
 
 pub fn capture_plain_output(
@@ -382,6 +400,14 @@ pub fn build_command(
         instance.get_name().to_string(),
         join_command(&instance.identity.binary, &args),
     ))
+}
+
+/// An instance's env as it would be typed, `NAME=value` pairs with a space between them.
+pub fn describe_env(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 pub fn join_command(binary: &Path, args: &[String]) -> String {
@@ -532,7 +558,14 @@ fn capture_every_instance(
         for instance in instances {
             let name = get_capture_name(table, instance.get_name());
             let args = build_args(instance, corpus, extensions, table, as_json)?;
-            runner.capture_output(out, &name, &instance.identity.binary, &args, as_json)?;
+            runner.capture_output(
+                out,
+                &name,
+                &instance.identity.binary,
+                &args,
+                &instance.env,
+                as_json,
+            )?;
         }
     }
     Ok(())
@@ -606,7 +639,14 @@ mod tests {
         let mut printed = Vec::new();
         let args = ["--no-such-flag-linebench".to_string()];
         let written = runner
-            .capture_output(&mut printed, "t1-git", Path::new("git"), &args, false)
+            .capture_output(
+                &mut printed,
+                "t1-git",
+                Path::new("git"),
+                &args,
+                &BTreeMap::new(),
+                false,
+            )
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.starts_with("WARNING: git exited 129 while writing t1-git.txt\n"));
@@ -619,7 +659,14 @@ mod tests {
         );
         assert!(runner.capture_failures.is_empty());
         let as_json = runner
-            .capture_output(&mut Vec::new(), "t1-git", Path::new("git"), &args, true)
+            .capture_output(
+                &mut Vec::new(),
+                "t1-git",
+                Path::new("git"),
+                &args,
+                &BTreeMap::new(),
+                true,
+            )
             .unwrap();
         assert!(as_json.stderr.contains("no-such-flag-linebench"));
         assert!(
@@ -672,7 +719,7 @@ mod tests {
         let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Plain);
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(&mut printed, "t1-fwd", &commands)
+            .run_hyperfine(&mut printed, "t1-fwd", &commands, &BTreeMap::new())
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.starts_with(">> t1-fwd\n   Benchmark 1: version\n     Time (mean"));
@@ -684,14 +731,19 @@ mod tests {
         assert!(dir.join("t1-fwd.json").is_file());
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(&mut printed, "control-start", &commands[..1])
+            .run_hyperfine(
+                &mut printed,
+                "control-start",
+                &commands[..1],
+                &BTreeMap::new(),
+            )
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.contains("2 runs\n") && !printed.contains("2 runs\n\n"));
         let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Hidden);
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(&mut printed, "check", &commands[..1])
+            .run_hyperfine(&mut printed, "check", &commands[..1], &BTreeMap::new())
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.starts_with(">> check\n"));
@@ -702,7 +754,12 @@ mod tests {
         );
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(&mut printed, "t2-fwd", std::slice::from_ref(&failing))
+            .run_hyperfine(
+                &mut printed,
+                "t2-fwd",
+                std::slice::from_ref(&failing),
+                &BTreeMap::new(),
+            )
             .unwrap();
         assert!(String::from_utf8(printed).unwrap().contains(
             "WARNING: hyperfine reported a problem on t2-fwd: Error: Command terminated with \

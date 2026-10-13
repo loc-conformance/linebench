@@ -32,6 +32,7 @@ mezura, scc and tokei.
   - [noise](#noise)
   - [run](#run)
   - [insights](#insights)
+  - [ab](#ab)
   - [report](#report)
   - [verify](#verify)
 - [Three ways to use it](#three-ways-to-use-it)
@@ -349,6 +350,40 @@ stands on its own, and the hyperfine exports sit beside it. `insights.md` is the
 reader: the machine, the corpus and the three tables above as they were printed. An `--args`
 instance or a build of yours sends the session under `results/insights/local/`.
 
+### ab
+
+```
+linebench ab linux --given mezura@a=<one build> --given mezura@b=<another>
+```
+
+One build against another on the hardware counters, for the changes a run cannot tell from its
+noise: wall-clock time on a short run moves a few percent between runs, and a parser change moves
+it by one. Two instances, a and b, each run under `perf stat` over the target in the order a, b,
+b, a, fifteen runs a block, counting user-space instructions and cycles, after one run of each
+that fills the page cache. One line per tree says b over a:
+
+```
+   a  mezura@a  v3.3.0 (unreleased) (LOCAL BUILD a, sha256 505106430)
+   b  mezura@b  v3.3.0 (unreleased) (LOCAL BUILD b, sha256 ab85ec02e)
+   perf version 6.12.107, 15 runs x 4 (a b b a), cpu governor powersave, boost on
+
+   linux   instructions 0.9944   cycles 1.002 | 0.998
+           a 15787M instr 6383M cyc   b 15699M instr 6384M cyc   15 runs x 4
+```
+
+The instructions ratio holds to 0.01% between two runs of the same binary, so a change of 0.1% is
+real. The cycles come once from each order, and the two agree to about half a percent on a quiet
+machine, which is as fine as cycles get: a cycles change under one percent is noise. The results
+stay on the screen, the machine is left as it is, and `run` stays the command for numbers that are
+kept.
+
+By default an instance runs with the definition's target argument and its own `--args`, which is
+all two builds of one counter need. `--same-work` adds the definition's same-work flags and
+languages, as the first table of a run does, for two different counters. `--counters a,b` names
+the pair in order; without it the two given instances are the pair, a before b by name. Several
+corpora, `ab linux,cpython`, give a line each. Linux only, and it wants root or
+`kernel.perf_event_paranoid` at 2 or below, since the counts are user space alone.
+
 ### report
 
 ```
@@ -475,6 +510,15 @@ the languages and the same-work flags, in every invocation of that instance. Wit
 own the instance runs the release binary, so a `[given]` entry holding only `args` measures the
 release with those arguments beside the release as it is. Arguments make an instance of their own,
 so the name carries a tag.
+
+An instance can carry an environment of its own too, `--env mezura@a=MEZURA_DATA_DIR=/x/a` for
+one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set for that instance
+alone wherever linebench runs the instance itself: `ab`, `check`, `noise` and the memory, system
+calls and hardware counters of `insights`. Two builds of mezura that carry different language
+files rewrite a shared data directory in turns, inside the runs being measured, and a directory of
+each one's own stops that. `run` and the floor of `insights` time every instance under one
+hyperfine process, which has one environment, so they refuse an instance that has one. Like
+arguments, an environment makes an instance of its own, so the name carries a tag.
 
 A run holding any given instance is written under `results/local/` and the page gives such runs
 headings of their own, under the release ones, with the same sections. A `[given]` entry in the

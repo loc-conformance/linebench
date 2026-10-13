@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,8 +10,12 @@ use crate::os::{Unfinished, capture_with_status};
 pub const PROFILER: &str = "perf";
 pub const PARANOID_KEY: &str = "kernel.perf_event_paranoid";
 pub const PARANOID_PATH: &str = "/proc/sys/kernel/perf_event_paranoid";
+/// The highest paranoid level at which an unprivileged perf still counts the kernel.
 pub const OPEN_PARANOID: i64 = 1;
+/// The highest level at which it still counts user space, which is all the `:u` events ask for.
+pub const USER_PARANOID: i64 = 2;
 pub const RUNS: u32 = 5;
+pub const AB_RUNS: u32 = 15;
 pub const FULL_RUN: f64 = 100.0;
 pub const USER_ONLY: &str = ":u";
 pub const INSTRUCTIONS: &str = "instructions";
@@ -81,7 +86,31 @@ pub struct Pmu {
     pub readings: Vec<Reading>,
 }
 
-pub fn find_profiler(probe: &Path, privileged: bool, paranoid: Option<i64>) -> Profiling {
+/// What perf runs: a binary with its arguments, the environment it gets and the names scrubbed
+/// from it.
+pub struct Subject<'a> {
+    pub instance: &'a str,
+    pub binary: &'a Path,
+    pub args: &'a [String],
+    pub env: &'a BTreeMap<String, String>,
+    pub scrub: &'a [String],
+}
+
+/// The means of one `perf stat -r` over the user-space instructions and cycles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserCounts {
+    pub instructions: u64,
+    pub cycles: u64,
+}
+
+/// `open` is the paranoid level the asked-for counts stay open at below root: [`OPEN_PARANOID`]
+/// for counts that take in the kernel, [`USER_PARANOID`] for `:u` events.
+pub fn find_profiler(
+    probe: &Path,
+    privileged: bool,
+    paranoid: Option<i64>,
+    open: i64,
+) -> Profiling {
     let version = match capture_with_status(PROFILER, &[VERSION_FLAG]) {
         Ok((true, answer)) => answer.lines().next().map(|line| line.trim().to_string()),
         Err(Unfinished::NotFound) => return Profiling::NotThere,
@@ -94,7 +123,7 @@ pub fn find_profiler(probe: &Path, privileged: bool, paranoid: Option<i64>) -> P
     // would publish user-space counts under the name of the whole run.
     if !privileged
         && let Some(level) = paranoid
-        && level > OPEN_PARANOID
+        && level > open
     {
         return Profiling::Shut(level);
     }
@@ -128,60 +157,116 @@ pub fn read_paranoid() -> Option<i64> {
     fs::read_to_string(PARANOID_PATH).ok()?.trim().parse().ok()
 }
 
-pub fn count_one_pass(
-    instance: &str,
-    pass: usize,
-    binary: &Path,
-    args: &[String],
-    scrub: &[String],
-    into: &Path,
-) -> Result<Vec<Reading>, String> {
+pub fn count_one_pass(subject: &Subject, pass: usize, into: &Path) -> Result<Vec<Reading>, String> {
     let events = PASSES
         .get(pass)
         .ok_or_else(|| format!("there is no pass {} to count", pass + 1))?;
-    let path = build_raw_path(into, instance, pass);
+    let path = build_raw_path(into, subject.instance, pass);
+    let read = count_events(subject, &events.join(EVENT_SEPARATOR), RUNS, &path)?;
+    if read.len() != events.len() {
+        return Err(format!(
+            "{} of the {} events of pass {} came back for {}",
+            read.len(),
+            events.len(),
+            pass + 1,
+            subject.instance
+        ));
+    }
+    Ok(read)
+}
+
+pub fn count_user_events(subject: &Subject, runs: u32, path: &Path) -> Result<UserCounts, String> {
+    let events = [INSTRUCTIONS, CYCLES].map(|event| format!("{event}{USER_ONLY}"));
+    let read = count_events(subject, &events.join(EVENT_SEPARATOR), runs, path)?;
+    let find = |event: &str| {
+        find_user_count(&read, event).ok_or_else(|| {
+            format!(
+                "{PROFILER} read no {event}{USER_ONLY} for {}",
+                subject.instance
+            )
+        })
+    };
+    Ok(UserCounts {
+        instructions: find(INSTRUCTIONS)?,
+        cycles: find(CYCLES)?,
+    })
+}
+
+/// One execution with its output dropped, which fills the page cache before anything is counted.
+pub fn run_once(subject: &Subject) -> Result<(), String> {
+    let mut command = Command::new(subject.binary);
+    command
+        .args(subject.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    for name in subject.scrub {
+        command.env_remove(name);
+    }
+    command.envs(subject.env);
+    let finished = command
+        .output()
+        .map_err(|error| format!("{} could not be run, {error}", subject.instance))?;
+    if !finished.status.success() {
+        return Err(format!(
+            "{} ended with {}, {}",
+            subject.instance,
+            finished.status,
+            String::from_utf8_lossy(&finished.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn count_events(
+    subject: &Subject,
+    events: &str,
+    runs: u32,
+    path: &Path,
+) -> Result<Vec<Reading>, String> {
     let mut command = Command::new(PROFILER);
     command
         .arg(STAT)
         .arg(SEPARATOR_FLAG)
         .arg(SEPARATOR)
         .arg(RUNS_FLAG)
-        .arg(RUNS.to_string())
+        .arg(runs.to_string())
         .arg(EVENTS_FLAG)
-        .arg(events.join(EVENT_SEPARATOR))
+        .arg(events)
         .arg(OUTPUT_FLAG)
-        .arg(&path)
+        .arg(path)
         .arg(END_OF_FLAGS)
-        .arg(binary)
-        .args(args)
+        .arg(subject.binary)
+        .args(subject.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    for name in scrub {
+    for name in subject.scrub {
         command.env_remove(name);
     }
+    command.envs(subject.env);
     let finished = command
         .output()
-        .map_err(|error| format!("{instance} could not be profiled, {error}"))?;
+        .map_err(|error| format!("{} could not be profiled, {error}", subject.instance))?;
     if !finished.status.success() {
         return Err(format!(
-            "{instance} under {PROFILER} ended with {}, {}",
+            "{} under {PROFILER} ended with {}, {}",
+            subject.instance,
             finished.status,
             String::from_utf8_lossy(&finished.stderr).trim()
         ));
     }
-    let text = fs::read_to_string(&path)
+    let text = fs::read_to_string(path)
         .map_err(|error| format!("{} could not be read, {error}", path.display()))?;
-    let read = parse_counts(&text);
-    if read.len() != events.len() {
-        return Err(format!(
-            "{} of the {} events of pass {} came back for {instance}",
-            read.len(),
-            events.len(),
-            pass + 1
-        ));
-    }
-    Ok(read)
+    Ok(parse_counts(&text))
+}
+
+/// perf prints a `:u` event under that name, so the event is found with or without its suffix.
+fn find_user_count(readings: &[Reading], event: &str) -> Option<u64> {
+    readings
+        .iter()
+        .find(|reading| reading.event.trim_end_matches(USER_ONLY) == event)
+        .and_then(|reading| reading.count)
 }
 
 pub fn remove_raw_files(into: &Path, instance: &str) {
@@ -332,6 +417,20 @@ mod tests {
         assert_eq!(readings[0].running_pct, 100.0);
         assert_eq!(readings[1].count, Some(4321));
         assert_eq!(readings[1].running_pct, 64.0);
+    }
+
+    #[test]
+    fn a_user_space_event_is_found_under_its_suffixed_name_and_under_the_bare_one() {
+        let suffixed = PASS.replace("\tinstructions\t", "\tinstructions:u\t");
+        let readings = parse_counts(&suffixed);
+        assert_eq!(readings[0].event, "instructions:u");
+        assert_eq!(
+            find_user_count(&readings, INSTRUCTIONS),
+            Some(14_923_456_789)
+        );
+        assert_eq!(find_user_count(&readings, CYCLES), Some(7_012_345_678));
+        assert_eq!(find_user_count(&readings, "LLC-loads"), None);
+        assert_eq!(find_user_count(&readings, BRANCH_MISSES), None);
     }
 
     #[test]

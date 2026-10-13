@@ -1229,6 +1229,7 @@ mod tests {
                 same_work_note: String::new(),
                 scrub_env: Vec::new(),
                 args: Vec::new(),
+                env: Default::default(),
             }],
             floor: build_floor(),
             curves: vec![build_curve("tokei", 30 * MEGABYTE)],

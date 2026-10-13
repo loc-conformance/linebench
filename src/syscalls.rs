@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -127,6 +128,7 @@ pub fn count_syscalls(
     table: Table,
     binary: &Path,
     args: &[String],
+    env: &BTreeMap<String, String>,
     scrub: &[String],
     into: &Path,
 ) -> Result<Syscalls, String> {
@@ -142,6 +144,7 @@ pub fn count_syscalls(
     for name in scrub {
         command.env_remove(name);
     }
+    command.envs(env);
     let started = Instant::now();
     let finished = command
         .output()

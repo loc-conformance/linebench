@@ -26,9 +26,12 @@ control = "mezura"
 linux = "<the checkout that gets counted>"
 
 # A build of your own, measured beside the release as the instance mezura@dev. The definition
-# is only needed when its flags differ from the release's, and args are the instance's own
-# arguments, placed right after the target. An entry with args and no binary runs the release.
+# is only needed when its flags differ from the release's, args are the instance's own
+# arguments, placed right after the target, and env is set for that instance alone wherever
+# linebench runs it itself (run times every instance under one hyperfine process and refuses
+# it). An entry with args or env and no binary runs the release.
 # [given."mezura@dev"]
 # binary     = "<path to the build>"
 # definition = "<its own definition file>"
 # args       = ["--threads", "4", "16"]
+# env        = { MEZURA_DATA_DIR = "<a data directory of this build's own>" }

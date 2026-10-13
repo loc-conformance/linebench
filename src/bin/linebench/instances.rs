@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use linebench::corpus::Corpus;
@@ -14,6 +14,9 @@ pub struct ChosenInstances {
     pub control: usize,
     pub left_out: Vec<String>,
     pub warnings: Vec<String>,
+    /// Said when the conf's control is absent and the first instance stands in, which matters to
+    /// the commands that time a control.
+    pub stand_in_control: Option<String>,
 }
 
 pub fn build_instances(
@@ -107,6 +110,7 @@ pub fn build_instances(
                 definition,
                 identity,
                 args: entry.args.clone(),
+                env: entry.env.clone(),
             }
         } else {
             let definition = find_definition(definitions, name).map_err(|_| {
@@ -135,11 +139,13 @@ pub fn build_instances(
                 definition,
                 identity,
                 args: Vec::new(),
+                env: BTreeMap::new(),
             }
         };
         instances.push(instance);
     }
     let find_control = |named: &str| instances.iter().position(|i| i.get_name() == named);
+    let mut stand_in_control = None;
     let control = match (&options.control, &locations.control) {
         (Some(named), _) => find_control(named).ok_or_else(|| {
             let skipped = if locations.skip.contains(named) {
@@ -157,7 +163,7 @@ pub fn build_instances(
         (None, Some(named)) => match find_control(named) {
             Some(found) => found,
             None => {
-                warnings.push(format!(
+                stand_in_control = Some(format!(
                     "the control {named} from linebench.conf is not in this run, so {} stands in \
                      as the control",
                     instances[0].get_name()
@@ -172,6 +178,7 @@ pub fn build_instances(
         control,
         left_out,
         warnings,
+        stand_in_control,
     })
 }
 
