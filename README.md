@@ -358,9 +358,9 @@ linebench ab linux --given mezura@a=<one build> --given mezura@b=<another>
 
 One build against another on the hardware counters, for the changes a run cannot tell from its
 noise: wall-clock time on a short run moves a few percent between runs, and a parser change moves
-it by one. Two instances, a and b, each run under `perf stat` over the target in the order a, b,
-b, a, fifteen runs a block, counting user-space instructions, cycles and the wall time, after one
-run of each that fills the page cache and checks that both counted the same:
+it by one. The baseline a and each candidate b run under `perf stat` over the target in the order
+a, b, b, a, fifteen runs a block, counting user-space instructions, cycles and the wall time, after
+one run of each that fills the page cache and checks that they counted the same:
 
 ```
    a  mezura@a  v3.3.0 (unreleased) (LOCAL BUILD a, sha256 505106430)
@@ -379,10 +379,11 @@ that are kept.
 
 By default an instance runs with the definition's target argument and its own `--args`, which is
 all two builds of one counter need. `--same-work` adds the definition's same-work flags and
-languages, as the first table of a run does, for two different counters. `--counters a,b` names
-the pair in order; without it the two given instances are the pair, a before b by name. Several
-corpora, `ab linux,cpython`, give a line each. Linux only, and it wants root or
-`kernel.perf_event_paranoid` at 2 or below, since the counts are user space alone.
+languages, as the first table of a run does, for two different counters. `--counters a,b,...`
+names the baseline first and each candidate held against it; without it the two given instances are
+the pair, a before b by name. Several corpora, `ab linux,cpython`, are measured in turn. Linux
+only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are user
+space alone.
 
 ### report
 

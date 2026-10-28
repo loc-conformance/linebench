@@ -143,27 +143,22 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
-linebench ab <corpora|all|dir> [--counters a,b] [--runs <n>] [--same-work] [--extensions rs,c]
+linebench ab <corpora|all|dir> [--counters a,b,...] [--runs <n>] [--same-work] [--extensions rs,c]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
                 [--env <c>@<tag>=<NAME>=<v>] [--counters-dir <dir>] [--add <path>]
                 [--corpus-path <dir>]
 
-    Holds one build against another on the hardware counters, for the changes a run cannot tell
-    from its noise. Two instances, a and b, each run under perf stat over the target in the order
-    a, b, b, a, counting user-space instructions, cycles and the wall time, and each tree prints
-    a, b and b / a across both orders: the instructions ratio, which holds to 0.01%, the cycles
-    ratio and the wall ratio. The results stay on the screen and the machine is left as it is, so
-    run stays the command for numbers that are kept.
+    Compares baseline a against each candidate b under perf stat in the order a, b, b, a,
+    reporting user-space instructions, cycles, wall time and b / a ratios. Each instance runs
+    once first to warm the page cache and check that their counts match.
 
-    Each instance runs once before the counting, which fills the page cache and checks that
-    both counted the same. Without --counters the two given instances are the pair, a before b
-    by name. Linux only: it wants root, or kernel.perf_event_paranoid at 2 or below, since the
-    counts are user space alone.
+    Without --counters, uses the two given instances ordered by name; with three or more
+    instances, --counters is required and names the baseline first. Linux only (root or
+    kernel.perf_event_paranoid <= 2).
 
-    --counters a,b             the two instances, a first
-    --runs <n>                 runs per perf stat, default 15, so four times that in all
-    --same-work                the definition's same-work flags and languages, as in the first
-                               table of a run. By default an instance runs with its own args
+    --counters a,b,...         the instances, baseline a first
+    --runs <n>                 runs per perf stat pass, default 15 (4 passes per pair)
+    --same-work                add the definition's same-work flags and languages
     --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under

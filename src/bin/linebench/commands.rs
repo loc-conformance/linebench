@@ -415,12 +415,24 @@ pub fn run_ab(
         for warning in &chosen.warnings {
             print_warning(out, warning)?;
         }
-        let pair = choose_pair(chosen.instances, options.counters.is_some(), &one.given)?;
+        let instances =
+            choose_ab_instances(chosen.instances, options.counters.is_some(), &one.given)?;
+        let candidate_label = |index: usize| match instances.len() {
+            2 => "b".to_string(),
+            _ => format!("b{index}"),
+        };
         if !described {
-            for (letter, instance) in [("a", &pair[0]), ("b", &pair[1])] {
+            let labels: Vec<String> = (0..instances.len())
+                .map(|index| match index {
+                    0 => "a".to_string(),
+                    _ => candidate_label(index),
+                })
+                .collect();
+            let label_width = widest(labels.iter().map(String::as_str));
+            for (letter, instance) in labels.iter().zip(&instances) {
                 print_line(
                     out,
-                    &format!("   {letter}  {}", describe_instance(instance)),
+                    &format!("   {letter:<label_width$}  {}", describe_instance(instance)),
                 )?;
             }
             let frequency =
@@ -437,15 +449,19 @@ pub fn run_ab(
                     ),
                 )?;
             }
-            if let Some(warning) = describe_same_build(&pair[0], &pair[1]) {
-                print_warning(out, &warning)?;
+            for (index, left) in instances.iter().enumerate() {
+                for right in &instances[index + 1..] {
+                    if let Some(warning) = describe_same_build(left, right) {
+                        print_warning(out, &warning)?;
+                    }
+                }
             }
             print_line(out, "")?;
             described = true;
         }
-        let scrub = collect_scrub(&pair);
+        let scrub = collect_scrub(&instances);
         let mut counted = Vec::new();
-        for instance in &pair {
+        for instance in &instances {
             let warm = build_args(instance, &one.checkout, &one.corpus.extensions, table, true)?;
             let printed = run_once(&Subject {
                 instance: instance.get_name(),
@@ -456,7 +472,7 @@ pub fn run_ab(
             })?;
             counted.push(read_counts(&instance.definition, &printed)?);
         }
-        let args: Vec<Vec<String>> = pair
+        let args: Vec<Vec<String>> = instances
             .iter()
             .map(|instance| {
                 build_args(
@@ -468,7 +484,7 @@ pub fn run_ab(
                 )
             })
             .collect::<Result<_, _>>()?;
-        let subjects: Vec<Subject> = pair
+        let subjects: Vec<Subject> = instances
             .iter()
             .zip(&args)
             .map(|(instance, args)| Subject {
@@ -479,33 +495,58 @@ pub fn run_ab(
                 scrub: &scrub,
             })
             .collect();
-        let mut blocks = Vec::new();
-        for (block, which) in AB_ORDER.into_iter().enumerate() {
-            let path = scratch
-                .get_path()
-                .join(format!("ab-{}-{block}.tsv", pair[which].get_name()));
-            blocks.push(count_user_events(&subjects[which], runs, *duration, &path)?);
-        }
-        let a = [blocks[0], blocks[3]];
-        let b = [blocks[1], blocks[2]];
-        for line in lay_out_ab(&one.corpus.name, width, &a, &b, [&counted[0], &counted[1]]) {
-            print_line(out, &line)?;
-        }
-        if let Some(difference) = find_count_differences(&counted[0], &counted[1]) {
-            print_warning(out, &format!("{}: {difference}", one.corpus.name))?;
-            code = 1;
+        for candidate in 1..instances.len() {
+            let pair = [0, candidate];
+            let mut blocks = Vec::new();
+            for (block, which) in AB_ORDER.into_iter().enumerate() {
+                let chosen_idx = pair[which];
+                let path = scratch.get_path().join(format!(
+                    "ab-{}-{candidate}-{block}.tsv",
+                    instances[chosen_idx].get_name()
+                ));
+                blocks.push(count_user_events(
+                    &subjects[chosen_idx],
+                    runs,
+                    *duration,
+                    &path,
+                )?);
+            }
+            let a = [blocks[0], blocks[3]];
+            let b = [blocks[1], blocks[2]];
+            let tree = match candidate {
+                1 => one.corpus.name.as_str(),
+                _ => "",
+            };
+            let b_label = candidate_label(candidate);
+            for line in lay_out_ab(
+                tree,
+                width,
+                &b_label,
+                &a,
+                &b,
+                [&counted[0], &counted[candidate]],
+            ) {
+                print_line(out, &line)?;
+            }
+            if let Some(difference) =
+                find_count_differences(&counted[0], &counted[candidate], &b_label)
+            {
+                print_warning(out, &format!("{}: {difference}", one.corpus.name))?;
+                code = 1;
+            }
         }
     }
     Ok(code)
 }
 
-/// The two instances ab compares, in the order they were named: the first is a, the second b.
-/// Without --counters, the two given instances are the pair, in the order of their names.
-fn choose_pair(
+/// The instances ab compares, in the order they were named: the first is a, and each other is
+/// held against it in turn. Without --counters, two given instances are the pair, in the order
+/// of their names; past two, --counters is required so the baseline is named first.
+fn choose_ab_instances(
     instances: Vec<Instance>,
     named: bool,
     given: &BTreeMap<String, GivenEntry>,
-) -> Result<[Instance; 2], String> {
+) -> Result<Vec<Instance>, String> {
     let candidates: Vec<Instance> = match named {
         true => instances,
         false => instances
@@ -514,15 +555,21 @@ fn choose_pair(
             .collect(),
     };
     let names: Vec<&str> = candidates.iter().map(Instance::get_name).collect();
-    let said = match names.len() {
-        0 => "ab compares two instances: name them with --counters a,b, or give two with --given"
-            .to_string(),
-        count => format!(
-            "ab compares two instances, and {count} came up ({}): name two with --counters a,b",
-            names.join(", ")
+    match (named, candidates.len()) {
+        (_, 0) => Err(
+            "ab compares two or more instances: name them with --counters a,b, or give two with --given"
+                .to_string(),
         ),
-    };
-    <[Instance; 2]>::try_from(candidates).map_err(|_| said)
+        (_, 1) => Err(format!(
+            "ab needs at least two instances, and 1 came up ({}): name them with --counters a,b",
+            names[0]
+        )),
+        (false, count) if count > 2 => Err(format!(
+            "{count} given instances came up ({}): name the baseline first with --counters a,b,...",
+            names.join(", ")
+        )),
+        _ => Ok(candidates),
+    }
 }
 
 fn describe_instance(instance: &Instance) -> String {
@@ -557,6 +604,7 @@ fn describe_same_build(a: &Instance, b: &Instance) -> Option<String> {
 fn lay_out_ab(
     tree: &str,
     width: usize,
+    b_label: &str,
     a: &[UserCounts; 2],
     b: &[UserCounts; 2],
     counted: [&Counts; 2],
@@ -603,8 +651,10 @@ fn lay_out_ab(
         .iter()
         .map(|col| widest(col.iter().map(String::as_str)))
         .collect();
+    let ratio_label = format!("{b_label} / a");
+    let label_width = ratio_label.chars().count();
     let row = |at: usize, head: &str, label: &str| {
-        let mut line = format!("{ROW_OPENING}{head:<width$}{COUNT_GAP}{label:<5}  ");
+        let mut line = format!("{ROW_OPENING}{head:<width$}{COUNT_GAP}{label:<label_width$}  ");
         for (col, cells) in columns.iter().enumerate() {
             let cell = &cells[at];
             if cell.is_empty() {
@@ -619,7 +669,11 @@ fn lay_out_ab(
         }
         line.trim_end().to_string()
     };
-    [row(0, tree, "a"), row(1, "", "b"), row(2, "", "b / a")]
+    [
+        row(0, tree, "a"),
+        row(1, "", b_label),
+        row(2, "", &ratio_label),
+    ]
 }
 
 fn format_ab_wall(ns: u64, noise_pct: f64) -> String {
@@ -630,7 +684,7 @@ fn format_ab_wall(ns: u64, noise_pct: f64) -> String {
     }
 }
 
-fn find_count_differences(a: &Counts, b: &Counts) -> Option<String> {
+fn find_count_differences(a: &Counts, b: &Counts, b_label: &str) -> Option<String> {
     let mut pairs = vec![
         ("files", a.files, b.files),
         ("lines", a.lines, b.lines),
@@ -661,8 +715,12 @@ fn find_count_differences(a: &Counts, b: &Counts) -> Option<String> {
             )
         })
         .collect();
-    (!differences.is_empty())
-        .then(|| format!("a and b did not count the same: {}", differences.join(", ")))
+    (!differences.is_empty()).then(|| {
+        format!(
+            "a and {b_label} did not count the same: {}",
+            differences.join(", ")
+        )
+    })
 }
 
 fn format_millions(count: u64) -> String {
@@ -3206,11 +3264,19 @@ mod tests {
             },
         ];
         assert_eq!(
-            lay_out_ab("linux", 5, &a, &b, [&counted, &counted]),
+            lay_out_ab("linux", 5, "b", &a, &b, [&counted, &counted]),
             [
                 "   linux   a      2000M instructions   810M cycles   185 ms ±0.4%   63,738 files   36,012,345 lines",
                 "           b      1990M instructions   808M cycles   192 ms ±0.5%   63,738 files   36,012,345 lines",
                 "           b / a  0.9950x              0.998x        1.040x",
+            ]
+        );
+        assert_eq!(
+            lay_out_ab("", 5, "b2", &a, &b, [&counted, &counted]),
+            [
+                "           a       2000M instructions   810M cycles   185 ms ±0.4%   63,738 files   36,012,345 lines",
+                "           b2      1990M instructions   808M cycles   192 ms ±0.5%   63,738 files   36,012,345 lines",
+                "           b2 / a  0.9950x              0.998x        1.040x",
             ]
         );
         let without_wall =
@@ -3219,6 +3285,7 @@ mod tests {
             lay_out_ab(
                 "linux",
                 5,
+                "b",
                 &without_wall(&a),
                 &without_wall(&b),
                 [&counted, &counted]
@@ -3308,21 +3375,76 @@ mod tests {
             buckets: BTreeMap::from([(bucket.0.to_string(), bucket.1)]),
         };
         let a = counts(29_100_000, 4_500_000, ("extra", 2_412_345));
-        assert_eq!(find_count_differences(&a, &a), None);
+        assert_eq!(find_count_differences(&a, &a, "b"), None);
         let moved = counts(29_099_990, 4_500_010, ("extra", 2_412_345));
         assert_eq!(
-            find_count_differences(&a, &moved).as_deref(),
+            find_count_differences(&a, &moved, "b").as_deref(),
             Some(
                 "a and b did not count the same: code 29,100,000 against 29,099,990, comments 4,500,000 against 4,500,010"
             )
         );
         let other_bucket = counts(29_100_000, 4_500_000, ("blanks", 2_412_345));
         assert_eq!(
-            find_count_differences(&a, &other_bucket).as_deref(),
+            find_count_differences(&a, &other_bucket, "b2").as_deref(),
             Some(
-                "a and b did not count the same: blanks 0 against 2,412,345, extra 2,412,345 against 0"
+                "a and b2 did not count the same: blanks 0 against 2,412,345, extra 2,412,345 against 0"
             )
         );
+    }
+
+    #[test]
+    fn ab_takes_two_given_by_default_and_wants_counters_named_for_more() {
+        let definition = crate::shipped::collect_definitions(&mut Vec::new(), &[])
+            .unwrap()
+            .counters
+            .into_iter()
+            .find(|definition| definition.name == "mezura")
+            .unwrap();
+        let build = |name: &str| Instance {
+            definition: definition.clone(),
+            identity: Identity {
+                instance: name.to_string(),
+                counter: "mezura".to_string(),
+                binary: PathBuf::from("mezura"),
+                sha256: "1234567890abcdef".to_string(),
+                version: "3.3.0".to_string(),
+                origin: Origin::Given {
+                    label: name.to_string(),
+                },
+            },
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        let entry = || GivenEntry {
+            binary: Some(PathBuf::from("mezura")),
+            definition: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        let two_given = BTreeMap::from([
+            ("mezura@a".to_string(), entry()),
+            ("mezura@b".to_string(), entry()),
+        ]);
+        let instances = vec![build("mezura@a"), build("mezura@b"), build("scc")];
+        let chosen = choose_ab_instances(instances.clone(), false, &two_given).unwrap();
+        assert_eq!(chosen.len(), 2);
+        assert_eq!(chosen[0].get_name(), "mezura@a");
+        assert_eq!(chosen[1].get_name(), "mezura@b");
+
+        let three = vec![build("mezura@base"), build("mezura@c1"), build("mezura@c2")];
+        let three_given = BTreeMap::from([
+            ("mezura@base".to_string(), entry()),
+            ("mezura@c1".to_string(), entry()),
+            ("mezura@c2".to_string(), entry()),
+        ]);
+        assert_eq!(
+            choose_ab_instances(three.clone(), false, &three_given).unwrap_err(),
+            "3 given instances came up (mezura@base, mezura@c1, mezura@c2): name the baseline first with --counters a,b,..."
+        );
+        let named_three = choose_ab_instances(three, true, &three_given).unwrap();
+        assert_eq!(named_three.len(), 3);
+        assert_eq!(named_three[0].get_name(), "mezura@base");
+        assert_eq!(named_three[2].get_name(), "mezura@c2");
     }
 
     #[test]
