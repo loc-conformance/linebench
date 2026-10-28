@@ -159,7 +159,7 @@ linebench ab <corpora|all|dir> [--counters a,b,...] [--runs <n>] [--same-work] [
     --counters a,b,...         the instances, baseline a first
     --runs <n>                 runs per perf stat pass, default 15 (4 passes per pair)
     --same-work                add the definition's same-work flags and languages
-    --extensions rs,c          what to count in a directory of your own
+    --extensions rs,c          what to count in a directory of your own under --same-work
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target

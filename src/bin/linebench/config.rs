@@ -783,6 +783,9 @@ fn choose_corpora(
         ));
     };
     let everything = named.iter().any(|name| name == EVERYTHING);
+    if options.command == Some(Command::Ab) {
+        return choose_ab_targets(&named, options, config, config_path, corpora, data_dir);
+    }
     if named.len() == 1 && !everything && find_corpus(first, corpora).is_err() {
         return build_the_tree_corpus(first, options, config, corpora, data_dir).map(|one| {
             ChosenCorpora {
@@ -839,6 +842,99 @@ fn choose_every_corpus(
     if taken.is_empty() {
         return Err(explain_the_empty_machine(corpora));
     }
+    Ok(ChosenCorpora { taken, left_behind })
+}
+
+fn choose_ab_targets(
+    named: &[String],
+    options: &Options,
+    config: &Config,
+    config_path: &Path,
+    corpora: &[Corpus],
+    data_dir: Option<&Path>,
+) -> Result<ChosenCorpora, String> {
+    let mut taken: Vec<(Corpus, PathBuf)> = Vec::new();
+    let mut named_corpora: Vec<Corpus> = Vec::new();
+    let mut left_behind = Vec::new();
+    let mut has_folder = false;
+    for (at, word) in named.iter().enumerate() {
+        if named[..at].contains(word) {
+            return Err(format!("{word} is named twice"));
+        }
+        let is_path = word.contains(['/', '\\', ':']) || word.starts_with('.');
+        if !is_path && word == EVERYTHING {
+            let every = choose_every_corpus(options, config, corpora, data_dir)?;
+            for (corpus, checkout) in every.taken {
+                if taken
+                    .iter()
+                    .any(|(existing, _)| existing.name == corpus.name)
+                {
+                    return Err(format!("{} is named twice", corpus.name));
+                }
+                named_corpora.push(corpus.clone());
+                taken.push((corpus, checkout));
+            }
+            left_behind.extend(every.left_behind);
+            continue;
+        }
+        if !is_path && let Some(corpus) = corpora.iter().find(|corpus| corpus.name == *word) {
+            if taken
+                .iter()
+                .any(|(existing, _)| existing.name == corpus.name)
+            {
+                return Err(format!("{word} is named twice"));
+            }
+            if Path::new(word).is_dir() {
+                left_behind.push(format!(
+                    "{word}: counting the corpus; write ./{word} to count the directory here"
+                ));
+            }
+            let checkout = find_checkout(&corpus.name, options, config)
+                .or_else(|| place_for_corpus(&corpus.name, data_dir).filter(|path| path.is_dir()))
+                .ok_or_else(|| explain_the_missing_checkout(&corpus.name, config_path, data_dir))?;
+            named_corpora.push(corpus.clone());
+            taken.push((corpus.clone(), checkout));
+            continue;
+        }
+        has_folder = true;
+        let checkout = PathBuf::from(word);
+        if !checkout.is_dir() {
+            return Err(format!(
+                "{word} is neither a corpus definition nor a directory\n\n{}",
+                explain_the_missing_target(options.command, corpora, config, data_dir)
+            ));
+        }
+        let extensions: &[String] = match (&options.extensions, options.same_work) {
+            (Some(extensions), true) => extensions,
+            (Some(_), false) => {
+                return Err(
+                    "--extensions in ab goes with --same-work; without it each instance runs with \
+                     its own arguments"
+                        .to_string(),
+                );
+            }
+            (None, true) => {
+                return Err(format!(
+                    "say what to count in {}, with --extensions rs,c",
+                    checkout.display()
+                ));
+            }
+            (None, false) => &[],
+        };
+        let mut corpus = build_corpus_of(&checkout, extensions)?;
+        if named.len() > 1 || (word != "." && word != "..") {
+            corpus.name = word.clone();
+        }
+        taken.push((corpus, checkout));
+    }
+    if !has_folder && options.extensions.is_some() {
+        let declared = match named.iter().any(|word| word == EVERYTHING) {
+            true => "every corpus",
+            false => &named[0],
+        };
+        return Err(explain_the_declared_extensions(declared));
+    }
+    check_the_crowded_checkout(options, &named_corpora)?;
     Ok(ChosenCorpora { taken, left_behind })
 }
 
@@ -975,10 +1071,14 @@ fn explain_the_missing_target(
         .iter()
         .map(|corpus| format!("\x20 {}", fetched(&corpus.name)))
         .collect();
+    let tree = match command {
+        Some(Command::Ab) => "<dir>",
+        _ => "<dir> --extensions rs,c",
+    };
     format!(
         "Say what to count, either a corpus definition or a tree of your own.\n\n\
          \x20 linebench {verb} {}\n\
-         \x20 linebench {verb} <dir> --extensions rs,c\n\n{}",
+         \x20 linebench {verb} {tree}\n\n{}",
         corpora
             .iter()
             .map(|corpus| corpus.name.as_str())
@@ -1650,6 +1750,107 @@ mod tests {
         );
         let declared = refused("run linux,jdk --extensions rs");
         assert!(declared.contains("linux declares its own"), "{declared}");
+    }
+
+    #[test]
+    fn ab_takes_corpora_and_folders_in_one_list_and_keeps_each_folder_path_as_its_name() {
+        let config: Config = toml::from_str(
+            "counters = \"D:/c\"\n[corpora]\nlinux = \"D:/linux\"\nsrc = \"D:/src\"\n",
+        )
+        .unwrap();
+        let corpora = ["linux", "src"].map(named_corpus).to_vec();
+        let conf = Path::new("linebench.conf");
+        let data = Some(Path::new("D:/data/linebench"));
+
+        let mixed = resolve_locations(
+            &parse("ab linux,./src,src/bin").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap();
+        let names: Vec<&str> = mixed
+            .locations
+            .iter()
+            .map(|one| one.corpus.name.as_str())
+            .collect();
+        assert_eq!(names, ["linux", "./src", "src/bin"]);
+        assert_eq!(mixed.locations[0].corpus.extensions, ["c"]);
+        assert!(mixed.locations[1].corpus.extensions.is_empty());
+
+        let with_same_work = resolve_locations(
+            &parse("ab linux,./src --same-work --extensions rs").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap();
+        assert_eq!(with_same_work.locations[0].corpus.extensions, ["c"]);
+        assert_eq!(with_same_work.locations[1].corpus.extensions, ["rs"]);
+
+        let missing_ext = resolve_locations(
+            &parse("ab linux,./src --same-work").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap_err();
+        assert!(
+            missing_ext.starts_with("say what to count in"),
+            "{missing_ext}"
+        );
+
+        let shadowed =
+            resolve_locations(&parse("ab src").unwrap(), &config, conf, &corpora, data).unwrap();
+        assert_eq!(shadowed.locations[0].checkout, PathBuf::from("D:/src"));
+        assert_eq!(
+            shadowed.left_behind,
+            ["src: counting the corpus; write ./src to count the directory here"]
+        );
+
+        let only_corpora = resolve_locations(
+            &parse("ab linux --extensions rs").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap_err();
+        assert!(
+            only_corpora.contains("linux declares its own"),
+            "{only_corpora}"
+        );
+
+        let without_same_work = resolve_locations(
+            &parse("ab ./src --extensions rs").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap_err();
+        assert!(
+            without_same_work.contains("--same-work"),
+            "{without_same_work}"
+        );
+
+        let dot_and_rest = resolve_locations(
+            &parse("ab .,./src,all --corpus-path .").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap();
+        let dot_names: Vec<&str> = dot_and_rest
+            .locations
+            .iter()
+            .map(|one| one.corpus.name.as_str())
+            .collect();
+        assert_eq!(dot_names, [".", "./src", "src"]);
     }
 
     #[test]

@@ -381,7 +381,7 @@ By default an instance runs with the definition's target argument and its own `-
 all two builds of one counter need. `--same-work` adds the definition's same-work flags and
 languages, as the first table of a run does, for two different counters. `--counters a,b,...`
 names the baseline first and each candidate held against it; without it the two given instances are
-the pair, a before b by name. Several corpora, `ab linux,cpython`, are measured in turn. Linux
+the pair, a before b by name. Several targets, `ab linux,cpython,./src`, are measured in turn. Linux
 only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are user
 space alone.
 
