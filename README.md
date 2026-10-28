@@ -374,16 +374,16 @@ one run of each that fills the page cache and checks that they counted the same:
 
 The instructions ratio holds to 0.01% between two runs of the same binary, so a change of 0.1% is
 real. The cycles and wall pool both orders, and a cycles change under one percent is noise. The
-results stay on the screen, the machine is left as it is, and `run` stays the command for numbers
-that are kept.
+results stay on the screen, or go to `--json <path>` when a script asks for them, the machine is
+left as it is, and `run` stays the command for numbers that are kept.
 
 By default an instance runs with the definition's target argument and its own `--args`, which is
 all two builds of one counter need. `--same-work` adds the definition's same-work flags and
 languages, as the first table of a run does, for two different counters. `--counters a,b,...`
 names the baseline first and each candidate held against it; without it the two given instances are
-the pair, a before b by name. Several targets, `ab linux,cpython,./src`, are measured in turn. Linux
-only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are user
-space alone.
+the pair, a before b by name. Several targets, `ab linux,cpython,./src`, are measured in turn.
+Linux only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are
+user space alone.
 
 ### report
 

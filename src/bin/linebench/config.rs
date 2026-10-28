@@ -126,6 +126,7 @@ pub struct Options {
     pub latest: bool,
     pub dry_run: bool,
     pub only: Option<Vec<String>>,
+    pub json: Option<PathBuf>,
     #[cfg(feature = "maintenance")]
     pub as_json: bool,
 }
@@ -200,7 +201,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 options.command = Some(Command::BumpVersions);
             }
             #[cfg(feature = "maintenance")]
-            "--json" => options.as_json = true,
+            "--json"
+                if attached.is_none() && args.iter().skip(1).any(|arg| arg == "bump-versions") =>
+            {
+                options.as_json = true;
+            }
+            "--json" => options.json = Some(PathBuf::from(value()?)),
             "--help" | "-h" => {
                 options.help = Some(match options.command {
                     Some(command) => find_help_of(command.as_str()),
@@ -1949,6 +1955,7 @@ mod tests {
             "run linux -y",
             "insights linux -y",
             "ab linux --runs 9 --same-work",
+            "ab linux --json /tmp/ab.json",
             "ab linux,cpython --counters mezura,mezura@dev --env mezura@dev=ONE=1",
             "check linux --env mezura@dev=ONE=1",
             "insights linux --env mezura@dev=ONE=1",
@@ -1959,6 +1966,7 @@ mod tests {
         assert!(parse("check linux -y").is_err());
         for line in [
             "run linux --same-work",
+            "run linux --json /tmp/ab.json",
             "ab linux --out /tmp/x",
             "ab linux --control mezura",
         ] {

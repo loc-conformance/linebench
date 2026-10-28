@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::Value;
 
 use linebench::corpus::{
@@ -65,7 +66,7 @@ use linebench::verify::{Session, Verification, check_insights, check_run, find_r
 
 use crate::config::{
     Chosen, Config, FetchPlan, GivenEntry, Locations, Options, choose_corpus_home,
-    choose_counters_dir, find_settled_results_dir, show_path,
+    choose_counters_dir, find_dry_run_dir, find_settled_results_dir, show_path,
 };
 use crate::instances::{ChosenInstances, build_instances};
 use crate::output::{
@@ -407,7 +408,10 @@ pub fn run_ab(
         false => Table::OutOfTheBox,
     };
     let width = widest(locations.iter().map(|one| one.corpus.name.as_str()));
+    let cpu_frequency = describe_cpu_frequency();
     let mut described = false;
+    let mut ab_instances = Vec::new();
+    let mut comparisons = Vec::new();
     let mut code = 0;
     for one in locations {
         check_commit(&one.corpus, &one.checkout)?;
@@ -434,9 +438,11 @@ pub fn run_ab(
                     out,
                     &format!("   {letter:<label_width$}  {}", describe_instance(instance)),
                 )?;
+                ab_instances.push(AbInstance::of(letter, instance));
             }
-            let frequency =
-                describe_cpu_frequency().map_or(String::new(), |said| format!(", {said}"));
+            let frequency = cpu_frequency
+                .as_deref()
+                .map_or(String::new(), |said| format!(", {said}"));
             print_line(
                 out,
                 &format!("   {version}, {runs} runs x 4 (a b b a){frequency}"),
@@ -518,23 +524,39 @@ pub fn run_ab(
                 _ => "",
             };
             let b_label = candidate_label(candidate);
-            for line in lay_out_ab(
-                tree,
-                width,
+            let difference = find_count_differences(&counted[0], &counted[candidate], &b_label);
+            let comparison = build_ab_comparison(
+                &one.corpus.name,
                 &b_label,
                 &a,
                 &b,
                 [&counted[0], &counted[candidate]],
-            ) {
+                difference.is_none(),
+            );
+            for line in lay_out_ab(tree, width, &comparison) {
                 print_line(out, &line)?;
             }
-            if let Some(difference) =
-                find_count_differences(&counted[0], &counted[candidate], &b_label)
-            {
+            comparisons.push(comparison);
+            if let Some(difference) = difference {
                 print_warning(out, &format!("{}: {difference}", one.corpus.name))?;
                 code = 1;
             }
         }
+    }
+    if let Some(path) = &options.json {
+        let into = match options.dry_run {
+            true => find_dry_run_dir().join("ab.json"),
+            false => path.clone(),
+        };
+        let summary = AbSummary {
+            profiler: version.clone(),
+            runs,
+            cpu_frequency,
+            same_work: options.same_work,
+            instances: ab_instances,
+            comparisons,
+        };
+        write_ab_summary(&into, &summary)?;
     }
     Ok(code)
 }
@@ -601,49 +623,42 @@ fn describe_same_build(a: &Instance, b: &Instance) -> Option<String> {
 }
 
 /// The means of a and b across both orders and b over a under them.
-fn lay_out_ab(
-    tree: &str,
-    width: usize,
-    b_label: &str,
-    a: &[UserCounts; 2],
-    b: &[UserCounts; 2],
-    counted: [&Counts; 2],
-) -> [String; 3] {
-    let instructions = |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
-    let cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
-    let ratio = |over: u64, under: u64| over as f64 / under as f64;
+fn lay_out_ab(tree: &str, width: usize, comparison: &AbComparison) -> [String; 3] {
+    let (a, b) = (&comparison.a, &comparison.b);
     let mut columns = vec![
         [
-            format!("{} instructions", format_millions(instructions(a) / 2)),
-            format!("{} instructions", format_millions(instructions(b) / 2)),
-            format!("{:.4}x", ratio(instructions(b), instructions(a))),
+            format!("{} instructions", format_millions(a.instructions)),
+            format!("{} instructions", format_millions(b.instructions)),
+            format!("{:.4}x", comparison.instructions_ratio),
         ],
         [
-            format!("{} cycles", format_millions(cycles(a) / 2)),
-            format!("{} cycles", format_millions(cycles(b) / 2)),
-            format!("{:.3}x", ratio(cycles(b), cycles(a))),
+            format!("{} cycles", format_millions(a.cycles)),
+            format!("{} cycles", format_millions(b.cycles)),
+            format!("{:.3}x", comparison.cycles_ratio),
         ],
     ];
-    if let ([Some(a0), Some(a1)], [Some(b0), Some(b1)]) =
-        ([a[0].wall, a[1].wall], [b[0].wall, b[1].wall])
-    {
-        let a_ns = a0.ns + a1.ns;
-        let b_ns = b0.ns + b1.ns;
+    if let (Some(a_ns), Some(a_noise), Some(b_ns), Some(b_noise), Some(wall_ratio)) = (
+        a.wall_ns,
+        a.wall_noise_pct,
+        b.wall_ns,
+        b.wall_noise_pct,
+        comparison.wall_ratio,
+    ) {
         columns.push([
-            format_ab_wall(a_ns, a0.noise_pct.max(a1.noise_pct)),
-            format_ab_wall(b_ns, b0.noise_pct.max(b1.noise_pct)),
-            format!("{:.3}x", ratio(b_ns, a_ns)),
+            format_ab_wall(a_ns, a_noise),
+            format_ab_wall(b_ns, b_noise),
+            format!("{wall_ratio:.3}x"),
         ]);
     }
     columns.extend([
         [
-            format!("{} files", format_thousands(counted[0].files)),
-            format!("{} files", format_thousands(counted[1].files)),
+            format!("{} files", format_thousands(a.files)),
+            format!("{} files", format_thousands(b.files)),
             String::new(),
         ],
         [
-            format!("{} lines", format_thousands(counted[0].lines)),
-            format!("{} lines", format_thousands(counted[1].lines)),
+            format!("{} lines", format_thousands(a.lines)),
+            format!("{} lines", format_thousands(b.lines)),
             String::new(),
         ],
     ]);
@@ -651,7 +666,7 @@ fn lay_out_ab(
         .iter()
         .map(|col| widest(col.iter().map(String::as_str)))
         .collect();
-    let ratio_label = format!("{b_label} / a");
+    let ratio_label = format!("{} / a", comparison.candidate);
     let label_width = ratio_label.chars().count();
     let row = |at: usize, head: &str, label: &str| {
         let mut line = format!("{ROW_OPENING}{head:<width$}{COUNT_GAP}{label:<label_width$}  ");
@@ -671,17 +686,131 @@ fn lay_out_ab(
     };
     [
         row(0, tree, "a"),
-        row(1, "", b_label),
+        row(1, "", &comparison.candidate),
         row(2, "", &ratio_label),
     ]
 }
 
 fn format_ab_wall(ns: u64, noise_pct: f64) -> String {
-    let ms = format_thousands(((ns as f64) / 2_000_000.0).round() as u64);
+    let ms = format_thousands(((ns as f64) / 1_000_000.0).round() as u64);
     match noise_pct > 0.0 {
         true => format!("{ms} ms ±{noise_pct:.1}%"),
         false => format!("{ms} ms"),
     }
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbSummary {
+    profiler: String,
+    runs: u32,
+    cpu_frequency: Option<String>,
+    same_work: bool,
+    instances: Vec<AbInstance>,
+    comparisons: Vec<AbComparison>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct AbInstance {
+    label: String,
+    instance: String,
+    counter: String,
+    version: String,
+    sha256: String,
+    origin: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+}
+
+impl AbInstance {
+    fn of(label: &str, instance: &Instance) -> AbInstance {
+        AbInstance {
+            label: label.to_string(),
+            instance: instance.get_name().to_string(),
+            counter: instance.identity.counter.clone(),
+            version: instance.identity.version.clone(),
+            sha256: instance.identity.sha256.clone(),
+            origin: instance.identity.describe_origin(),
+            args: instance.args.clone(),
+            env: instance.env.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbComparison {
+    target: String,
+    candidate: String,
+    a: AbSide,
+    b: AbSide,
+    instructions_ratio: f64,
+    cycles_ratio: f64,
+    wall_ratio: Option<f64>,
+    equal_counts: bool,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbSide {
+    instructions: u64,
+    cycles: u64,
+    wall_ns: Option<u64>,
+    wall_noise_pct: Option<f64>,
+    files: u64,
+    lines: u64,
+}
+
+fn build_ab_comparison(
+    target: &str,
+    candidate: &str,
+    a: &[UserCounts; 2],
+    b: &[UserCounts; 2],
+    counted: [&Counts; 2],
+    equal_counts: bool,
+) -> AbComparison {
+    let instructions = |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
+    let cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
+    let ratio = |over: u64, under: u64, places: i32| {
+        let scale = 10_f64.powi(places);
+        ((over as f64 / under as f64) * scale).round() / scale
+    };
+    let wall = match ([a[0].wall, a[1].wall], [b[0].wall, b[1].wall]) {
+        ([Some(a0), Some(a1)], [Some(b0), Some(b1)]) => Some((
+            (a0.ns + a1.ns) / 2,
+            a0.noise_pct.max(a1.noise_pct),
+            (b0.ns + b1.ns) / 2,
+            b0.noise_pct.max(b1.noise_pct),
+            ratio(b0.ns + b1.ns, a0.ns + a1.ns, 3),
+        )),
+        _ => None,
+    };
+    let side = |counts: &[UserCounts; 2], wall: Option<(u64, f64)>, counted: &Counts| AbSide {
+        instructions: instructions(counts) / 2,
+        cycles: cycles(counts) / 2,
+        wall_ns: wall.map(|(ns, _)| ns),
+        wall_noise_pct: wall.map(|(_, noise)| noise),
+        files: counted.files,
+        lines: counted.lines,
+    };
+    AbComparison {
+        target: target.to_string(),
+        candidate: candidate.to_string(),
+        a: side(a, wall.map(|(ns, noise, ..)| (ns, noise)), counted[0]),
+        b: side(b, wall.map(|(_, _, ns, noise, _)| (ns, noise)), counted[1]),
+        instructions_ratio: ratio(instructions(b), instructions(a), 4),
+        cycles_ratio: ratio(cycles(b), cycles(a), 3),
+        wall_ratio: wall.map(|(.., ratio)| ratio),
+        equal_counts,
+    }
+}
+
+fn write_ab_summary(path: &Path, summary: &AbSummary) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("{} could not be created: {error}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(summary)
+        .map_err(|error| format!("the ab summary could not be serialised: {error}"))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
 }
 
 fn find_count_differences(a: &Counts, b: &Counts, b_label: &str) -> Option<String> {
@@ -3259,16 +3388,28 @@ mod tests {
                 }),
             },
         ];
+        let comparison = build_ab_comparison("linux", "b", &a, &b, [&counted, &counted], true);
+        assert_eq!(comparison.a.instructions, 2_000_000_000);
+        assert_eq!(comparison.b.instructions, 1_990_000_000);
+        assert_eq!(comparison.a.cycles, 810_000_000);
+        assert_eq!(comparison.b.cycles, 808_050_000);
+        assert_eq!(comparison.a.wall_ns, Some(185_000_000));
+        assert_eq!(comparison.b.wall_ns, Some(192_400_000));
+        assert_eq!(comparison.instructions_ratio, 0.995);
+        assert_eq!(comparison.cycles_ratio, 0.998);
+        assert_eq!(comparison.wall_ratio, Some(1.04));
+        assert!(comparison.equal_counts);
         assert_eq!(
-            lay_out_ab("linux", 5, "b", &a, &b, [&counted, &counted]),
+            lay_out_ab("linux", 5, &comparison),
             [
                 "   linux   a      2000M instructions   810M cycles   185 ms ±0.4%   63,738 files   36,012,345 lines",
                 "           b      1990M instructions   808M cycles   192 ms ±0.5%   63,738 files   36,012,345 lines",
                 "           b / a  0.9950x              0.998x        1.040x",
             ]
         );
+        let second = build_ab_comparison("linux", "b2", &a, &b, [&counted, &counted], true);
         assert_eq!(
-            lay_out_ab("", 5, "b2", &a, &b, [&counted, &counted]),
+            lay_out_ab("", 5, &second),
             [
                 "           a       2000M instructions   810M cycles   185 ms ±0.4%   63,738 files   36,012,345 lines",
                 "           b2      1990M instructions   808M cycles   192 ms ±0.5%   63,738 files   36,012,345 lines",
@@ -3277,15 +3418,16 @@ mod tests {
         );
         let without_wall =
             |counts: &[UserCounts; 2]| counts.map(|one| UserCounts { wall: None, ..one });
+        let no_wall = build_ab_comparison(
+            "linux",
+            "b",
+            &without_wall(&a),
+            &without_wall(&b),
+            [&counted, &counted],
+            true,
+        );
         assert_eq!(
-            lay_out_ab(
-                "linux",
-                5,
-                "b",
-                &without_wall(&a),
-                &without_wall(&b),
-                [&counted, &counted]
-            ),
+            lay_out_ab("linux", 5, &no_wall),
             [
                 "   linux   a      2000M instructions   810M cycles   63,738 files   36,012,345 lines",
                 "           b      1990M instructions   808M cycles   63,738 files   36,012,345 lines",

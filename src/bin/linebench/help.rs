@@ -145,8 +145,8 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
 
 linebench ab <corpora|all|dir> [--counters a,b,...] [--runs <n>] [--same-work] [--extensions rs,c]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
-                [--env <c>@<tag>=<NAME>=<v>] [--counters-dir <dir>] [--add <path>]
-                [--corpus-path <dir>]
+                [--env <c>@<tag>=<NAME>=<v>] [--json <path>] [--counters-dir <dir>]
+                [--add <path>] [--corpus-path <dir>]
 
     Compares baseline a against each candidate b under perf stat in the order a, b, b, a,
     reporting user-space instructions, cycles, wall time and b / a ratios. Each instance runs
@@ -164,6 +164,7 @@ linebench ab <corpora|all|dir> [--counters a,b,...] [--runs <n>] [--same-work] [
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target
     --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
+    --json <path>              write the summary to <path> as JSON
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
