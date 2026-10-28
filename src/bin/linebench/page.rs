@@ -24,8 +24,9 @@ const VERIFY_INVITE: &str = "Every number here comes out of a record under this 
                              those records make, and `linebench verify <run directory>` reads \
                              one of them back and holds its numbers against each other.";
 const LOCAL_NOTE: &str = "Runs holding an instance given by hand, a build of your own or a \
-                          release carrying arguments of its own. They compare one build with \
-                          another on this machine and say nothing about the released counters.";
+                          release carrying arguments or an environment of its own. They compare \
+                          one build with another on this machine and say nothing about the \
+                          released counters.";
 const RUN_DEPTH: usize = 3;
 const LONG_CONTEXT_VALUE: usize = 60;
 const CONTEXT: [(&str, ReadContext); 12] = [

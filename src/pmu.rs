@@ -16,6 +16,8 @@ pub const OPEN_PARANOID: i64 = 1;
 pub const USER_PARANOID: i64 = 2;
 pub const RUNS: u32 = 5;
 pub const AB_RUNS: u32 = 15;
+pub const AB_WARMUP: u32 = 3;
+pub const FILE_RUNS: u32 = 3;
 pub const FULL_RUN: f64 = 100.0;
 pub const USER_ONLY: &str = ":u";
 pub const INSTRUCTIONS: &str = "instructions";
@@ -189,14 +191,6 @@ pub fn count_user_events(
         .map(|event| format!("{event}{USER_ONLY}"))
         .collect();
     let read = count_events(subject, &events.join(EVENT_SEPARATOR), runs, path)?;
-    let find = |event: &str| {
-        find_user_count(&read, event).ok_or_else(|| {
-            format!(
-                "{PROFILER} read no {event}{USER_ONLY} for {}",
-                subject.instance
-            )
-        })
-    };
     let wall = find_user_reading(&read, DURATION_TIME).and_then(|reading| {
         reading.count.map(|ns| Wall {
             ns,
@@ -204,10 +198,16 @@ pub fn count_user_events(
         })
     });
     Ok(UserCounts {
-        instructions: find(INSTRUCTIONS)?,
-        cycles: find(CYCLES)?,
+        instructions: require_user_count(&read, subject.instance, INSTRUCTIONS)?,
+        cycles: require_user_count(&read, subject.instance, CYCLES)?,
         wall,
     })
+}
+
+pub fn count_user_instructions(subject: &Subject, runs: u32, path: &Path) -> Result<u64, String> {
+    let event = format!("{INSTRUCTIONS}{USER_ONLY}");
+    let read = count_events(subject, &event, runs, path)?;
+    require_user_count(&read, subject.instance, INSTRUCTIONS)
 }
 
 /// One execution with its output kept, which fills the page cache before anything is counted.
@@ -218,10 +218,7 @@ pub fn run_once(subject: &Subject) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for name in subject.scrub {
-        command.env_remove(name);
-    }
-    command.envs(subject.env);
+    apply_subject_env(&mut command, subject);
     let finished = command
         .output()
         .map_err(|error| format!("{} could not be run, {error}", subject.instance))?;
@@ -297,10 +294,7 @@ fn count_events(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    for name in subject.scrub {
-        command.env_remove(name);
-    }
-    command.envs(subject.env);
+    apply_subject_env(&mut command, subject);
     let finished = command
         .output()
         .map_err(|error| format!("{} could not be profiled, {error}", subject.instance))?;
@@ -315,6 +309,18 @@ fn count_events(
     let text = fs::read_to_string(path)
         .map_err(|error| format!("{} could not be read, {error}", path.display()))?;
     Ok(parse_counts(&text))
+}
+
+fn apply_subject_env(command: &mut Command, subject: &Subject) {
+    for name in subject.scrub {
+        command.env_remove(name);
+    }
+    command.envs(subject.env);
+}
+
+fn require_user_count(readings: &[Reading], instance: &str, event: &str) -> Result<u64, String> {
+    find_user_count(readings, event)
+        .ok_or_else(|| format!("{PROFILER} read no {event}{USER_ONLY} for {instance}"))
 }
 
 /// perf prints a `:u` event under that name, so the event is found with or without its suffix.

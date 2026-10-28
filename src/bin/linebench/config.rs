@@ -27,6 +27,8 @@ const THE_DATA_DIR: &str = "the data directory";
 pub const OUT_ENV: &str = "LINEBENCH_OUT";
 pub const DEFAULT_OUT: &str = "results";
 pub const DRY_RUN_DIR: &str = "linebench-dry-run";
+const DEFAULT_FILES: usize = 10;
+const MAX_FILES: usize = 100;
 pub const COMMANDS: [&str; 9] = [
     "run", "fetch", "check", "noise", "insights", "ab", "report", "status", "verify",
 ];
@@ -127,6 +129,7 @@ pub struct Options {
     pub dry_run: bool,
     pub only: Option<Vec<String>>,
     pub json: Option<PathBuf>,
+    pub files: Option<usize>,
     #[cfg(feature = "maintenance")]
     pub as_json: bool,
 }
@@ -155,6 +158,12 @@ pub struct Locations {
     pub given: BTreeMap<String, GivenEntry>,
     pub control: Option<String>,
     pub skip: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chosen {
+    pub path: PathBuf,
+    pub said_by: String,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -313,6 +322,25 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 }
                 options.runs = Some(runs);
             }
+            "--files" => {
+                let count = match &attached {
+                    Some(text) if !text.is_empty() => parse_file_limit(flag, text)?,
+                    Some(_) => return Err(format!("{flag} needs a value")),
+                    None => match rest.clone().next() {
+                        Some(next)
+                            if !next.starts_with('-')
+                                && !COMMANDS.contains(&next.as_str())
+                                && (options.target.is_some()
+                                    || next.bytes().next().is_some_and(|b| b.is_ascii_digit())) =>
+                        {
+                            let text = rest.next().unwrap();
+                            parse_file_limit(flag, text)?
+                        }
+                        _ => DEFAULT_FILES,
+                    },
+                };
+                options.files = Some(count);
+            }
             "--settle" => options.settle = Some(parse_number(flag, &value()?)?),
             "--out" => options.out = Some(PathBuf::from(value()?)),
             "--no-prep" => options.no_prep = true,
@@ -412,17 +440,6 @@ pub fn find_settled_results_dir(config: &Config) -> PathBuf {
     find_out_dir(None, config)
 }
 
-fn find_out_dir(named: Option<PathBuf>, config: &Config) -> PathBuf {
-    let out = named
-        .or_else(|| read_env(OUT_ENV).map(PathBuf::from))
-        .or_else(|| config.out.clone())
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT));
-    match out.is_absolute() {
-        true => out,
-        false => env::current_dir().unwrap_or_default().join(out),
-    }
-}
-
 pub fn resolve_fetch(
     options: &Options,
     config: &Config,
@@ -455,7 +472,7 @@ pub fn resolve_fetch(
         .into_iter()
         .map(|corpus| {
             let checkout = find_checkout(&corpus.name, options, config)
-                .or_else(|| place_for_corpus(&corpus.name, data_dir))
+                .or_else(|| find_corpus_in_data_dir(&corpus.name, data_dir))
                 .ok_or_else(|| explain_the_homeless_corpus(&corpus.name))?;
             Ok((corpus, checkout))
         })
@@ -464,12 +481,6 @@ pub fn resolve_fetch(
         counters_dir,
         corpora: taken,
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Chosen {
-    pub path: PathBuf,
-    pub said_by: String,
 }
 
 pub fn choose_counters_dir(
@@ -504,7 +515,7 @@ pub fn choose_corpus_home(name: &str, config: &Config, data_dir: Option<&Path>) 
             said_by: THE_CONF.to_string(),
         });
     }
-    place_for_corpus(name, data_dir).map(|path| Chosen {
+    find_corpus_in_data_dir(name, data_dir).map(|path| Chosen {
         path,
         said_by: THE_DATA_DIR.to_string(),
     })
@@ -524,6 +535,81 @@ pub fn show_path(path: &Path) -> String {
     match cfg!(windows) {
         true => shown.replace('/', "\\"),
         false => shown,
+    }
+}
+
+pub fn resolve_locations(
+    options: &Options,
+    config: &Config,
+    config_path: &Path,
+    corpora: &[Corpus],
+    data_dir: Option<&Path>,
+) -> Result<Wanted, String> {
+    let counters_dir = resolve_counters_dir(options, config, config_path, data_dir)?;
+    let chosen = choose_corpora(options, config, config_path, corpora, data_dir)?;
+    let given = build_given(options, config)?;
+    let out = resolve_out(options, config);
+    let history = find_results_dir(options, config);
+    let staging = match options.dry_run {
+        true => find_dry_run_dir(),
+        false => counters_dir.clone(),
+    };
+    let locations = chosen
+        .taken
+        .into_iter()
+        .map(|(corpus, checkout)| Locations {
+            counters_dir: counters_dir.clone(),
+            staging: staging.clone(),
+            corpus,
+            checkout,
+            out: out.clone(),
+            history: history.clone(),
+            given: given.clone(),
+            control: config.control.clone(),
+            skip: config.skip.clone(),
+        })
+        .collect();
+    Ok(Wanted {
+        counters_dir,
+        locations,
+        left_behind: chosen.left_behind,
+    })
+}
+
+pub fn check_skip_names(
+    skip: &[String],
+    counters: &[Definition],
+    config_path: &Path,
+) -> Result<(), String> {
+    match skip
+        .iter()
+        .find(|name| !counters.iter().any(|d| &d.name == *name))
+    {
+        Some(name) => Err(format!(
+            "{}: skip names {name}, and no counter definition has that name",
+            config_path.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+pub fn read_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+struct ChosenCorpora {
+    taken: Vec<(Corpus, PathBuf)>,
+    left_behind: Vec<String>,
+}
+
+fn find_out_dir(named: Option<PathBuf>, config: &Config) -> PathBuf {
+    let out = named
+        .or_else(|| read_env(OUT_ENV).map(PathBuf::from))
+        .or_else(|| config.out.clone())
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT));
+    match out.is_absolute() {
+        true => out,
+        false => env::current_dir().unwrap_or_default().join(out),
     }
 }
 
@@ -564,12 +650,41 @@ fn find_a_checkout_that_is_here(
     data_dir: Option<&Path>,
 ) -> Option<PathBuf> {
     find_checkout(name, options, config)
-        .or_else(|| place_for_corpus(name, data_dir))
+        .or_else(|| find_corpus_in_data_dir(name, data_dir))
         .filter(|path| path.is_dir())
 }
 
-fn place_for_corpus(name: &str, data_dir: Option<&Path>) -> Option<PathBuf> {
+fn find_corpus_in_data_dir(name: &str, data_dir: Option<&Path>) -> Option<PathBuf> {
     data_dir.map(|dir| dir.join(CORPORA_DIR_NAME).join(name))
+}
+
+fn resolve_corpus_checkout(
+    name: &str,
+    options: &Options,
+    config: &Config,
+    config_path: &Path,
+    data_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    find_checkout(name, options, config)
+        .or_else(|| find_corpus_in_data_dir(name, data_dir).filter(|path| path.is_dir()))
+        .ok_or_else(|| explain_the_missing_checkout(name, config_path, data_dir))
+}
+
+fn check_target_directory(
+    path: &str,
+    options: &Options,
+    config: &Config,
+    corpora: &[Corpus],
+    data_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let checkout = PathBuf::from(path);
+    if !checkout.is_dir() {
+        return Err(format!(
+            "{path} is neither a corpus definition nor a directory\n\n{}",
+            explain_the_missing_target(options.command, corpora, config, data_dir)
+        ));
+    }
+    Ok(checkout)
 }
 
 fn name_the_corpora(corpora: &[Corpus]) -> String {
@@ -581,7 +696,7 @@ fn name_the_corpora(corpora: &[Corpus]) -> String {
 }
 
 fn explain_the_missing_checkout(name: &str, config_path: &Path, data_dir: Option<&Path>) -> String {
-    let downloaded = place_for_corpus(name, data_dir)
+    let downloaded = find_corpus_in_data_dir(name, data_dir)
         .map(|path| format!("   puts it in {}", show_path(&path)))
         .unwrap_or_else(|| "   downloads it".to_string());
     let mut lines = vec![
@@ -679,65 +794,6 @@ fn explain_what_fetch_takes(
     )
 }
 
-pub fn resolve_locations(
-    options: &Options,
-    config: &Config,
-    config_path: &Path,
-    corpora: &[Corpus],
-    data_dir: Option<&Path>,
-) -> Result<Wanted, String> {
-    let counters_dir = resolve_counters_dir(options, config, config_path, data_dir)?;
-    let chosen = choose_corpora(options, config, config_path, corpora, data_dir)?;
-    let given = build_given(options, config)?;
-    let out = resolve_out(options, config);
-    let history = find_results_dir(options, config);
-    let staging = match options.dry_run {
-        true => find_dry_run_dir(),
-        false => counters_dir.clone(),
-    };
-    let locations = chosen
-        .taken
-        .into_iter()
-        .map(|(corpus, checkout)| Locations {
-            counters_dir: counters_dir.clone(),
-            staging: staging.clone(),
-            corpus,
-            checkout,
-            out: out.clone(),
-            history: history.clone(),
-            given: given.clone(),
-            control: config.control.clone(),
-            skip: config.skip.clone(),
-        })
-        .collect();
-    Ok(Wanted {
-        counters_dir,
-        locations,
-        left_behind: chosen.left_behind,
-    })
-}
-
-pub fn check_skip_names(
-    skip: &[String],
-    counters: &[Definition],
-    config_path: &Path,
-) -> Result<(), String> {
-    match skip
-        .iter()
-        .find(|name| !counters.iter().any(|d| &d.name == *name))
-    {
-        Some(name) => Err(format!(
-            "{}: skip names {name}, and no counter definition has that name",
-            config_path.display()
-        )),
-        None => Ok(()),
-    }
-}
-
-pub fn read_env(name: &str) -> Option<String> {
-    env::var(name).ok().filter(|value| !value.trim().is_empty())
-}
-
 fn read_targets(options: &Options) -> Result<Vec<String>, String> {
     let Some(text) = options.target.clone().or_else(|| read_env(TARGET_ENV)) else {
         return Ok(Vec::new());
@@ -765,11 +821,6 @@ fn split_the_targets(text: &str) -> Result<Vec<String>, String> {
         true => Err(format!("empty name in {text}")),
         false => Ok(named),
     }
-}
-
-struct ChosenCorpora {
-    taken: Vec<(Corpus, PathBuf)>,
-    left_behind: Vec<String>,
 }
 
 fn choose_corpora(
@@ -814,9 +865,8 @@ fn choose_corpora(
     let taken = wanted
         .into_iter()
         .map(|corpus| {
-            let checkout = find_checkout(&corpus.name, options, config)
-                .or_else(|| place_for_corpus(&corpus.name, data_dir).filter(|path| path.is_dir()))
-                .ok_or_else(|| explain_the_missing_checkout(&corpus.name, config_path, data_dir))?;
+            let checkout =
+                resolve_corpus_checkout(&corpus.name, options, config, config_path, data_dir)?;
             Ok((corpus, checkout))
         })
         .collect::<Result<Vec<(Corpus, PathBuf)>, String>>()?;
@@ -895,37 +945,33 @@ fn choose_ab_targets(
                     "{word}: counting the corpus; write ./{word} to count the directory here"
                 ));
             }
-            let checkout = find_checkout(&corpus.name, options, config)
-                .or_else(|| place_for_corpus(&corpus.name, data_dir).filter(|path| path.is_dir()))
-                .ok_or_else(|| explain_the_missing_checkout(&corpus.name, config_path, data_dir))?;
+            let checkout =
+                resolve_corpus_checkout(&corpus.name, options, config, config_path, data_dir)?;
             named_corpora.push(corpus.clone());
             taken.push((corpus.clone(), checkout));
             continue;
         }
         has_folder = true;
-        let checkout = PathBuf::from(word);
-        if !checkout.is_dir() {
-            return Err(format!(
-                "{word} is neither a corpus definition nor a directory\n\n{}",
-                explain_the_missing_target(options.command, corpora, config, data_dir)
-            ));
-        }
-        let extensions: &[String] = match (&options.extensions, options.same_work) {
+        let checkout = check_target_directory(word, options, config, corpora, data_dir)?;
+        let extensions: &[String] = match (
+            &options.extensions,
+            options.same_work || options.files.is_some(),
+        ) {
             (Some(extensions), true) => extensions,
             (Some(_), false) => {
                 return Err(
-                    "--extensions in ab goes with --same-work; without it each instance runs with \
-                     its own arguments"
+                    "--extensions in ab goes with --same-work or --files; without them each \
+                     instance runs with its own arguments"
                         .to_string(),
                 );
             }
-            (None, true) => {
+            (None, _) if options.same_work => {
                 return Err(format!(
                     "say what to count in {}, with --extensions rs,c",
                     checkout.display()
                 ));
             }
-            (None, false) => &[],
+            (None, _) => &[],
         };
         let mut corpus = build_corpus_of(&checkout, extensions)?;
         if named.len() > 1 || (word != "." && word != "..") {
@@ -963,13 +1009,7 @@ fn build_the_tree_corpus(
     corpora: &[Corpus],
     data_dir: Option<&Path>,
 ) -> Result<(Corpus, PathBuf), String> {
-    let checkout = PathBuf::from(path);
-    if !checkout.is_dir() {
-        return Err(format!(
-            "{path} is neither a corpus definition nor a directory\n\n{}",
-            explain_the_missing_target(options.command, corpora, config, data_dir)
-        ));
-    }
+    let checkout = check_target_directory(path, options, config, corpora, data_dir)?;
     let Some(extensions) = &options.extensions else {
         return Err(format!(
             "say what to count in {}, with --extensions rs,c",
@@ -1029,8 +1069,8 @@ fn build_given(options: &Options, config: &Config) -> Result<BTreeMap<String, Gi
             Some(entry) => entry.definition = Some(definition.clone()),
             None => {
                 return Err(format!(
-                    "--definition {instance}=... names an instance that no --given, --args or \
-                     [given] entry makes"
+                    "--definition {instance}=... names an instance that no --given, --args, \
+                     --env or [given] entry makes"
                 ));
             }
         }
@@ -1065,11 +1105,7 @@ fn explain_the_missing_target(
             .corpora
             .get(name)
             .cloned()
-            .or_else(|| {
-                data_dir
-                    .map(|dir| dir.join(CORPORA_DIR_NAME).join(name))
-                    .filter(|path| path.is_dir())
-            })
+            .or_else(|| find_corpus_in_data_dir(name, data_dir).filter(|path| path.is_dir()))
             .map(|path| format!("{name} is at {}", path.display()))
             .unwrap_or_else(|| format!("{name} is not on this machine yet"))
     };
@@ -1166,6 +1202,16 @@ fn split_assignment(flag: &str, text: &str) -> Result<(String, String), String> 
 fn parse_number(flag: &str, text: &str) -> Result<u32, String> {
     text.parse()
         .map_err(|_| format!("{flag} takes a whole number, and {text} is not one"))
+}
+
+fn parse_file_limit(flag: &str, text: &str) -> Result<usize, String> {
+    let count = parse_number(flag, text)? as usize;
+    if !(1..=MAX_FILES).contains(&count) {
+        return Err(format!(
+            "{flag} takes 1 to {MAX_FILES}, and {count} is outside that"
+        ));
+    }
+    Ok(count)
 }
 
 fn find_home() -> Option<PathBuf> {
@@ -1457,7 +1503,7 @@ mod tests {
         let orphan = parse("run linux --definition scc@x=D:/x.toml").unwrap();
         let refusal = resolve_one(&orphan, &config, conf, &corpora, data).unwrap_err();
         assert!(
-            refusal.contains("no --given, --args or [given] entry"),
+            refusal.contains("no --given, --args, --env or [given] entry"),
             "{refusal}"
         );
     }
@@ -1843,6 +1889,16 @@ mod tests {
             "{without_same_work}"
         );
 
+        let with_files = resolve_locations(
+            &parse("ab ./src --files 5 --extensions rs").unwrap(),
+            &config,
+            conf,
+            &corpora,
+            data,
+        )
+        .unwrap();
+        assert_eq!(with_files.locations[0].corpus.extensions, ["rs"]);
+
         let dot_and_rest = resolve_locations(
             &parse("ab .,./src,all --corpus-path .").unwrap(),
             &config,
@@ -1987,6 +2043,43 @@ mod tests {
         assert_eq!(
             parse("run linux --runs 0").unwrap_err(),
             "--runs takes a number above zero"
+        );
+        assert_eq!(parse("ab linux --files").unwrap().files, Some(10));
+        assert_eq!(
+            parse("ab linux --files --same-work").unwrap().files,
+            Some(10)
+        );
+        assert_eq!(parse("ab --files linux").unwrap().files, Some(10));
+        assert_eq!(
+            parse("ab --files linux").unwrap().target.as_deref(),
+            Some("linux")
+        );
+        assert_eq!(
+            parse("ab --files linux --same-work").unwrap().files,
+            Some(10)
+        );
+        assert_eq!(
+            parse("ab --files linux --same-work")
+                .unwrap()
+                .target
+                .as_deref(),
+            Some("linux")
+        );
+        assert_eq!(parse("--files ab linux").unwrap().files, Some(10));
+        assert_eq!(parse("ab linux --files 25").unwrap().files, Some(25));
+        assert_eq!(parse("ab --files 25 linux").unwrap().files, Some(25));
+        assert_eq!(parse("ab linux --files=100").unwrap().files, Some(100));
+        assert_eq!(
+            parse("ab linux --files 0").unwrap_err(),
+            "--files takes 1 to 100, and 0 is outside that"
+        );
+        assert_eq!(
+            parse("ab linux --files 101").unwrap_err(),
+            "--files takes 1 to 100, and 101 is outside that"
+        );
+        assert_eq!(
+            parse("ab linux --files nope").unwrap_err(),
+            "--files takes a whole number, and nope is not one"
         );
     }
 

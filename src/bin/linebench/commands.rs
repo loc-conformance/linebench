@@ -18,16 +18,17 @@ use linebench::defender::{
     CounterBinary, DefenderState, ProcessExclusions, explain_unequal_exclusions,
     find_unequal_exclusions, judge_process_exclusions, read_defender_state,
 };
-use linebench::fetch::{GIVEN_DIR, Manifest, calculate_sha256, fetch_counter, read_manifest};
-use linebench::insight::Insights;
+use linebench::fetch::GIVEN_DIR;
+use linebench::fetch::{Manifest, calculate_sha256, fetch_counter, read_manifest};
+use linebench::files::{LargestFiles, find_largest_files};
 use linebench::insight::{
     FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, INSIGHTS_PAGE,
-    MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET, ask_for_everything,
+    MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET,
 };
 use linebench::insight::{
-    build_insights_path, describe_cold_cache, format_floor, format_memory, format_pmu,
-    format_syscalls, format_syscalls_summary, get_floor_set_name, write_insights,
-    write_insights_page,
+    Insights, ask_for_everything, build_insights_path, describe_cold_cache, format_floor,
+    format_memory, format_pmu, format_syscalls, format_syscalls_summary, get_floor_set_name,
+    write_insights, write_insights_page,
 };
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
@@ -46,11 +47,12 @@ use linebench::measure::{
 use linebench::measure::{OUT_DIR, TABLES};
 use linebench::os::{capture_with_status, is_privileged};
 use linebench::pmu::{
-    AB_RUNS, DURATION_TIME, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER, USER_PARANOID,
+    AB_RUNS, AB_WARMUP, DURATION_TIME, FILE_RUNS, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER,
+    USER_PARANOID,
 };
-use linebench::pmu::{Pmu, Profiling, Subject, UserCounts};
 use linebench::pmu::{
-    count_one_pass, count_user_events, find_profiler, read_paranoid, remove_raw_files, run_once,
+    Pmu, Profiling, Subject, UserCounts, count_one_pass, count_user_events,
+    count_user_instructions, find_profiler, read_paranoid, remove_raw_files, run_once,
 };
 use linebench::read::{Counts, compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
@@ -129,7 +131,10 @@ const VERDICTS: [&str; 4] = [
 ];
 const COLD_CACHE_RATIO: f64 = 1.5;
 const STAGED_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
+const A_KILOBYTE: u64 = 1024;
 const A_MEGABYTE: u64 = 1024 * 1024;
+const SMALL_FILE_BYTES: u64 = 64 * A_KILOBYTE;
+const A_MILLION: f64 = 1_000_000.0;
 const STAGED_DELETING: &str = "Delete them manually when you wish";
 const IDENTICAL: &str = "identical";
 const DIFFER: &str = "differ";
@@ -389,7 +394,10 @@ pub fn run_ab(
     if !platform.is_linux() {
         return Err(PROFILER_ELSEWHERE.to_string());
     }
-    let runs = options.runs.unwrap_or(AB_RUNS);
+    let runs = options.runs.unwrap_or(match options.files.is_some() {
+        true => FILE_RUNS,
+        false => AB_RUNS,
+    });
     let scratch = Scratch::create("ab")?;
     let profiling = find_profiler(
         &scratch.get_path().join(PMU_PROBE_FILE),
@@ -412,6 +420,7 @@ pub fn run_ab(
     let mut described = false;
     let mut ab_instances = Vec::new();
     let mut comparisons = Vec::new();
+    let mut file_comparisons = Vec::new();
     let mut code = 0;
     for one in locations {
         check_commit(&one.corpus, &one.checkout)?;
@@ -421,15 +430,11 @@ pub fn run_ab(
         }
         let instances =
             choose_ab_instances(chosen.instances, options.counters.is_some(), &one.given)?;
-        let candidate_label = |index: usize| match instances.len() {
-            2 => "b".to_string(),
-            _ => format!("b{index}"),
-        };
         if !described {
             let labels: Vec<String> = (0..instances.len())
                 .map(|index| match index {
                     0 => "a".to_string(),
-                    _ => candidate_label(index),
+                    _ => format_candidate_label(instances.len(), index),
                 })
                 .collect();
             let label_width = widest(labels.iter().map(String::as_str));
@@ -443,17 +448,27 @@ pub fn run_ab(
             let frequency = cpu_frequency
                 .as_deref()
                 .map_or(String::new(), |said| format!(", {said}"));
-            print_line(
-                out,
-                &format!("   {version}, {runs} runs x 4 (a b b a){frequency}"),
-            )?;
-            if !duration {
-                print_warning(
+            match options.files.is_some() {
+                true => print_line(
                     out,
                     &format!(
-                        "{version} did not report {DURATION_TIME}, so the wall time was not measured"
+                        "   {version}, {runs} runs (instructions:u), floor from empty.<ext>{frequency}"
                     ),
-                )?;
+                )?,
+                false => {
+                    print_line(
+                        out,
+                        &format!("   {version}, {runs} runs x 4 (a b b a){frequency}"),
+                    )?;
+                    if !duration {
+                        print_warning(
+                            out,
+                            &format!(
+                                "{version} did not report {DURATION_TIME}, so the wall time was not measured"
+                            ),
+                        )?;
+                    }
+                }
             }
             for (index, left) in instances.iter().enumerate() {
                 for right in &instances[index + 1..] {
@@ -465,17 +480,24 @@ pub fn run_ab(
             print_line(out, "")?;
             described = true;
         }
+        if let Some(limit) = options.files {
+            measure_ab_files(
+                out,
+                one,
+                &instances,
+                table,
+                runs,
+                limit,
+                scratch.get_path(),
+                &mut file_comparisons,
+            )?;
+            continue;
+        }
         let scrub = collect_scrub(&instances);
         let mut counted = Vec::new();
         for instance in &instances {
             let warm = build_args(instance, &one.checkout, &one.corpus.extensions, table, true)?;
-            let printed = run_once(&Subject {
-                instance: instance.get_name(),
-                binary: &instance.identity.binary,
-                args: &warm,
-                env: &instance.env,
-                scrub: &scrub,
-            })?;
+            let printed = run_once(&build_subject(instance, &warm, &scrub))?;
             counted.push(read_counts(&instance.definition, &printed)?);
         }
         let args: Vec<Vec<String>> = instances
@@ -493,14 +515,13 @@ pub fn run_ab(
         let subjects: Vec<Subject> = instances
             .iter()
             .zip(&args)
-            .map(|(instance, args)| Subject {
-                instance: instance.get_name(),
-                binary: &instance.identity.binary,
-                args,
-                env: &instance.env,
-                scrub: &scrub,
-            })
+            .map(|(instance, args)| build_subject(instance, args, &scrub))
             .collect();
+        for _ in 1..AB_WARMUP {
+            for subject in &subjects {
+                run_once(subject)?;
+            }
+        }
         for candidate in 1..instances.len() {
             let pair = [0, candidate];
             let mut blocks = Vec::new();
@@ -523,7 +544,7 @@ pub fn run_ab(
                 1 => one.corpus.name.as_str(),
                 _ => "",
             };
-            let b_label = candidate_label(candidate);
+            let b_label = format_candidate_label(instances.len(), candidate);
             let difference = find_count_differences(&counted[0], &counted[candidate], &b_label);
             let comparison = build_ab_comparison(
                 &one.corpus.name,
@@ -555,434 +576,11 @@ pub fn run_ab(
             same_work: options.same_work,
             instances: ab_instances,
             comparisons,
+            file_comparisons,
         };
         write_ab_summary(&into, &summary)?;
     }
     Ok(code)
-}
-
-/// The instances ab compares, in the order they were named: the first is a, and each other is
-/// held against it in turn. Without --counters, two given instances are the pair, in the order
-/// of their names; past two, --counters is required so the baseline is named first.
-fn choose_ab_instances(
-    instances: Vec<Instance>,
-    named: bool,
-    given: &BTreeMap<String, GivenEntry>,
-) -> Result<Vec<Instance>, String> {
-    let candidates: Vec<Instance> = match named {
-        true => instances,
-        false => instances
-            .into_iter()
-            .filter(|instance| given.contains_key(instance.get_name()))
-            .collect(),
-    };
-    let names: Vec<&str> = candidates.iter().map(Instance::get_name).collect();
-    match (named, candidates.len()) {
-        (_, 0) => Err(
-            "ab compares two or more instances: name them with --counters a,b, or give two with --given"
-                .to_string(),
-        ),
-        (_, 1) => Err(format!(
-            "ab needs at least two instances, and 1 came up ({}): name them with --counters a,b",
-            names[0]
-        )),
-        (false, count) if count > 2 => Err(format!(
-            "{count} given instances came up ({}): name the baseline first with --counters a,b,...",
-            names.join(", ")
-        )),
-        _ => Ok(candidates),
-    }
-}
-
-fn describe_instance(instance: &Instance) -> String {
-    let mut said = format!(
-        "{}  {} ({})",
-        instance.get_name(),
-        instance.identity.version,
-        instance.identity.describe_origin()
-    );
-    if !instance.args.is_empty() {
-        said.push_str(&format!("  with {}", instance.args.join(" ")));
-    }
-    if !instance.env.is_empty() {
-        said.push_str(&format!("  under {}", describe_env(&instance.env)));
-    }
-    said
-}
-
-fn describe_same_build(a: &Instance, b: &Instance) -> Option<String> {
-    let same = a.identity.sha256 == b.identity.sha256 && a.args == b.args && a.env == b.env;
-    same.then(|| {
-        format!(
-            "{} and {} have the same sha256 ({}), args and env",
-            a.get_name(),
-            b.get_name(),
-            shorten_hash(&a.identity.sha256)
-        )
-    })
-}
-
-/// The means of a and b across both orders and b over a under them.
-fn lay_out_ab(tree: &str, width: usize, comparison: &AbComparison) -> [String; 3] {
-    let (a, b) = (&comparison.a, &comparison.b);
-    let mut columns = vec![
-        [
-            format!("{} instructions", format_millions(a.instructions)),
-            format!("{} instructions", format_millions(b.instructions)),
-            format!("{:.4}x", comparison.instructions_ratio),
-        ],
-        [
-            format!("{} cycles", format_millions(a.cycles)),
-            format!("{} cycles", format_millions(b.cycles)),
-            format!("{:.3}x", comparison.cycles_ratio),
-        ],
-    ];
-    if let (Some(a_ns), Some(a_noise), Some(b_ns), Some(b_noise), Some(wall_ratio)) = (
-        a.wall_ns,
-        a.wall_noise_pct,
-        b.wall_ns,
-        b.wall_noise_pct,
-        comparison.wall_ratio,
-    ) {
-        columns.push([
-            format_ab_wall(a_ns, a_noise),
-            format_ab_wall(b_ns, b_noise),
-            format!("{wall_ratio:.3}x"),
-        ]);
-    }
-    columns.extend([
-        [
-            format!("{} files", format_thousands(a.files)),
-            format!("{} files", format_thousands(b.files)),
-            String::new(),
-        ],
-        [
-            format!("{} lines", format_thousands(a.lines)),
-            format!("{} lines", format_thousands(b.lines)),
-            String::new(),
-        ],
-    ]);
-    let widths: Vec<usize> = columns
-        .iter()
-        .map(|col| widest(col.iter().map(String::as_str)))
-        .collect();
-    let ratio_label = format!("{} / a", comparison.candidate);
-    let label_width = ratio_label.chars().count();
-    let row = |at: usize, head: &str, label: &str| {
-        let mut line = format!("{ROW_OPENING}{head:<width$}{COUNT_GAP}{label:<label_width$}  ");
-        for (col, cells) in columns.iter().enumerate() {
-            let cell = &cells[at];
-            if cell.is_empty() {
-                continue;
-            }
-            if col > 0 {
-                line.push_str(COUNT_GAP);
-            }
-            let gap = widths[col] - cell.chars().count();
-            line.push_str(cell);
-            line.push_str(&" ".repeat(gap));
-        }
-        line.trim_end().to_string()
-    };
-    [
-        row(0, tree, "a"),
-        row(1, "", &comparison.candidate),
-        row(2, "", &ratio_label),
-    ]
-}
-
-fn format_ab_wall(ns: u64, noise_pct: f64) -> String {
-    let ms = format_thousands(((ns as f64) / 1_000_000.0).round() as u64);
-    match noise_pct > 0.0 {
-        true => format!("{ms} ms ±{noise_pct:.1}%"),
-        false => format!("{ms} ms"),
-    }
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-struct AbSummary {
-    profiler: String,
-    runs: u32,
-    cpu_frequency: Option<String>,
-    same_work: bool,
-    instances: Vec<AbInstance>,
-    comparisons: Vec<AbComparison>,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize)]
-struct AbInstance {
-    label: String,
-    instance: String,
-    counter: String,
-    version: String,
-    sha256: String,
-    origin: String,
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-}
-
-impl AbInstance {
-    fn of(label: &str, instance: &Instance) -> AbInstance {
-        AbInstance {
-            label: label.to_string(),
-            instance: instance.get_name().to_string(),
-            counter: instance.identity.counter.clone(),
-            version: instance.identity.version.clone(),
-            sha256: instance.identity.sha256.clone(),
-            origin: instance.identity.describe_origin(),
-            args: instance.args.clone(),
-            env: instance.env.clone(),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-struct AbComparison {
-    target: String,
-    candidate: String,
-    a: AbSide,
-    b: AbSide,
-    instructions_ratio: f64,
-    cycles_ratio: f64,
-    wall_ratio: Option<f64>,
-    equal_counts: bool,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-struct AbSide {
-    instructions: u64,
-    cycles: u64,
-    wall_ns: Option<u64>,
-    wall_noise_pct: Option<f64>,
-    files: u64,
-    lines: u64,
-}
-
-fn build_ab_comparison(
-    target: &str,
-    candidate: &str,
-    a: &[UserCounts; 2],
-    b: &[UserCounts; 2],
-    counted: [&Counts; 2],
-    equal_counts: bool,
-) -> AbComparison {
-    let instructions = |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
-    let cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
-    let ratio = |over: u64, under: u64, places: i32| {
-        let scale = 10_f64.powi(places);
-        ((over as f64 / under as f64) * scale).round() / scale
-    };
-    let wall = match ([a[0].wall, a[1].wall], [b[0].wall, b[1].wall]) {
-        ([Some(a0), Some(a1)], [Some(b0), Some(b1)]) => Some((
-            (a0.ns + a1.ns) / 2,
-            a0.noise_pct.max(a1.noise_pct),
-            (b0.ns + b1.ns) / 2,
-            b0.noise_pct.max(b1.noise_pct),
-            ratio(b0.ns + b1.ns, a0.ns + a1.ns, 3),
-        )),
-        _ => None,
-    };
-    let side = |counts: &[UserCounts; 2], wall: Option<(u64, f64)>, counted: &Counts| AbSide {
-        instructions: instructions(counts) / 2,
-        cycles: cycles(counts) / 2,
-        wall_ns: wall.map(|(ns, _)| ns),
-        wall_noise_pct: wall.map(|(_, noise)| noise),
-        files: counted.files,
-        lines: counted.lines,
-    };
-    AbComparison {
-        target: target.to_string(),
-        candidate: candidate.to_string(),
-        a: side(a, wall.map(|(ns, noise, ..)| (ns, noise)), counted[0]),
-        b: side(b, wall.map(|(_, _, ns, noise, _)| (ns, noise)), counted[1]),
-        instructions_ratio: ratio(instructions(b), instructions(a), 4),
-        cycles_ratio: ratio(cycles(b), cycles(a), 3),
-        wall_ratio: wall.map(|(.., ratio)| ratio),
-        equal_counts,
-    }
-}
-
-fn write_ab_summary(path: &Path, summary: &AbSummary) -> Result<(), String> {
-    if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("{} could not be created: {error}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(summary)
-        .map_err(|error| format!("the ab summary could not be serialised: {error}"))?;
-    fs::write(path, format!("{text}\n"))
-        .map_err(|error| format!("{} could not be written: {error}", path.display()))
-}
-
-fn find_count_differences(a: &Counts, b: &Counts, b_label: &str) -> Option<String> {
-    let mut pairs = vec![
-        ("files", a.files, b.files),
-        ("lines", a.lines, b.lines),
-        ("code", a.code, b.code),
-        ("comments", a.comments, b.comments),
-    ];
-    let buckets: BTreeSet<&str> = a
-        .buckets
-        .keys()
-        .chain(b.buckets.keys())
-        .map(String::as_str)
-        .collect();
-    for name in buckets {
-        pairs.push((
-            name,
-            a.buckets.get(name).copied().unwrap_or(0),
-            b.buckets.get(name).copied().unwrap_or(0),
-        ));
-    }
-    let differences: Vec<String> = pairs
-        .into_iter()
-        .filter(|(_, left, right)| left != right)
-        .map(|(name, left, right)| {
-            format!(
-                "{name} {} against {}",
-                format_thousands(left),
-                format_thousands(right)
-            )
-        })
-        .collect();
-    (!differences.is_empty()).then(|| {
-        format!(
-            "a and {b_label} did not count the same: {}",
-            differences.join(", ")
-        )
-    })
-}
-
-fn format_millions(count: u64) -> String {
-    let millions = count as f64 / 1e6;
-    match count < A_HUNDRED_MILLION {
-        true => format!("{millions:.1}M"),
-        false => format!("{}M", millions.round()),
-    }
-}
-
-fn judge_noise(
-    out: &mut dyn Write,
-    locations: &Locations,
-    instances: &[Instance],
-    control: usize,
-    platform: Platform,
-    scratch: &Scratch,
-    settings: Settings,
-) -> Result<Option<usize>, String> {
-    let cores = thread::available_parallelism().map_or(1, |c| c.get());
-    let busy = sample_background_busy(platform);
-    let others = busy.map(|b| (b * cores as f64 / 100.0 * 10.0).round() / 10.0);
-    match (busy, others) {
-        (Some(busy), Some(others)) => print_line(
-            out,
-            &format!(
-                "   background    {busy}% busy, {}",
-                paint_by_steps(
-                    others,
-                    &BACKGROUND_CORE_STEPS,
-                    &format!("~{others} of {cores} cores")
-                )
-            ),
-        )?,
-        _ => print_line(out, "   background    not sampled on this platform")?,
-    }
-    let export = time_the_control(
-        out,
-        locations,
-        instances,
-        control,
-        platform,
-        scratch.get_path(),
-        settings,
-    )?;
-    let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
-        print_line(out, "   workload      hyperfine failed")?;
-        return Ok(None);
-    };
-    let times: Vec<f64> = result["times"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_f64).collect())
-        .unwrap_or_default();
-    if times.len() < 2 {
-        print_line(out, "   workload      hyperfine gave too few runs")?;
-        return Ok(None);
-    }
-    let warm = &times[1..];
-    let warm_mean = warm.iter().sum::<f64>() / warm.len() as f64;
-    let (least, most) = warm
-        .iter()
-        .fold((f64::MAX, 0.0f64), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
-    let spread = if least > 0.0 {
-        ((most - least) / least * 1000.0).round() / 10.0
-    } else {
-        0.0
-    };
-    let mean = result["mean"].as_f64().unwrap_or(0.0);
-    let cpu = result["user"].as_f64().unwrap_or(0.0) + result["system"].as_f64().unwrap_or(0.0);
-    let reached = if mean > 0.0 {
-        (cpu / mean * 10.0).round() / 10.0
-    } else {
-        0.0
-    };
-    let first = if warm_mean > 0.0 {
-        (times[0] / warm_mean * 100.0).round() / 100.0
-    } else {
-        0.0
-    };
-    print_line(
-        out,
-        &format!(
-            "   workload      {} on {}, {} runs",
-            instances[control].get_name(),
-            locations.corpus.name,
-            settings.runs
-        ),
-    )?;
-    print_line(
-        out,
-        &format!(
-            "   spread        {} ({} to {} ms)",
-            paint_by_steps(spread, &SPREAD_STEPS, &format!("{spread}%")),
-            (least * 1000.0).round(),
-            (most * 1000.0).round()
-        ),
-    )?;
-    print_line(out, &format!("   parallelism   {reached} of {cores} cores"))?;
-    print_line(
-        out,
-        &format!(
-            "   cache         {}, first run {first}x the warm mean",
-            if first >= COLD_CACHE_RATIO {
-                "cold"
-            } else {
-                "warm"
-            }
-        ),
-    )?;
-    let mut zones = vec![(
-        find_step(spread, &SPREAD_STEPS),
-        format!("spread at {spread}%"),
-    )];
-    if let Some(others) = others {
-        zones.push((
-            find_step(others, &BACKGROUND_CORE_STEPS),
-            format!("background at {others} of {cores} cores"),
-        ));
-    }
-    let worst = zones.iter().map(|(zone, _)| *zone).max().unwrap_or(0);
-    let blamed: Vec<&str> = zones
-        .iter()
-        .filter(|(zone, _)| *zone == worst)
-        .map(|(_, reason)| reason.as_str())
-        .collect();
-    print_line(out, "")?;
-    let verdict = if worst == 0 {
-        format!("{}.", VERDICTS[worst])
-    } else {
-        format!("{}: {}.", VERDICTS[worst], blamed.join(" and "))
-    };
-    print_line(out, &paint_step(worst, &verdict))?;
-    Ok(Some(worst))
 }
 
 pub fn run_benchmark(
@@ -1487,6 +1085,785 @@ pub fn run_insights(
     Ok(1)
 }
 
+pub fn warn_about_staged_builds(out: &mut dyn Write, counters_dir: &Path) -> Result<(), String> {
+    let staged = counters_dir.join(GIVEN_DIR);
+    let bytes = add_up_files(&staged);
+    if bytes < STAGED_LIMIT_BYTES {
+        return Ok(());
+    }
+    print_line(out, "")?;
+    print_warning(
+        out,
+        &format!(
+            "{} MB of staged builds sit under {}",
+            bytes / A_MEGABYTE,
+            show_path(&staged)
+        ),
+    )?;
+    print_line(out, STAGED_DELETING)
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbSummary {
+    profiler: String,
+    runs: u32,
+    cpu_frequency: Option<String>,
+    same_work: bool,
+    instances: Vec<AbInstance>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    comparisons: Vec<AbComparison>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    file_comparisons: Vec<AbFilesComparison>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct AbInstance {
+    label: String,
+    instance: String,
+    counter: String,
+    version: String,
+    sha256: String,
+    origin: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+}
+
+impl AbInstance {
+    fn of(label: &str, instance: &Instance) -> AbInstance {
+        AbInstance {
+            label: label.to_string(),
+            instance: instance.get_name().to_string(),
+            counter: instance.identity.counter.clone(),
+            version: instance.identity.version.clone(),
+            sha256: instance.identity.sha256.clone(),
+            origin: instance.identity.describe_origin(),
+            args: instance.args.clone(),
+            env: instance.env.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbComparison {
+    target: String,
+    candidate: String,
+    a: AbSide,
+    b: AbSide,
+    instructions_ratio: f64,
+    cycles_ratio: f64,
+    wall_ratio: Option<f64>,
+    equal_counts: bool,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbSide {
+    instructions: u64,
+    cycles: u64,
+    wall_ns: Option<u64>,
+    wall_noise_pct: Option<f64>,
+    files: u64,
+    lines: u64,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbFilesComparison {
+    target: String,
+    candidate: String,
+    total_files: u64,
+    total_bytes: u64,
+    measured_bytes: u64,
+    files: Vec<AbFileRow>,
+    directories: Vec<AbDirectoryRow>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbFileRow {
+    path: String,
+    directory: String,
+    bytes: u64,
+    a_instructions: u64,
+    b_instructions: u64,
+    a_per_mb: f64,
+    b_per_mb: f64,
+    instructions_ratio: f64,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct AbDirectoryRow {
+    directory: String,
+    files: usize,
+    bytes: u64,
+    a_instructions: u64,
+    b_instructions: u64,
+    a_per_mb: f64,
+    b_per_mb: f64,
+    instructions_ratio: f64,
+}
+
+/// The instances ab compares, in the order they were named: the first is a, and each other is
+/// held against it in turn. Without --counters, two given instances are the pair, in the order
+/// of their names; past two, --counters is required so the baseline is named first.
+fn choose_ab_instances(
+    instances: Vec<Instance>,
+    named: bool,
+    given: &BTreeMap<String, GivenEntry>,
+) -> Result<Vec<Instance>, String> {
+    let candidates: Vec<Instance> = match named {
+        true => instances,
+        false => instances
+            .into_iter()
+            .filter(|instance| given.contains_key(instance.get_name()))
+            .collect(),
+    };
+    let names: Vec<&str> = candidates.iter().map(Instance::get_name).collect();
+    match (named, candidates.len()) {
+        (_, 0) => Err(
+            "ab compares two or more instances: name them with --counters a,b, or give two with --given"
+                .to_string(),
+        ),
+        (_, 1) => Err(format!(
+            "ab needs at least two instances, and 1 came up ({}): name them with --counters a,b",
+            names[0]
+        )),
+        (false, count) if count > 2 => Err(format!(
+            "{count} given instances came up ({}): name the baseline first with --counters a,b,...",
+            names.join(", ")
+        )),
+        _ => Ok(candidates),
+    }
+}
+
+fn format_candidate_label(total: usize, candidate: usize) -> String {
+    match total {
+        2 => "b".to_string(),
+        _ => format!("b{candidate}"),
+    }
+}
+
+fn build_subject<'a>(
+    instance: &'a Instance,
+    args: &'a [String],
+    scrub: &'a [String],
+) -> Subject<'a> {
+    Subject {
+        instance: instance.get_name(),
+        binary: &instance.identity.binary,
+        args,
+        env: &instance.env,
+        scrub,
+    }
+}
+
+fn describe_instance(instance: &Instance) -> String {
+    let mut said = format!(
+        "{}  {} ({})",
+        instance.get_name(),
+        instance.identity.version,
+        instance.identity.describe_origin()
+    );
+    if !instance.args.is_empty() {
+        said.push_str(&format!("  with {}", instance.args.join(" ")));
+    }
+    if !instance.env.is_empty() {
+        said.push_str(&format!("  under {}", describe_env(&instance.env)));
+    }
+    said
+}
+
+fn describe_same_build(a: &Instance, b: &Instance) -> Option<String> {
+    let same = a.identity.sha256 == b.identity.sha256 && a.args == b.args && a.env == b.env;
+    same.then(|| {
+        format!(
+            "{} and {} have the same sha256 ({}), args and env",
+            a.get_name(),
+            b.get_name(),
+            shorten_hash(&a.identity.sha256)
+        )
+    })
+}
+
+/// The means of a and b across both orders and b over a under them.
+fn lay_out_ab(tree: &str, width: usize, comparison: &AbComparison) -> [String; 3] {
+    let (a, b) = (&comparison.a, &comparison.b);
+    let mut columns = vec![
+        [
+            format!("{} instructions", format_millions(a.instructions)),
+            format!("{} instructions", format_millions(b.instructions)),
+            format!("{:.4}x", comparison.instructions_ratio),
+        ],
+        [
+            format!("{} cycles", format_millions(a.cycles)),
+            format!("{} cycles", format_millions(b.cycles)),
+            format!("{:.3}x", comparison.cycles_ratio),
+        ],
+    ];
+    if let (Some(a_ns), Some(a_noise), Some(b_ns), Some(b_noise), Some(wall_ratio)) = (
+        a.wall_ns,
+        a.wall_noise_pct,
+        b.wall_ns,
+        b.wall_noise_pct,
+        comparison.wall_ratio,
+    ) {
+        columns.push([
+            format_ab_wall(a_ns, a_noise),
+            format_ab_wall(b_ns, b_noise),
+            format!("{wall_ratio:.3}x"),
+        ]);
+    }
+    columns.extend([
+        [
+            format!("{} files", format_thousands(a.files)),
+            format!("{} files", format_thousands(b.files)),
+            String::new(),
+        ],
+        [
+            format!("{} lines", format_thousands(a.lines)),
+            format!("{} lines", format_thousands(b.lines)),
+            String::new(),
+        ],
+    ]);
+    let widths: Vec<usize> = columns
+        .iter()
+        .map(|col| widest(col.iter().map(String::as_str)))
+        .collect();
+    let ratio_label = format!("{} / a", comparison.candidate);
+    let label_width = ratio_label.chars().count();
+    let format_row = |at: usize, head: &str, label: &str| {
+        let mut line = format!("{ROW_OPENING}{head:<width$}{COUNT_GAP}{label:<label_width$}  ");
+        for (col, cells) in columns.iter().enumerate() {
+            let cell = &cells[at];
+            if cell.is_empty() {
+                continue;
+            }
+            if col > 0 {
+                line.push_str(COUNT_GAP);
+            }
+            let gap = widths[col] - cell.chars().count();
+            line.push_str(cell);
+            line.push_str(&" ".repeat(gap));
+        }
+        line.trim_end().to_string()
+    };
+    [
+        format_row(0, tree, "a"),
+        format_row(1, "", &comparison.candidate),
+        format_row(2, "", &ratio_label),
+    ]
+}
+
+fn format_ab_wall(ns: u64, noise_pct: f64) -> String {
+    let ms = format_thousands(((ns as f64) / 1_000_000.0).round() as u64);
+    match noise_pct > 0.0 {
+        true => format!("{ms} ms ±{noise_pct:.1}%"),
+        false => format!("{ms} ms"),
+    }
+}
+
+fn round_to(value: f64, places: i32) -> f64 {
+    let scale = 10_f64.powi(places);
+    (value * scale).round() / scale
+}
+
+fn calculate_ratio(over: u64, under: u64, places: i32) -> f64 {
+    match (over, under) {
+        (0, 0) => 1.0,
+        (_, 0) => 0.0,
+        _ => round_to(over as f64 / under as f64, places),
+    }
+}
+
+fn cmp_ab_rows(
+    (left_ratio, left_bytes, left_name): (f64, u64, &str),
+    (right_ratio, right_bytes, right_name): (f64, u64, &str),
+) -> std::cmp::Ordering {
+    right_ratio
+        .total_cmp(&left_ratio)
+        .then_with(|| right_bytes.cmp(&left_bytes))
+        .then_with(|| left_name.cmp(right_name))
+}
+
+fn build_ab_comparison(
+    target: &str,
+    candidate: &str,
+    a: &[UserCounts; 2],
+    b: &[UserCounts; 2],
+    counted: [&Counts; 2],
+    equal_counts: bool,
+) -> AbComparison {
+    let add_instructions =
+        |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
+    let add_cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
+    let wall = match ([a[0].wall, a[1].wall], [b[0].wall, b[1].wall]) {
+        ([Some(a0), Some(a1)], [Some(b0), Some(b1)]) => Some((
+            (a0.ns + a1.ns) / 2,
+            a0.noise_pct.max(a1.noise_pct),
+            (b0.ns + b1.ns) / 2,
+            b0.noise_pct.max(b1.noise_pct),
+            calculate_ratio(b0.ns + b1.ns, a0.ns + a1.ns, 3),
+        )),
+        _ => None,
+    };
+    let build_side =
+        |counts: &[UserCounts; 2], wall: Option<(u64, f64)>, counted: &Counts| AbSide {
+            instructions: add_instructions(counts) / 2,
+            cycles: add_cycles(counts) / 2,
+            wall_ns: wall.map(|(ns, _)| ns),
+            wall_noise_pct: wall.map(|(_, noise)| noise),
+            files: counted.files,
+            lines: counted.lines,
+        };
+    AbComparison {
+        target: target.to_string(),
+        candidate: candidate.to_string(),
+        a: build_side(a, wall.map(|(ns, noise, ..)| (ns, noise)), counted[0]),
+        b: build_side(b, wall.map(|(_, _, ns, noise, _)| (ns, noise)), counted[1]),
+        instructions_ratio: calculate_ratio(add_instructions(b), add_instructions(a), 4),
+        cycles_ratio: calculate_ratio(add_cycles(b), add_cycles(a), 3),
+        wall_ratio: wall.map(|(.., ratio)| ratio),
+        equal_counts,
+    }
+}
+
+fn write_ab_summary(path: &Path, summary: &AbSummary) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("{} could not be created: {error}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(summary)
+        .map_err(|error| format!("the ab summary could not be serialised: {error}"))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_ab_files(
+    out: &mut dyn Write,
+    one: &Locations,
+    instances: &[Instance],
+    table: Table,
+    runs: u32,
+    limit: usize,
+    scratch: &Path,
+    comparisons: &mut Vec<AbFilesComparison>,
+) -> Result<(), String> {
+    let found = find_largest_files(&one.checkout, &one.corpus.extensions, limit)?;
+    let scrub = collect_scrub(instances);
+    let extensions: BTreeSet<&str> = found
+        .files
+        .iter()
+        .map(|file| file.extension.as_str())
+        .collect();
+    let floor_dir = scratch.join(FLOOR_TARGET);
+    fs::create_dir_all(&floor_dir)
+        .map_err(|error| format!("{} could not be created: {error}", floor_dir.display()))?;
+    let mut floors: Vec<BTreeMap<String, u64>> = vec![BTreeMap::new(); instances.len()];
+    for ext in extensions {
+        let empty = floor_dir.join(format!("empty.{ext}"));
+        fs::write(&empty, b"")
+            .map_err(|error| format!("{} could not be written: {error}", empty.display()))?;
+        for (idx, instance) in instances.iter().enumerate() {
+            let args = build_args(instance, &empty, &one.corpus.extensions, table, false)?;
+            let subject = build_subject(instance, &args, &scrub);
+            run_once(&subject)?;
+            let tsv = scratch.join(format!("ab-floor-{idx}-{ext}.tsv"));
+            let count = count_user_instructions(&subject, runs, &tsv)?;
+            floors[idx].insert(ext.to_string(), count);
+        }
+        let _ = fs::remove_file(&empty);
+    }
+    let mut net_by_instance: Vec<Vec<u64>> =
+        vec![Vec::with_capacity(found.files.len()); instances.len()];
+    for (file_idx, file) in found.files.iter().enumerate() {
+        let _ = fs::read(&file.path);
+        for (inst_idx, instance) in instances.iter().enumerate() {
+            let args = build_args(instance, &file.path, &one.corpus.extensions, table, false)?;
+            let subject = build_subject(instance, &args, &scrub);
+            let tsv = scratch.join(format!("ab-file-{inst_idx}-{file_idx}.tsv"));
+            let raw = count_user_instructions(&subject, runs, &tsv)?;
+            let floor = floors[inst_idx].get(&file.extension).copied().unwrap_or(0);
+            net_by_instance[inst_idx].push(raw.saturating_sub(floor));
+        }
+    }
+    for candidate in 1..instances.len() {
+        let b_label = format_candidate_label(instances.len(), candidate);
+        let comparison = build_ab_files_comparison(
+            &one.corpus.name,
+            &b_label,
+            &found,
+            &net_by_instance[0],
+            &net_by_instance[candidate],
+        );
+        if !comparisons.is_empty() {
+            print_line(out, "")?;
+        }
+        for line in lay_out_ab_files(&comparison) {
+            print_line(out, &line)?;
+        }
+        comparisons.push(comparison);
+    }
+    let small = found
+        .files
+        .iter()
+        .filter(|file| file.bytes < SMALL_FILE_BYTES)
+        .count();
+    if small > 0 {
+        print_warning(
+            out,
+            &format!(
+                "{}: {small} of the measured files are under 64 KB, where the empty-file floor \
+                 dominates M/MB",
+                one.corpus.name
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn build_ab_files_comparison(
+    target: &str,
+    candidate: &str,
+    found: &LargestFiles,
+    a_net: &[u64],
+    b_net: &[u64],
+) -> AbFilesComparison {
+    let calculate_per_mb = |instructions: u64, bytes: u64| match bytes {
+        0 => 0.0,
+        _ => round_to(
+            (instructions as f64 / A_MILLION) / (bytes as f64 / A_MEGABYTE as f64),
+            2,
+        ),
+    };
+    let measured_bytes = found.files.iter().map(|file| file.bytes).sum();
+    let mut files: Vec<AbFileRow> = found
+        .files
+        .iter()
+        .zip(a_net.iter().zip(b_net))
+        .map(|(file, (&a_instr, &b_instr))| AbFileRow {
+            path: file.relative.clone(),
+            directory: file.directory.clone(),
+            bytes: file.bytes,
+            a_instructions: a_instr,
+            b_instructions: b_instr,
+            a_per_mb: calculate_per_mb(a_instr, file.bytes),
+            b_per_mb: calculate_per_mb(b_instr, file.bytes),
+            instructions_ratio: calculate_ratio(b_instr, a_instr, 4),
+        })
+        .collect();
+    files.sort_by(|left, right| {
+        cmp_ab_rows(
+            (left.instructions_ratio, left.bytes, &left.path),
+            (right.instructions_ratio, right.bytes, &right.path),
+        )
+    });
+    let mut by_dir: BTreeMap<String, (usize, u64, u64, u64)> = BTreeMap::new();
+    for row in &files {
+        let entry = by_dir.entry(row.directory.clone()).or_default();
+        entry.0 += 1;
+        entry.1 += row.bytes;
+        entry.2 += row.a_instructions;
+        entry.3 += row.b_instructions;
+    }
+    let mut directories: Vec<AbDirectoryRow> = by_dir
+        .into_iter()
+        .map(
+            |(directory, (count, bytes, a_instr, b_instr))| AbDirectoryRow {
+                directory,
+                files: count,
+                bytes,
+                a_instructions: a_instr,
+                b_instructions: b_instr,
+                a_per_mb: calculate_per_mb(a_instr, bytes),
+                b_per_mb: calculate_per_mb(b_instr, bytes),
+                instructions_ratio: calculate_ratio(b_instr, a_instr, 4),
+            },
+        )
+        .collect();
+    directories.sort_by(|left, right| {
+        cmp_ab_rows(
+            (left.instructions_ratio, left.bytes, &left.directory),
+            (right.instructions_ratio, right.bytes, &right.directory),
+        )
+    });
+    AbFilesComparison {
+        target: target.to_string(),
+        candidate: candidate.to_string(),
+        total_files: found.total_files,
+        total_bytes: found.total_bytes,
+        measured_bytes,
+        files,
+        directories,
+    }
+}
+
+fn lay_out_ab_files(comparison: &AbFilesComparison) -> Vec<String> {
+    let noun = match comparison.files.len() {
+        1 => "largest file",
+        _ => "largest files",
+    };
+    let pair = match comparison.candidate.as_str() {
+        "b" => String::new(),
+        other => format!(" ({other} against a)"),
+    };
+    let mut lines = vec![format!(
+        "== {}{pair}: {} {noun} ({} of {}, {} files)",
+        comparison.target,
+        comparison.files.len(),
+        format_file_size(comparison.measured_bytes),
+        format_file_size(comparison.total_bytes),
+        format_thousands(comparison.total_files),
+    )];
+    let b_rate = format!("{} (M/MB)", comparison.candidate);
+    let b_ratio = format!("{} / a", comparison.candidate);
+    let mut file_rows = vec![vec![
+        "path".to_string(),
+        "size".to_string(),
+        "a (M/MB)".to_string(),
+        b_rate.clone(),
+        b_ratio.clone(),
+    ]];
+    for row in &comparison.files {
+        file_rows.push(vec![
+            row.path.clone(),
+            format_file_size(row.bytes),
+            format!("{:.2}", row.a_per_mb),
+            format!("{:.2}", row.b_per_mb),
+            format!("{:.4}x", row.instructions_ratio),
+        ]);
+    }
+    lines.extend(lay_out_aligned_table(&file_rows));
+    lines.push(String::new());
+    let mut dir_rows = vec![vec![
+        "directory".to_string(),
+        "files".to_string(),
+        "size".to_string(),
+        "a (M/MB)".to_string(),
+        b_rate,
+        b_ratio,
+    ]];
+    for row in &comparison.directories {
+        dir_rows.push(vec![
+            row.directory.clone(),
+            format_thousands(row.files as u64),
+            format_file_size(row.bytes),
+            format!("{:.2}", row.a_per_mb),
+            format!("{:.2}", row.b_per_mb),
+            format!("{:.4}x", row.instructions_ratio),
+        ]);
+    }
+    lines.extend(lay_out_aligned_table(&dir_rows));
+    lines
+}
+
+fn lay_out_aligned_table(rows: &[Vec<String>]) -> Vec<String> {
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let widths: Vec<usize> = (0..first.len())
+        .map(|col| widest(rows.iter().map(|row| row[col].as_str())))
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let mut line = String::from(ROW_OPENING);
+            for (col, cell) in row.iter().enumerate() {
+                if col > 0 {
+                    line.push_str(COUNT_GAP);
+                }
+                let gap = widths[col] - cell.chars().count();
+                if col == 0 {
+                    line.push_str(cell);
+                    line.push_str(&" ".repeat(gap));
+                } else {
+                    line.push_str(&" ".repeat(gap));
+                    line.push_str(cell);
+                }
+            }
+            line.trim_end().to_string()
+        })
+        .collect()
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes >= A_MEGABYTE {
+        format!("{:.1} MB", bytes as f64 / A_MEGABYTE as f64)
+    } else if bytes >= A_KILOBYTE {
+        format!("{:.1} KB", bytes as f64 / A_KILOBYTE as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn find_count_differences(a: &Counts, b: &Counts, b_label: &str) -> Option<String> {
+    let mut pairs = vec![
+        ("files", a.files, b.files),
+        ("lines", a.lines, b.lines),
+        ("code", a.code, b.code),
+        ("comments", a.comments, b.comments),
+    ];
+    let buckets: BTreeSet<&str> = a
+        .buckets
+        .keys()
+        .chain(b.buckets.keys())
+        .map(String::as_str)
+        .collect();
+    for name in buckets {
+        pairs.push((
+            name,
+            a.buckets.get(name).copied().unwrap_or(0),
+            b.buckets.get(name).copied().unwrap_or(0),
+        ));
+    }
+    let differences: Vec<String> = pairs
+        .into_iter()
+        .filter(|(_, left, right)| left != right)
+        .map(|(name, left, right)| {
+            format!(
+                "{name} {} against {}",
+                format_thousands(left),
+                format_thousands(right)
+            )
+        })
+        .collect();
+    (!differences.is_empty()).then(|| {
+        format!(
+            "a and {b_label} did not count the same: {}",
+            differences.join(", ")
+        )
+    })
+}
+
+fn format_millions(count: u64) -> String {
+    let millions = count as f64 / 1e6;
+    match count < A_HUNDRED_MILLION {
+        true => format!("{millions:.1}M"),
+        false => format!("{}M", millions.round()),
+    }
+}
+
+fn judge_noise(
+    out: &mut dyn Write,
+    locations: &Locations,
+    instances: &[Instance],
+    control: usize,
+    platform: Platform,
+    scratch: &Scratch,
+    settings: Settings,
+) -> Result<Option<usize>, String> {
+    let cores = thread::available_parallelism().map_or(1, |c| c.get());
+    let busy = sample_background_busy(platform);
+    let others = busy.map(|b| (b * cores as f64 / 100.0 * 10.0).round() / 10.0);
+    match (busy, others) {
+        (Some(busy), Some(others)) => print_line(
+            out,
+            &format!(
+                "   background    {busy}% busy, {}",
+                paint_by_steps(
+                    others,
+                    &BACKGROUND_CORE_STEPS,
+                    &format!("~{others} of {cores} cores")
+                )
+            ),
+        )?,
+        _ => print_line(out, "   background    not sampled on this platform")?,
+    }
+    let export = time_the_control(
+        out,
+        locations,
+        instances,
+        control,
+        platform,
+        scratch.get_path(),
+        settings,
+    )?;
+    let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
+        print_line(out, "   workload      hyperfine failed")?;
+        return Ok(None);
+    };
+    let times: Vec<f64> = result["times"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default();
+    if times.len() < 2 {
+        print_line(out, "   workload      hyperfine gave too few runs")?;
+        return Ok(None);
+    }
+    let warm = &times[1..];
+    let warm_mean = warm.iter().sum::<f64>() / warm.len() as f64;
+    let (least, most) = warm
+        .iter()
+        .fold((f64::MAX, 0.0f64), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+    let spread = if least > 0.0 {
+        ((most - least) / least * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+    let mean = result["mean"].as_f64().unwrap_or(0.0);
+    let cpu = result["user"].as_f64().unwrap_or(0.0) + result["system"].as_f64().unwrap_or(0.0);
+    let reached = if mean > 0.0 {
+        (cpu / mean * 10.0).round() / 10.0
+    } else {
+        0.0
+    };
+    let first = if warm_mean > 0.0 {
+        (times[0] / warm_mean * 100.0).round() / 100.0
+    } else {
+        0.0
+    };
+    print_line(
+        out,
+        &format!(
+            "   workload      {} on {}, {} runs",
+            instances[control].get_name(),
+            locations.corpus.name,
+            settings.runs
+        ),
+    )?;
+    print_line(
+        out,
+        &format!(
+            "   spread        {} ({} to {} ms)",
+            paint_by_steps(spread, &SPREAD_STEPS, &format!("{spread}%")),
+            (least * 1000.0).round(),
+            (most * 1000.0).round()
+        ),
+    )?;
+    print_line(out, &format!("   parallelism   {reached} of {cores} cores"))?;
+    print_line(
+        out,
+        &format!(
+            "   cache         {}, first run {first}x the warm mean",
+            if first >= COLD_CACHE_RATIO {
+                "cold"
+            } else {
+                "warm"
+            }
+        ),
+    )?;
+    let mut zones = vec![(
+        find_step(spread, &SPREAD_STEPS),
+        format!("spread at {spread}%"),
+    )];
+    if let Some(others) = others {
+        zones.push((
+            find_step(others, &BACKGROUND_CORE_STEPS),
+            format!("background at {others} of {cores} cores"),
+        ));
+    }
+    let worst = zones.iter().map(|(zone, _)| *zone).max().unwrap_or(0);
+    let blamed: Vec<&str> = zones
+        .iter()
+        .filter(|(zone, _)| *zone == worst)
+        .map(|(_, reason)| reason.as_str())
+        .collect();
+    print_line(out, "")?;
+    let verdict = if worst == 0 {
+        format!("{}.", VERDICTS[worst])
+    } else {
+        format!("{}: {}.", VERDICTS[worst], blamed.join(" and "))
+    };
+    print_line(out, &paint_step(worst, &verdict))?;
+    Ok(Some(worst))
+}
+
 fn make_absolute(path: &Path) -> PathBuf {
     match path.is_absolute() {
         true => path.to_path_buf(),
@@ -1506,24 +1883,6 @@ fn find_the_page_beside(path: &Path) -> Option<PathBuf> {
         && !path.join(RECORD_FILE).is_file()
         && !path.join(INSIGHTS_FILE).is_file();
     holds_the_page.then(|| path.to_path_buf())
-}
-
-pub fn warn_about_staged_builds(out: &mut dyn Write, counters_dir: &Path) -> Result<(), String> {
-    let staged = counters_dir.join(GIVEN_DIR);
-    let bytes = add_up_files(&staged);
-    if bytes < STAGED_LIMIT_BYTES {
-        return Ok(());
-    }
-    print_line(out, "")?;
-    print_warning(
-        out,
-        &format!(
-            "{} MB of staged builds sit under {}",
-            bytes / A_MEGABYTE,
-            show_path(&staged)
-        ),
-    )?;
-    print_line(out, STAGED_DELETING)
 }
 
 struct RunContext<'a> {
@@ -2605,13 +2964,7 @@ fn collect_pmu(
             PMU_TABLE,
             false,
         )?;
-        let subject = Subject {
-            instance: instance.get_name(),
-            binary: &instance.identity.binary,
-            args: &args,
-            env: &instance.env,
-            scrub,
-        };
+        let subject = build_subject(instance, &args, scrub);
         let mut readings = Vec::new();
         let mut wall_ms = 0;
         for pass in 0..PASSES.len() {
@@ -3166,6 +3519,9 @@ fn describe_given_instances(config: &Config) -> Vec<Vec<Cell>> {
         if !entry.args.is_empty() {
             said.push(("args", entry.args.join(" ")));
         }
+        if !entry.env.is_empty() {
+            said.push(("env", describe_env(&entry.env)));
+        }
         if said.is_empty() {
             said.push((
                 "binary",
@@ -3331,6 +3687,7 @@ mod tests {
 
     use linebench::counters::Channel;
     use linebench::fetch::{Fetched, Identity, Origin};
+    use linebench::files::SizedFile;
     use linebench::pmu::Wall;
 
     use super::*;
@@ -3794,5 +4151,91 @@ mod tests {
         assert!(files.ends_with("corpus 3,556"), "{files}");
         assert!(!lines.contains("corpus"), "{lines}");
         assert!(!files.ends_with(' ') && !lines.ends_with(' '));
+    }
+
+    #[test]
+    fn the_ab_files_table_orders_files_and_directories_by_ratio() {
+        let found = LargestFiles {
+            total_files: 63_779,
+            total_bytes: 1_341 * A_MEGABYTE,
+            files: vec![
+                SizedFile {
+                    path: PathBuf::from("dcn/mask.h"),
+                    relative: "dcn/mask.h".to_string(),
+                    directory: "dcn".to_string(),
+                    extension: "h".to_string(),
+                    bytes: 10 * A_MEGABYTE,
+                },
+                SizedFile {
+                    path: PathBuf::from("dcn/offset.h"),
+                    relative: "dcn/offset.h".to_string(),
+                    directory: "dcn".to_string(),
+                    extension: "h".to_string(),
+                    bytes: 8 * A_MEGABYTE,
+                },
+                SizedFile {
+                    path: PathBuf::from("gfx/irq.h"),
+                    relative: "gfx/irq.h".to_string(),
+                    directory: "gfx".to_string(),
+                    extension: "h".to_string(),
+                    bytes: 9 * A_MEGABYTE,
+                },
+            ],
+        };
+        let a_net = [100_000_000, 80_000_000, 72_000_000];
+        let b_net = [126_000_000, 100_000_000, 72_720_000];
+        let comparison = build_ab_files_comparison("linux", "b", &found, &a_net, &b_net);
+        assert_eq!(
+            lay_out_ab_files(&comparison),
+            [
+                "== linux: 3 largest files (27.0 MB of 1341.0 MB, 63,779 files)",
+                "   path              size   a (M/MB)   b (M/MB)     b / a",
+                "   dcn/mask.h     10.0 MB      10.00      12.60   1.2600x",
+                "   dcn/offset.h    8.0 MB      10.00      12.50   1.2500x",
+                "   gfx/irq.h       9.0 MB       8.00       8.08   1.0100x",
+                "",
+                "   directory   files      size   a (M/MB)   b (M/MB)     b / a",
+                "   dcn             2   18.0 MB      10.00      12.56   1.2556x",
+                "   gfx             1    9.0 MB       8.00       8.08   1.0100x",
+            ]
+        );
+        let one_small = LargestFiles {
+            total_files: 2,
+            total_bytes: 2 * A_KILOBYTE,
+            files: vec![SizedFile {
+                path: PathBuf::from("tiny.rs"),
+                relative: "tiny.rs".to_string(),
+                directory: ".".to_string(),
+                extension: "rs".to_string(),
+                bytes: 512,
+            }],
+        };
+        let multi = build_ab_files_comparison("src", "b2", &one_small, &[0], &[0]);
+        assert_eq!(
+            lay_out_ab_files(&multi)[0],
+            "== src (b2 against a): 1 largest file (512 B of 2.0 KB, 2 files)"
+        );
+        assert_eq!(multi.files[0].instructions_ratio, 1.0);
+    }
+
+    #[test]
+    fn the_given_instances_of_the_conf_name_their_binary_definition_args_and_env() {
+        let config: Config = toml::from_str(
+            "[given.\"mezura@a\"]\n\
+             env = { MEZURA_DATA_DIR = \"/x/a\" }\n\
+             [given.\"mezura@b\"]\n\
+             args = [\"--threads\", \"4\"]\n\
+             env = { MEZURA_DATA_DIR = \"/x/b\" }\n",
+        )
+        .unwrap();
+        let rows = describe_given_instances(&config);
+        assert_eq!(
+            lay_out_rows(&rows),
+            [
+                "   mezura@a  env   MEZURA_DATA_DIR=/x/a",
+                "   mezura@b  args  --threads 4",
+                "             env   MEZURA_DATA_DIR=/x/b",
+            ]
+        );
     }
 }

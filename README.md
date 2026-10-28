@@ -360,7 +360,7 @@ One build against another on the hardware counters, for the changes a run cannot
 noise: wall-clock time on a short run moves a few percent between runs, and a parser change moves
 it by one. The baseline a and each candidate b run under `perf stat` over the target in the order
 a, b, b, a, fifteen runs a block, counting user-space instructions, cycles and the wall time, after
-one run of each that fills the page cache and checks that they counted the same:
+three warmups of each where the first run checks that they counted the same:
 
 ```
    a  mezura@a  v3.3.0 (unreleased) (LOCAL BUILD a, sha256 505106430)
@@ -381,9 +381,11 @@ By default an instance runs with the definition's target argument and its own `-
 all two builds of one counter need. `--same-work` adds the definition's same-work flags and
 languages, as the first table of a run does, for two different counters. `--counters a,b,...`
 names the baseline first and each candidate held against it; without it the two given instances are
-the pair, a before b by name. Several targets, `ab linux,cpython,./src`, are measured in turn.
-Linux only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are
-user space alone.
+the pair, a before b by name. `--files [<n>]` measures the `n` largest files of the target (ten by
+default, at most 100) under `instructions:u` with an empty-file floor subtracted, sorted by `b / a`
+and summed by directory. Several targets, `ab linux,cpython,./src`, are measured in turn. Linux
+only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are user
+space alone.
 
 ### report
 

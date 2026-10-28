@@ -4,13 +4,12 @@
 
 New:
 
-- `ab` holds one build against another on the hardware counters: two instances under `perf stat`
-  in the order a, b, b, a, user-space instructions and cycles, and one line per tree with b over
-  a. For the changes a run cannot tell from its noise. Linux, with `kernel.perf_event_paranoid`
-  at 2 or below.
+- `ab` holds a baseline build against one or more candidates on the hardware counters: each pair
+  under `perf stat` in the order a, b, b, a over corpora and folders, user-space instructions,
+  cycles and wall time, count checks, `--json`, and `--files [<n>]` for the largest files of a
+  target. Linux, with `kernel.perf_event_paranoid` at 2 or below.
 - An instance can carry an environment of its own, `--env <instance>=<NAME>=<value>` or `env` in
-  its `[given]` entry, set wherever linebench runs the instance itself. `run` and the floor of
-  `insights` time every instance under one hyperfine process and refuse an instance that has one.
+  its `[given]` entry.
 
 ## 0.2.0, 2026-09-19
 
