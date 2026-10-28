@@ -192,13 +192,13 @@ pub fn count_user_events(subject: &Subject, runs: u32, path: &Path) -> Result<Us
     })
 }
 
-/// One execution with its output dropped, which fills the page cache before anything is counted.
-pub fn run_once(subject: &Subject) -> Result<(), String> {
+/// One execution with its output kept, which fills the page cache before anything is counted.
+pub fn run_once(subject: &Subject) -> Result<String, String> {
     let mut command = Command::new(subject.binary);
     command
         .args(subject.args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for name in subject.scrub {
         command.env_remove(name);
@@ -215,7 +215,7 @@ pub fn run_once(subject: &Subject) -> Result<(), String> {
             String::from_utf8_lossy(&finished.stderr).trim()
         ));
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&finished.stdout).into_owned())
 }
 
 fn count_events(
@@ -462,5 +462,29 @@ mod tests {
             "{}",
             tagged.display()
         );
+    }
+
+    #[test]
+    fn the_warm_run_returns_what_the_subject_printed_and_names_a_failure() {
+        let env = BTreeMap::new();
+        let ok = run_once(&Subject {
+            instance: "git",
+            binary: Path::new("git"),
+            args: &["--version".to_string()],
+            env: &env,
+            scrub: &[],
+        })
+        .unwrap();
+        assert!(ok.contains("git version"), "{ok}");
+        let refused = run_once(&Subject {
+            instance: "git",
+            binary: Path::new("git"),
+            args: &["--no-such-flag-linebench".to_string()],
+            env: &env,
+            scrub: &[],
+        })
+        .unwrap_err();
+        assert!(refused.starts_with("git ended with "), "{refused}");
+        assert!(refused.contains("no-such-flag-linebench"), "{refused}");
     }
 }

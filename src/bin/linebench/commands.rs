@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -49,7 +49,7 @@ use linebench::pmu::{Pmu, Profiling, Subject, UserCounts};
 use linebench::pmu::{
     count_one_pass, count_user_events, find_profiler, read_paranoid, remove_raw_files, run_once,
 };
-use linebench::read::{compare_documents, find_absent_volatile_paths, read_counts};
+use linebench::read::{Counts, compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
     CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
     calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
@@ -406,6 +406,7 @@ pub fn run_ab(
     };
     let width = widest(locations.iter().map(|one| one.corpus.name.as_str()));
     let mut described = false;
+    let mut code = 0;
     for one in locations {
         check_commit(&one.corpus, &one.checkout)?;
         let chosen = build_instances(definitions, one, options, platform)?;
@@ -426,10 +427,25 @@ pub fn run_ab(
                 out,
                 &format!("   {version}, {runs} runs x 4 (a b b a){frequency}"),
             )?;
+            if let Some(warning) = describe_same_build(&pair[0], &pair[1]) {
+                print_warning(out, &warning)?;
+            }
             print_line(out, "")?;
             described = true;
         }
         let scrub = collect_scrub(&pair);
+        let mut counted = Vec::new();
+        for instance in &pair {
+            let warm = build_args(instance, &one.checkout, &one.corpus.extensions, table, true)?;
+            let printed = run_once(&Subject {
+                instance: instance.get_name(),
+                binary: &instance.identity.binary,
+                args: &warm,
+                env: &instance.env,
+                scrub: &scrub,
+            })?;
+            counted.push(read_counts(&instance.definition, &printed)?);
+        }
         let args: Vec<Vec<String>> = pair
             .iter()
             .map(|instance| {
@@ -453,9 +469,6 @@ pub fn run_ab(
                 scrub: &scrub,
             })
             .collect();
-        for subject in &subjects {
-            run_once(subject)?;
-        }
         let mut blocks = Vec::new();
         for (block, which) in AB_ORDER.into_iter().enumerate() {
             let path = scratch
@@ -468,8 +481,13 @@ pub fn run_ab(
         for line in lay_out_ab(&one.corpus.name, width, &a, &b, runs) {
             print_line(out, &line)?;
         }
+        print_line(out, &format_ab_counts(width, &counted[0], &counted[1]))?;
+        if let Some(difference) = find_count_differences(&counted[0], &counted[1]) {
+            print_warning(out, &format!("{}: {difference}", one.corpus.name))?;
+            code = 1;
+        }
     }
-    Ok(0)
+    Ok(code)
 }
 
 /// The two instances ab compares, in the order they were named: the first is a, the second b.
@@ -514,6 +532,18 @@ fn describe_instance(instance: &Instance) -> String {
     said
 }
 
+fn describe_same_build(a: &Instance, b: &Instance) -> Option<String> {
+    let same = a.identity.sha256 == b.identity.sha256 && a.args == b.args && a.env == b.env;
+    same.then(|| {
+        format!(
+            "{} and {} have the same sha256 ({}), args and env",
+            a.get_name(),
+            b.get_name(),
+            shorten_hash(&a.identity.sha256)
+        )
+    })
+}
+
 /// b over a: the instructions of both orders together, the cycles of each order on its own, then
 /// the means each side was read at.
 fn lay_out_ab(
@@ -542,6 +572,52 @@ fn lay_out_ab(
             format_millions(cycles(b) / 2)
         ),
     ]
+}
+
+fn format_ab_counts(width: usize, a: &Counts, b: &Counts) -> String {
+    format!(
+        "{ROW_OPENING}{:<width$}   a {} files {} lines   b {} files {} lines",
+        "",
+        format_thousands(a.files),
+        format_thousands(a.lines),
+        format_thousands(b.files),
+        format_thousands(b.lines)
+    )
+}
+
+fn find_count_differences(a: &Counts, b: &Counts) -> Option<String> {
+    let mut pairs = vec![
+        ("files", a.files, b.files),
+        ("lines", a.lines, b.lines),
+        ("code", a.code, b.code),
+        ("comments", a.comments, b.comments),
+    ];
+    let buckets: BTreeSet<&str> = a
+        .buckets
+        .keys()
+        .chain(b.buckets.keys())
+        .map(String::as_str)
+        .collect();
+    for name in buckets {
+        pairs.push((
+            name,
+            a.buckets.get(name).copied().unwrap_or(0),
+            b.buckets.get(name).copied().unwrap_or(0),
+        ));
+    }
+    let differences: Vec<String> = pairs
+        .into_iter()
+        .filter(|(_, left, right)| left != right)
+        .map(|(name, left, right)| {
+            format!(
+                "{name} {} against {}",
+                format_thousands(left),
+                format_thousands(right)
+            )
+        })
+        .collect();
+    (!differences.is_empty())
+        .then(|| format!("a and b did not count the same: {}", differences.join(", ")))
 }
 
 fn format_millions(count: u64) -> String {
@@ -3026,7 +3102,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use linebench::counters::Channel;
-    use linebench::fetch::Fetched;
+    use linebench::fetch::{Fetched, Identity, Origin};
 
     use super::*;
 
@@ -3071,6 +3147,102 @@ mod tests {
         );
         assert_eq!(format_millions(12_345_678), "12.3M");
         assert_eq!(format_millions(15_787_520_396), "15788M");
+    }
+
+    #[test]
+    fn two_instances_sharing_hash_args_and_env_are_warned_about_and_any_difference_clears_it() {
+        let definition = crate::shipped::collect_definitions(&mut Vec::new(), &[])
+            .unwrap()
+            .counters
+            .into_iter()
+            .find(|definition| definition.name == "mezura")
+            .unwrap();
+        let build = |name: &str, sha256: &str, args: &[&str], env: &[(&str, &str)]| Instance {
+            definition: definition.clone(),
+            identity: Identity {
+                instance: name.to_string(),
+                counter: "mezura".to_string(),
+                binary: PathBuf::from("mezura"),
+                sha256: sha256.to_string(),
+                version: "3.3.0".to_string(),
+                origin: Origin::Given {
+                    label: name.to_string(),
+                },
+            },
+            args: args.iter().map(|s| (*s).to_string()).collect(),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        };
+        let a = build(
+            "mezura@base",
+            "1234567890abcdef",
+            &["--hide", "tests"],
+            &[("MEZURA_DATA_DIR", "/tmp/d")],
+        );
+        let same = build(
+            "mezura@cand",
+            "1234567890abcdef",
+            &["--hide", "tests"],
+            &[("MEZURA_DATA_DIR", "/tmp/d")],
+        );
+        assert_eq!(
+            describe_same_build(&a, &same).as_deref(),
+            Some("mezura@base and mezura@cand have the same sha256 (123456789), args and env")
+        );
+        let other_hash = build(
+            "mezura@cand",
+            "fedcba0987654321",
+            &["--hide", "tests"],
+            &[("MEZURA_DATA_DIR", "/tmp/d")],
+        );
+        assert_eq!(describe_same_build(&a, &other_hash), None);
+        let other_args = build(
+            "mezura@cand",
+            "1234567890abcdef",
+            &[],
+            &[("MEZURA_DATA_DIR", "/tmp/d")],
+        );
+        assert_eq!(describe_same_build(&a, &other_args), None);
+        let other_env = build(
+            "mezura@cand",
+            "1234567890abcdef",
+            &["--hide", "tests"],
+            &[("MEZURA_DATA_DIR", "/tmp/e")],
+        );
+        assert_eq!(describe_same_build(&a, &other_env), None);
+    }
+
+    #[test]
+    fn the_ab_counts_line_names_files_and_lines_and_any_moved_bucket_is_caught() {
+        let counts = |code: u64, comments: u64, bucket: (&str, u64)| Counts {
+            files: 63_738,
+            lines: 36_012_345,
+            code,
+            comments,
+            buckets: BTreeMap::from([(bucket.0.to_string(), bucket.1)]),
+        };
+        let a = counts(29_100_000, 4_500_000, ("extra", 2_412_345));
+        assert_eq!(
+            format_ab_counts(8, &a, &a),
+            "              a 63,738 files 36,012,345 lines   b 63,738 files 36,012,345 lines"
+        );
+        assert_eq!(find_count_differences(&a, &a), None);
+        let moved = counts(29_099_990, 4_500_010, ("extra", 2_412_345));
+        assert_eq!(
+            find_count_differences(&a, &moved).as_deref(),
+            Some(
+                "a and b did not count the same: code 29,100,000 against 29,099,990, comments 4,500,000 against 4,500,010"
+            )
+        );
+        let other_bucket = counts(29_100_000, 4_500_000, ("blanks", 2_412_345));
+        assert_eq!(
+            find_count_differences(&a, &other_bucket).as_deref(),
+            Some(
+                "a and b did not count the same: blanks 0 against 2,412,345, extra 2,412,345 against 0"
+            )
+        );
     }
 
     #[test]

@@ -155,9 +155,10 @@ linebench ab <corpora|all|dir> [--counters a,b] [--runs <n>] [--same-work] [--ex
     to about half a percent on a quiet machine. The results stay on the screen and the machine is
     left as it is, so run stays the command for numbers that are kept.
 
-    Each instance runs once before the counting, which fills the page cache. Without --counters
-    the two given instances are the pair, a before b by name. Linux only: it wants root, or
-    kernel.perf_event_paranoid at 2 or below, since the counts are user space alone.
+    Each instance runs once before the counting, which fills the page cache and checks that
+    both counted the same. Without --counters the two given instances are the pair, a before b
+    by name. Linux only: it wants root, or kernel.perf_event_paranoid at 2 or below, since the
+    counts are user space alone.
 
     --counters a,b             the two instances, a first
     --runs <n>                 runs per perf stat, default 15, so four times that in all
