@@ -44,7 +44,9 @@ use linebench::measure::{
 };
 use linebench::measure::{OUT_DIR, TABLES};
 use linebench::os::{capture_with_status, is_privileged};
-use linebench::pmu::{AB_RUNS, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER, USER_PARANOID};
+use linebench::pmu::{
+    AB_RUNS, DURATION_TIME, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER, USER_PARANOID,
+};
 use linebench::pmu::{Pmu, Profiling, Subject, UserCounts};
 use linebench::pmu::{
     count_one_pass, count_user_events, find_profiler, read_paranoid, remove_raw_files, run_once,
@@ -394,7 +396,7 @@ pub fn run_ab(
         read_paranoid(),
         USER_PARANOID,
     );
-    let Profiling::Ready(version) = &profiling else {
+    let Profiling::Ready { version, duration } = &profiling else {
         return Err(
             describe_what_the_counters_want(&profiling, platform, true, USER_PARANOID)
                 .unwrap_or_default(),
@@ -427,6 +429,14 @@ pub fn run_ab(
                 out,
                 &format!("   {version}, {runs} runs x 4 (a b b a){frequency}"),
             )?;
+            if !duration {
+                print_warning(
+                    out,
+                    &format!(
+                        "{version} did not report {DURATION_TIME}, so the wall time was not measured"
+                    ),
+                )?;
+            }
             if let Some(warning) = describe_same_build(&pair[0], &pair[1]) {
                 print_warning(out, &warning)?;
             }
@@ -474,14 +484,13 @@ pub fn run_ab(
             let path = scratch
                 .get_path()
                 .join(format!("ab-{}-{block}.tsv", pair[which].get_name()));
-            blocks.push(count_user_events(&subjects[which], runs, &path)?);
+            blocks.push(count_user_events(&subjects[which], runs, *duration, &path)?);
         }
         let a = [blocks[0], blocks[3]];
         let b = [blocks[1], blocks[2]];
-        for line in lay_out_ab(&one.corpus.name, width, &a, &b, runs) {
+        for line in lay_out_ab(&one.corpus.name, width, &a, &b, [&counted[0], &counted[1]]) {
             print_line(out, &line)?;
         }
-        print_line(out, &format_ab_counts(width, &counted[0], &counted[1]))?;
         if let Some(difference) = find_count_differences(&counted[0], &counted[1]) {
             print_warning(out, &format!("{}: {difference}", one.corpus.name))?;
             code = 1;
@@ -544,45 +553,81 @@ fn describe_same_build(a: &Instance, b: &Instance) -> Option<String> {
     })
 }
 
-/// b over a: the instructions of both orders together, the cycles of each order on its own, then
-/// the means each side was read at.
+/// The means of a and b across both orders and b over a under them.
 fn lay_out_ab(
     tree: &str,
     width: usize,
     a: &[UserCounts; 2],
     b: &[UserCounts; 2],
-    runs: u32,
-) -> [String; 2] {
+    counted: [&Counts; 2],
+) -> [String; 3] {
     let instructions = |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
     let cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
     let ratio = |over: u64, under: u64| over as f64 / under as f64;
-    [
-        format!(
-            "{ROW_OPENING}{tree:<width$}   instructions {:.4}   cycles {:.3} | {:.3}",
-            ratio(instructions(b), instructions(a)),
-            ratio(b[0].cycles, a[0].cycles),
-            ratio(b[1].cycles, a[1].cycles)
-        ),
-        format!(
-            "{ROW_OPENING}{:<width$}   a {} instr {} cyc   b {} instr {} cyc   {runs} runs x 4",
-            "",
-            format_millions(instructions(a) / 2),
-            format_millions(cycles(a) / 2),
-            format_millions(instructions(b) / 2),
-            format_millions(cycles(b) / 2)
-        ),
-    ]
+    let mut columns = vec![
+        [
+            format!("{} instructions", format_millions(instructions(a) / 2)),
+            format!("{} instructions", format_millions(instructions(b) / 2)),
+            format!("{:.4}x", ratio(instructions(b), instructions(a))),
+        ],
+        [
+            format!("{} cycles", format_millions(cycles(a) / 2)),
+            format!("{} cycles", format_millions(cycles(b) / 2)),
+            format!("{:.3}x", ratio(cycles(b), cycles(a))),
+        ],
+    ];
+    if let ([Some(a0), Some(a1)], [Some(b0), Some(b1)]) =
+        ([a[0].wall, a[1].wall], [b[0].wall, b[1].wall])
+    {
+        let a_ns = a0.ns + a1.ns;
+        let b_ns = b0.ns + b1.ns;
+        columns.push([
+            format_ab_wall(a_ns, a0.noise_pct.max(a1.noise_pct)),
+            format_ab_wall(b_ns, b0.noise_pct.max(b1.noise_pct)),
+            format!("{:.3}x", ratio(b_ns, a_ns)),
+        ]);
+    }
+    columns.extend([
+        [
+            format!("{} files", format_thousands(counted[0].files)),
+            format!("{} files", format_thousands(counted[1].files)),
+            String::new(),
+        ],
+        [
+            format!("{} lines", format_thousands(counted[0].lines)),
+            format!("{} lines", format_thousands(counted[1].lines)),
+            String::new(),
+        ],
+    ]);
+    let widths: Vec<usize> = columns
+        .iter()
+        .map(|col| widest(col.iter().map(String::as_str)))
+        .collect();
+    let row = |at: usize, head: &str, label: &str| {
+        let mut line = format!("{ROW_OPENING}{head:<width$}{COUNT_GAP}{label:<5}  ");
+        for (col, cells) in columns.iter().enumerate() {
+            let cell = &cells[at];
+            if cell.is_empty() {
+                continue;
+            }
+            if col > 0 {
+                line.push_str(COUNT_GAP);
+            }
+            let gap = widths[col] - cell.chars().count();
+            line.push_str(cell);
+            line.push_str(&" ".repeat(gap));
+        }
+        line.trim_end().to_string()
+    };
+    [row(0, tree, "a"), row(1, "", "b"), row(2, "", "b / a")]
 }
 
-fn format_ab_counts(width: usize, a: &Counts, b: &Counts) -> String {
-    format!(
-        "{ROW_OPENING}{:<width$}   a {} files {} lines   b {} files {} lines",
-        "",
-        format_thousands(a.files),
-        format_thousands(a.lines),
-        format_thousands(b.files),
-        format_thousands(b.lines)
-    )
+fn format_ab_wall(ns: u64, noise_pct: f64) -> String {
+    let ms = format_thousands(((ns as f64) / 2_000_000.0).round() as u64);
+    match noise_pct > 0.0 {
+        true => format!("{ms} ms ±{noise_pct:.1}%"),
+        false => format!("{ms} ms"),
+    }
 }
 
 fn find_count_differences(a: &Counts, b: &Counts) -> Option<String> {
@@ -1173,7 +1218,7 @@ pub fn run_insights(
     if asked_for(PMU_PART) {
         print_header(out, "== pmu")?;
         pmu = match &profiling {
-            Profiling::Ready(version) => {
+            Profiling::Ready { version, .. } => {
                 print_line(out, &format!("   {version}"))?;
                 for (pass, events) in PASSES.iter().enumerate() {
                     print_line(
@@ -1223,7 +1268,7 @@ pub fn run_insights(
         unmeasured: unmeasured.map(str::to_string),
         syscalls,
         profiler: match profiling {
-            Profiling::Ready(version) => Some(version),
+            Profiling::Ready { version, .. } => Some(version),
             _ => None,
         },
         paranoid,
@@ -2346,7 +2391,7 @@ fn describe_what_the_counters_want(
     open: i64,
 ) -> Option<String> {
     match (profiling, platform.is_linux(), asked_for) {
-        (Profiling::Ready(_), _, _) | (_, _, false) => None,
+        (Profiling::Ready { .. }, _, _) | (_, _, false) => None,
         (_, false, _) => Some(PROFILER_ELSEWHERE.to_string()),
         (Profiling::Shut(level), _, _) => Some(format!(
             "{PROFILER} is here and {PARANOID_KEY} is {level}, so the hardware counters cannot \
@@ -3103,6 +3148,7 @@ mod tests {
 
     use linebench::counters::Channel;
     use linebench::fetch::{Fetched, Identity, Origin};
+    use linebench::pmu::Wall;
 
     use super::*;
 
@@ -3115,35 +3161,73 @@ mod tests {
     }
 
     #[test]
-    fn the_ab_lines_carry_b_over_a_for_instructions_and_the_cycles_of_each_order() {
+    fn the_ab_lines_lay_out_a_and_b_and_b_over_a_with_or_without_the_wall() {
+        let counted = Counts {
+            files: 63_738,
+            lines: 36_012_345,
+            code: 29_100_000,
+            comments: 4_500_000,
+            buckets: BTreeMap::from([("extra".to_string(), 2_412_345)]),
+        };
         let a = [
             UserCounts {
                 instructions: 2_000_000_000,
                 cycles: 800_000_000,
+                wall: Some(Wall {
+                    ns: 184_000_000,
+                    noise_pct: 0.3,
+                }),
             },
             UserCounts {
                 instructions: 2_000_000_000,
                 cycles: 820_000_000,
+                wall: Some(Wall {
+                    ns: 186_000_000,
+                    noise_pct: 0.4,
+                }),
             },
         ];
         let b = [
             UserCounts {
                 instructions: 1_990_000_000,
                 cycles: 792_000_000,
+                wall: Some(Wall {
+                    ns: 192_000_000,
+                    noise_pct: 0.5,
+                }),
             },
             UserCounts {
                 instructions: 1_990_000_000,
                 cycles: 824_100_000,
+                wall: Some(Wall {
+                    ns: 192_800_000,
+                    noise_pct: 0.2,
+                }),
             },
         ];
-        let [first, second] = lay_out_ab("linux", 8, &a, &b, 15);
         assert_eq!(
-            first,
-            "   linux      instructions 0.9950   cycles 0.990 | 1.005"
+            lay_out_ab("linux", 5, &a, &b, [&counted, &counted]),
+            [
+                "   linux   a      2000M instructions   810M cycles   185 ms ±0.4%   63,738 files   36,012,345 lines",
+                "           b      1990M instructions   808M cycles   192 ms ±0.5%   63,738 files   36,012,345 lines",
+                "           b / a  0.9950x              0.998x        1.040x",
+            ]
         );
+        let without_wall =
+            |counts: &[UserCounts; 2]| counts.map(|one| UserCounts { wall: None, ..one });
         assert_eq!(
-            second,
-            "              a 2000M instr 810M cyc   b 1990M instr 808M cyc   15 runs x 4"
+            lay_out_ab(
+                "linux",
+                5,
+                &without_wall(&a),
+                &without_wall(&b),
+                [&counted, &counted]
+            ),
+            [
+                "   linux   a      2000M instructions   810M cycles   63,738 files   36,012,345 lines",
+                "           b      1990M instructions   808M cycles   63,738 files   36,012,345 lines",
+                "           b / a  0.9950x              0.998x",
+            ]
         );
         assert_eq!(format_millions(12_345_678), "12.3M");
         assert_eq!(format_millions(15_787_520_396), "15788M");
@@ -3224,10 +3308,6 @@ mod tests {
             buckets: BTreeMap::from([(bucket.0.to_string(), bucket.1)]),
         };
         let a = counts(29_100_000, 4_500_000, ("extra", 2_412_345));
-        assert_eq!(
-            format_ab_counts(8, &a, &a),
-            "              a 63,738 files 36,012,345 lines   b 63,738 files 36,012,345 lines"
-        );
         assert_eq!(find_count_differences(&a, &a), None);
         let moved = counts(29_099_990, 4_500_010, ("extra", 2_412_345));
         assert_eq!(

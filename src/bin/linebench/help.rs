@@ -150,10 +150,10 @@ linebench ab <corpora|all|dir> [--counters a,b] [--runs <n>] [--same-work] [--ex
 
     Holds one build against another on the hardware counters, for the changes a run cannot tell
     from its noise. Two instances, a and b, each run under perf stat over the target in the order
-    a, b, b, a, counting user-space instructions and cycles, and one line per tree says b over a:
-    the instructions ratio, which holds to 0.01%, and the cycles ratio of each order, which agree
-    to about half a percent on a quiet machine. The results stay on the screen and the machine is
-    left as it is, so run stays the command for numbers that are kept.
+    a, b, b, a, counting user-space instructions, cycles and the wall time, and each tree prints
+    a, b and b / a across both orders: the instructions ratio, which holds to 0.01%, the cycles
+    ratio and the wall ratio. The results stay on the screen and the machine is left as it is, so
+    run stays the command for numbers that are kept.
 
     Each instance runs once before the counting, which fills the page cache and checks that
     both counted the same. Without --counters the two given instances are the pair, a before b

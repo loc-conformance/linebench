@@ -20,6 +20,7 @@ pub const FULL_RUN: f64 = 100.0;
 pub const USER_ONLY: &str = ":u";
 pub const INSTRUCTIONS: &str = "instructions";
 pub const CYCLES: &str = "cycles";
+pub const DURATION_TIME: &str = "duration_time";
 pub const BRANCH_INSTRUCTIONS: &str = "branch-instructions";
 pub const BRANCH_MISSES: &str = "branch-misses";
 pub const L1_LOADS: &str = "L1-dcache-loads";
@@ -49,6 +50,7 @@ const VERSION_FLAG: &str = "--version";
 const SEPARATOR: &str = "\t";
 const PROBE_TARGET: &str = "true";
 const PROBE_EVENTS: &str = "instructions,cycles";
+const PROBE_DURATION_EVENTS: &str = "instructions,cycles,duration_time:u";
 const RAW_PREFIX: &str = "pmu-";
 const RAW_SUFFIX: &str = "tsv";
 const COMMENT: char = '#';
@@ -63,7 +65,7 @@ const LEAST_COLUMNS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Profiling {
-    Ready(String),
+    Ready { version: String, duration: bool },
     NotThere,
     Shut(i64),
     Refused,
@@ -96,11 +98,19 @@ pub struct Subject<'a> {
     pub scrub: &'a [String],
 }
 
-/// The means of one `perf stat -r` over the user-space instructions and cycles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wall {
+    pub ns: u64,
+    pub noise_pct: f64,
+}
+
+/// The means of one `perf stat -r` over the user-space instructions and cycles, and its wall time
+/// when perf reports `duration_time`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UserCounts {
     pub instructions: u64,
     pub cycles: u64,
+    pub wall: Option<Wall>,
 }
 
 /// `open` is the paranoid level the asked-for counts stay open at below root: [`OPEN_PARANOID`]
@@ -127,28 +137,17 @@ pub fn find_profiler(
     {
         return Profiling::Shut(level);
     }
-    let path = probe.to_string_lossy().into_owned();
-    let asked = [
-        STAT,
-        SEPARATOR_FLAG,
-        SEPARATOR,
-        EVENTS_FLAG,
-        PROBE_EVENTS,
-        OUTPUT_FLAG,
-        &path,
-        END_OF_FLAGS,
-        PROBE_TARGET,
-    ];
-    match capture_with_status(PROFILER, &asked) {
-        Ok((true, _)) => {}
-        _ => return Profiling::Refused,
-    }
-    let counted = fs::read_to_string(probe).unwrap_or_default();
-    match parse_counts(&counted)
-        .iter()
-        .any(|reading| reading.count.is_some())
-    {
-        true => Profiling::Ready(version),
+    let Some(readings) =
+        probe_events(probe, PROBE_DURATION_EVENTS).or_else(|| probe_events(probe, PROBE_EVENTS))
+    else {
+        return Profiling::Refused;
+    };
+    let counted = [INSTRUCTIONS, CYCLES]
+        .into_iter()
+        .any(|event| find_user_count(&readings, event).is_some());
+    let duration = find_user_count(&readings, DURATION_TIME).is_some();
+    match counted {
+        true => Profiling::Ready { version, duration },
         false => Profiling::Refused,
     }
 }
@@ -175,8 +174,20 @@ pub fn count_one_pass(subject: &Subject, pass: usize, into: &Path) -> Result<Vec
     Ok(read)
 }
 
-pub fn count_user_events(subject: &Subject, runs: u32, path: &Path) -> Result<UserCounts, String> {
-    let events = [INSTRUCTIONS, CYCLES].map(|event| format!("{event}{USER_ONLY}"));
+pub fn count_user_events(
+    subject: &Subject,
+    runs: u32,
+    duration: bool,
+    path: &Path,
+) -> Result<UserCounts, String> {
+    let mut names = vec![INSTRUCTIONS, CYCLES];
+    if duration {
+        names.push(DURATION_TIME);
+    }
+    let events: Vec<String> = names
+        .into_iter()
+        .map(|event| format!("{event}{USER_ONLY}"))
+        .collect();
     let read = count_events(subject, &events.join(EVENT_SEPARATOR), runs, path)?;
     let find = |event: &str| {
         find_user_count(&read, event).ok_or_else(|| {
@@ -186,9 +197,16 @@ pub fn count_user_events(subject: &Subject, runs: u32, path: &Path) -> Result<Us
             )
         })
     };
+    let wall = find_user_reading(&read, DURATION_TIME).and_then(|reading| {
+        reading.count.map(|ns| Wall {
+            ns,
+            noise_pct: reading.noise_pct,
+        })
+    });
     Ok(UserCounts {
         instructions: find(INSTRUCTIONS)?,
         cycles: find(CYCLES)?,
+        wall,
     })
 }
 
@@ -216,6 +234,44 @@ pub fn run_once(subject: &Subject) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&finished.stdout).into_owned())
+}
+
+pub fn remove_raw_files(into: &Path, instance: &str) {
+    for pass in 0..PASSES.len() {
+        let _ = fs::remove_file(build_raw_path(into, instance, pass));
+    }
+}
+
+pub fn find_reading<'a>(counted: &'a Pmu, event: &str) -> Option<&'a Reading> {
+    counted
+        .readings
+        .iter()
+        .find(|reading| reading.event == event)
+}
+
+pub fn get_count(counted: &Pmu, event: &str) -> Option<u64> {
+    find_reading(counted, event).and_then(|reading| reading.count)
+}
+
+fn probe_events(probe: &Path, events: &str) -> Option<Vec<Reading>> {
+    let path = probe.to_string_lossy().into_owned();
+    let asked = [
+        STAT,
+        SEPARATOR_FLAG,
+        SEPARATOR,
+        EVENTS_FLAG,
+        events,
+        OUTPUT_FLAG,
+        &path,
+        END_OF_FLAGS,
+        PROBE_TARGET,
+    ];
+    match capture_with_status(PROFILER, &asked) {
+        Ok((true, _)) => {}
+        _ => return None,
+    }
+    let counted = fs::read_to_string(probe).unwrap_or_default();
+    Some(parse_counts(&counted))
 }
 
 fn count_events(
@@ -262,28 +318,14 @@ fn count_events(
 }
 
 /// perf prints a `:u` event under that name, so the event is found with or without its suffix.
-fn find_user_count(readings: &[Reading], event: &str) -> Option<u64> {
+fn find_user_reading<'a>(readings: &'a [Reading], event: &str) -> Option<&'a Reading> {
     readings
         .iter()
         .find(|reading| reading.event.trim_end_matches(USER_ONLY) == event)
-        .and_then(|reading| reading.count)
 }
 
-pub fn remove_raw_files(into: &Path, instance: &str) {
-    for pass in 0..PASSES.len() {
-        let _ = fs::remove_file(build_raw_path(into, instance, pass));
-    }
-}
-
-pub fn find_reading<'a>(counted: &'a Pmu, event: &str) -> Option<&'a Reading> {
-    counted
-        .readings
-        .iter()
-        .find(|reading| reading.event == event)
-}
-
-pub fn get_count(counted: &Pmu, event: &str) -> Option<u64> {
-    find_reading(counted, event).and_then(|reading| reading.count)
+fn find_user_count(readings: &[Reading], event: &str) -> Option<u64> {
+    find_user_reading(readings, event).and_then(|reading| reading.count)
 }
 
 // The extension is written into the name, since an instance carries its tag and with_extension
@@ -421,7 +463,10 @@ mod tests {
 
     #[test]
     fn a_user_space_event_is_found_under_its_suffixed_name_and_under_the_bare_one() {
-        let suffixed = PASS.replace("\tinstructions\t", "\tinstructions:u\t");
+        let suffixed = format!(
+            "{}185123456\t\tduration_time:u\t0.42%\t185123456\t100.00\t\t\n",
+            PASS.replace("\tinstructions\t", "\tinstructions:u\t")
+        );
         let readings = parse_counts(&suffixed);
         assert_eq!(readings[0].event, "instructions:u");
         assert_eq!(
@@ -429,6 +474,10 @@ mod tests {
             Some(14_923_456_789)
         );
         assert_eq!(find_user_count(&readings, CYCLES), Some(7_012_345_678));
+        assert_eq!(
+            find_user_reading(&readings, DURATION_TIME).map(|r| (r.count, r.noise_pct)),
+            Some((Some(185_123_456), 0.42))
+        );
         assert_eq!(find_user_count(&readings, "LLC-loads"), None);
         assert_eq!(find_user_count(&readings, BRANCH_MISSES), None);
     }

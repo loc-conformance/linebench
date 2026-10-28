@@ -359,23 +359,23 @@ linebench ab linux --given mezura@a=<one build> --given mezura@b=<another>
 One build against another on the hardware counters, for the changes a run cannot tell from its
 noise: wall-clock time on a short run moves a few percent between runs, and a parser change moves
 it by one. Two instances, a and b, each run under `perf stat` over the target in the order a, b,
-b, a, fifteen runs a block, counting user-space instructions and cycles, after one run of each
-that fills the page cache. One line per tree says b over a:
+b, a, fifteen runs a block, counting user-space instructions, cycles and the wall time, after one
+run of each that fills the page cache and checks that both counted the same:
 
 ```
    a  mezura@a  v3.3.0 (unreleased) (LOCAL BUILD a, sha256 505106430)
    b  mezura@b  v3.3.0 (unreleased) (LOCAL BUILD b, sha256 ab85ec02e)
    perf version 6.12.107, 15 runs x 4 (a b b a), cpu governor powersave, boost on
 
-   linux   instructions 0.9944   cycles 1.002 | 0.998
-           a 15787M instr 6383M cyc   b 15699M instr 6384M cyc   15 runs x 4
+   linux   a      15787M instructions   6383M cycles   241 ms ±0.4%   63,738 files   36,018,801 lines
+           b      15699M instructions   6384M cycles   240 ms ±0.5%   63,738 files   36,018,801 lines
+           b / a  0.9944x               1.000x         0.996x
 ```
 
 The instructions ratio holds to 0.01% between two runs of the same binary, so a change of 0.1% is
-real. The cycles come once from each order, and the two agree to about half a percent on a quiet
-machine, which is as fine as cycles get: a cycles change under one percent is noise. The results
-stay on the screen, the machine is left as it is, and `run` stays the command for numbers that are
-kept.
+real. The cycles and wall pool both orders, and a cycles change under one percent is noise. The
+results stay on the screen, the machine is left as it is, and `run` stays the command for numbers
+that are kept.
 
 By default an instance runs with the definition's target argument and its own `--args`, which is
 all two builds of one counter need. `--same-work` adds the definition's same-work flags and
