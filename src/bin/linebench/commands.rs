@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 
+use linebench::allocations::{
+    Allocations, Valgrind, count_allocations, find_valgrind, is_elf_binary,
+};
 use linebench::corpus::{
     Corpus, Counted, Parity, Verdict, check_commit, check_declares_files, count_tracked_files,
     describe_empty_count, judge_parity, read_changes, read_git_state, setup_corpus, shorten_hash,
@@ -22,13 +25,13 @@ use linebench::fetch::GIVEN_DIR;
 use linebench::fetch::{Manifest, calculate_sha256, fetch_counter, read_manifest};
 use linebench::files::{LargestFiles, find_largest_files};
 use linebench::insight::{
-    FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT, INSIGHTS_PAGE,
-    MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET,
+    ALLOCATIONS_PART, FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT,
+    INSIGHTS_PAGE, MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET,
 };
 use linebench::insight::{
-    Insights, ask_for_everything, build_insights_path, describe_cold_cache, format_floor,
-    format_memory, format_pmu, format_syscalls, format_syscalls_summary, get_floor_set_name,
-    write_insights, write_insights_page,
+    Insights, ask_for_everything, build_insights_path, describe_cold_cache, format_allocations,
+    format_floor, format_memory, format_pmu, format_syscalls, format_syscalls_summary,
+    get_floor_set_name, write_insights, write_insights_page,
 };
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
@@ -83,9 +86,9 @@ use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const FLOOR_TARGET: &str = "floor";
-const SYSCALLS_TABLE: Table = Table::SameWork;
+const INSIGHTS_TABLE: Table = Table::SameWork;
 const PROBE_FILE: &str = "probe.txt";
-const SYSCALLS_SUFFIX: &str = "txt";
+const PROBE_TEXT_SUFFIX: &str = "txt";
 const NO_DEFINITION: &str = "Binaries found that no definition names:";
 const CORPUS_COLUMN: &str = "corpus";
 const COUNT_GAP: &str = "   ";
@@ -110,11 +113,17 @@ const PROFILER_REFUSED: &str = "perf is here and it read no event, so the hardwa
                                 and WSL2 is one of them.";
 const PROFILER_ELSEWHERE: &str =
     "perf runs on linux alone, so the hardware counters cannot be read here.";
-const SYSCALLS_ASKS: &str = "Run the rest anyway? [Y/n] ";
+const VALGRIND_MISSING: &str = "valgrind is not present on the system, or is not in the PATH, so \
+                                the heap allocations cannot be counted. It is recommended to \
+                                download it first.";
+const VALGRIND_REFUSED: &str = "valgrind is here and it wrote no heap summary, so the heap \
+                                allocations cannot be counted.";
+const VALGRIND_ELSEWHERE: &str =
+    "valgrind runs on linux alone, so the heap allocations cannot be counted here.";
+const INSIGHTS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
-const MEMORY_TABLE: Table = Table::SameWork;
-const PMU_TABLE: Table = Table::SameWork;
 const PMU_PROBE_FILE: &str = "pmu-probe.tsv";
+const VALGRIND_PROBE_FILE: &str = "valgrind-probe.txt";
 const LINE_BREAK: &str = "\n";
 const NOISE_RUNS: u32 = 5;
 const LEAST_NOISE_RUNS: u32 = 3;
@@ -853,15 +862,14 @@ pub fn run_insights(
         None => ask_for_everything(),
     };
     let asked_for = |part: &str| asked.iter().any(|held| held == part);
-    let tracing = match platform.is_linux() && asked_for(SYSCALLS_PART) {
-        true => find_tracer(&scratch.get_path().join(PROBE_FILE)),
-        false => Tracing::NotThere,
-    };
-    let unmeasured = match (&tracing, platform.is_linux(), asked_for(SYSCALLS_PART)) {
-        (Tracing::Ready(_), _, _) | (_, _, false) => None,
-        (_, false, _) => Some(TRACER_ELSEWHERE),
-        (Tracing::Refused, _, _) => Some(TRACER_REFUSED),
-        (Tracing::NotThere, _, _) => Some(TRACER_MISSING),
+    let (tracer, unmeasured) = match (platform.is_linux(), asked_for(SYSCALLS_PART)) {
+        (_, false) => (None, None),
+        (false, true) => (None, Some(TRACER_ELSEWHERE.to_string())),
+        (true, true) => match find_tracer(&scratch.get_path().join(PROBE_FILE)) {
+            Tracing::Ready(version) => (Some(version), None),
+            Tracing::Refused => (None, Some(TRACER_REFUSED.to_string())),
+            Tracing::NotThere => (None, Some(TRACER_MISSING.to_string())),
+        },
     };
     let paranoid = platform.is_linux().then(read_paranoid).flatten();
     let profiling = match platform.is_linux() && asked_for(PMU_PART) {
@@ -875,10 +883,28 @@ pub fn run_insights(
     };
     let unread =
         describe_what_the_counters_want(&profiling, platform, asked_for(PMU_PART), OPEN_PARANOID);
-    let stopping: Vec<&str> = [unmeasured, unread.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect();
+    let profiler = match profiling {
+        Profiling::Ready { version, .. } => Some(version),
+        _ => None,
+    };
+    let (valgrind, allocations_unmeasured) =
+        match (platform.is_linux(), asked_for(ALLOCATIONS_PART)) {
+            (_, false) => (None, None),
+            (false, true) => (None, Some(VALGRIND_ELSEWHERE.to_string())),
+            (true, true) => match find_valgrind(&scratch.get_path().join(VALGRIND_PROBE_FILE)) {
+                Valgrind::Ready(version) => (Some(version), None),
+                Valgrind::Refused => (None, Some(VALGRIND_REFUSED.to_string())),
+                Valgrind::NotThere => (None, Some(VALGRIND_MISSING.to_string())),
+            },
+        };
+    let stopping: Vec<&str> = [
+        unmeasured.as_deref(),
+        unread.as_deref(),
+        allocations_unmeasured.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if !stopping.is_empty()
         && platform.is_linux()
         && !ask_to_go_on(out, &stopping.join(LINE_BREAK), options.yes)?
@@ -952,14 +978,14 @@ pub fn run_insights(
                 instance,
                 &locations.checkout,
                 &locations.corpus.extensions,
-                MEMORY_TABLE,
+                INSIGHTS_TABLE,
                 false,
             )?;
             print_line(out, &format!(">> {}", instance.get_name()))?;
             match sample_memory(
                 platform,
                 instance.get_name(),
-                MEMORY_TABLE,
+                INSIGHTS_TABLE,
                 &instance.identity.binary,
                 &args,
                 &instance.env,
@@ -982,13 +1008,16 @@ pub fn run_insights(
     let mut syscalls = Vec::new();
     if asked_for(SYSCALLS_PART) {
         print_header(out, "== syscalls")?;
-        syscalls = match &tracing {
-            Tracing::Ready(version) => {
+        syscalls = match &tracer {
+            Some(version) => {
                 print_line(out, &format!("   {version}"))?;
                 collect_syscalls(out, &instances, locations, &scrub, scratch.get_path())?
             }
-            _ => {
-                print_line(out, &format!("   {}", unmeasured.unwrap_or_default()))?;
+            None => {
+                print_line(
+                    out,
+                    &format!("   {}", unmeasured.as_deref().unwrap_or_default()),
+                )?;
                 Vec::new()
             }
         };
@@ -1006,8 +1035,8 @@ pub fn run_insights(
     let mut pmu = Vec::new();
     if asked_for(PMU_PART) {
         print_header(out, "== pmu")?;
-        pmu = match &profiling {
-            Profiling::Ready { version, .. } => {
+        pmu = match &profiler {
+            Some(version) => {
                 print_line(out, &format!("   {version}"))?;
                 for (pass, events) in PASSES.iter().enumerate() {
                     print_line(
@@ -1024,14 +1053,43 @@ pub fn run_insights(
                 );
                 collect_pmu(out, &mut settle, &instances, locations, &scrub, &res)?
             }
-            _ => {
-                print_line(out, &format!("   {}", unread.clone().unwrap_or_default()))?;
+            None => {
+                print_line(
+                    out,
+                    &format!("   {}", unread.as_deref().unwrap_or_default()),
+                )?;
                 Vec::new()
             }
         };
         if !pmu.is_empty() {
             print_header(out, "== pmu summary")?;
             for line in format_pmu(&pmu, paranoid, get_report_style()) {
+                print_line(out, &paint_table_line(&line))?;
+            }
+        }
+    }
+    let mut allocations = Vec::new();
+    if asked_for(ALLOCATIONS_PART) {
+        print_header(out, "== allocations")?;
+        allocations = match &valgrind {
+            Some(version) => {
+                print_line(out, &format!("   {version}"))?;
+                collect_allocations(out, &instances, locations, &scrub, scratch.get_path())?
+            }
+            None => {
+                print_line(
+                    out,
+                    &format!(
+                        "   {}",
+                        allocations_unmeasured.as_deref().unwrap_or_default()
+                    ),
+                )?;
+                Vec::new()
+            }
+        };
+        if !allocations.is_empty() {
+            print_header(out, "== allocations summary")?;
+            for line in format_allocations(&allocations, locations.corpus.files) {
                 print_line(out, &paint_table_line(&line))?;
             }
         }
@@ -1050,19 +1108,16 @@ pub fn run_insights(
             .collect::<Result<Vec<InstanceRecord>, String>>()?,
         floor: measurements,
         curves,
-        tracer: match tracing {
-            Tracing::Ready(version) => Some(version),
-            _ => None,
-        },
-        unmeasured: unmeasured.map(str::to_string),
+        tracer,
+        unmeasured,
         syscalls,
-        profiler: match profiling {
-            Profiling::Ready { version, .. } => Some(version),
-            _ => None,
-        },
+        profiler,
         paranoid,
         pmu_unmeasured: unread,
         pmu,
+        valgrind,
+        allocations_unmeasured,
+        allocations,
         asked,
     };
     write_insights(&res, &insights)?;
@@ -2896,14 +2951,14 @@ fn collect_syscalls(
             instance,
             &locations.checkout,
             &locations.corpus.extensions,
-            SYSCALLS_TABLE,
+            INSIGHTS_TABLE,
             false,
         )?;
         print_line(out, &format!(">> {}", instance.get_name()))?;
-        let into = scratch.join(format!("{}.{SYSCALLS_SUFFIX}", instance.get_name()));
+        let into = scratch.join(format!("{}.{PROBE_TEXT_SUFFIX}", instance.get_name()));
         match count_syscalls(
             instance.get_name(),
-            SYSCALLS_TABLE,
+            INSIGHTS_TABLE,
             &instance.identity.binary,
             &args,
             &instance.env,
@@ -2915,6 +2970,62 @@ fn collect_syscalls(
                     out,
                     &format!(
                         "   traced in {}",
+                        format_wall(counts.wall_ms as f64 / 1000.0, 0.0)
+                    ),
+                )?;
+                counted.push(counts);
+            }
+            Err(refused) => print_warning(out, &refused)?,
+        }
+    }
+    Ok(counted)
+}
+
+fn collect_allocations(
+    out: &mut dyn Write,
+    instances: &[Instance],
+    locations: &Locations,
+    scrub: &[String],
+    scratch: &Path,
+) -> Result<Vec<Allocations>, String> {
+    let mut counted = Vec::new();
+    for instance in instances {
+        print_line(out, &format!(">> {}", instance.get_name()))?;
+        if !is_elf_binary(&instance.identity.binary) {
+            print_line(
+                out,
+                &format!(
+                    "   {} is a script, so valgrind was not run on it",
+                    instance.get_name()
+                ),
+            )?;
+            continue;
+        }
+        let args = build_args(
+            instance,
+            &locations.checkout,
+            &locations.corpus.extensions,
+            INSIGHTS_TABLE,
+            false,
+        )?;
+        let into = scratch.join(format!(
+            "valgrind-{}.{PROBE_TEXT_SUFFIX}",
+            instance.get_name()
+        ));
+        match count_allocations(
+            instance.get_name(),
+            INSIGHTS_TABLE,
+            &instance.identity.binary,
+            &args,
+            &instance.env,
+            scrub,
+            &into,
+        ) {
+            Ok(counts) => {
+                print_line(
+                    out,
+                    &format!(
+                        "   counted in {}",
                         format_wall(counts.wall_ms as f64 / 1000.0, 0.0)
                     ),
                 )?;
@@ -2961,7 +3072,7 @@ fn collect_pmu(
             instance,
             &locations.checkout,
             &locations.corpus.extensions,
-            PMU_TABLE,
+            INSIGHTS_TABLE,
             false,
         )?;
         let subject = build_subject(instance, &args, scrub);
@@ -2995,7 +3106,7 @@ fn collect_pmu(
         }
         counted.push(Pmu {
             instance: instance.get_name().to_string(),
-            table: PMU_TABLE.as_str().to_string(),
+            table: INSIGHTS_TABLE.as_str().to_string(),
             lines,
             wall_ms,
             readings,
@@ -3016,10 +3127,10 @@ fn find_lines(
         instance,
         &locations.checkout,
         &locations.corpus.extensions,
-        PMU_TABLE,
+        INSIGHTS_TABLE,
         true,
     )?;
-    let name = get_capture_name(PMU_TABLE, instance.get_name());
+    let name = get_capture_name(INSIGHTS_TABLE, instance.get_name());
     let capture = settle.capture_output(
         out,
         &name,
@@ -3052,7 +3163,7 @@ fn ask_to_go_on(out: &mut dyn Write, why: &str, yes: bool) -> Result<bool, Strin
         print_line(out, CARRYING_ON)?;
         return Ok(true);
     }
-    let _ = write!(out, "{SYSCALLS_ASKS}");
+    let _ = write!(out, "{INSIGHTS_ASKS}");
     let _ = out.flush();
     let mut answer = String::new();
     let _ = io::stdin().read_line(&mut answer);

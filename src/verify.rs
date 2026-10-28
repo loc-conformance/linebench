@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::allocations::Allocations;
 use crate::corpus::{Counted, Parity, judge_parity};
 use crate::files::read_text;
 use crate::insight::{
-    FLOOR_PART, INSIGHTS_FILE, Insights, MEMORY_PART, PMU_PART, SYSCALLS_PART, read_insights,
+    ALLOCATIONS_PART, FLOOR_PART, INSIGHTS_FILE, MEMORY_PART, PMU_PART, SYSCALLS_PART,
 };
+use crate::insight::{Insights, read_insights};
 use crate::measure::Table;
 use crate::measure::{CONTROL_END, CONTROL_START};
 use crate::pmu::Pmu;
@@ -170,6 +172,9 @@ pub fn check_insights(dir: &Path) -> Result<Verification, String> {
     level.held.push(check_curves(&insights.curves));
     level.held.push(check_the_counted_calls(&insights.syscalls));
     level.held.push(check_the_counted_events(&insights.pmu));
+    level
+        .held
+        .push(check_the_counted_allocations(&insights.allocations));
     level.held.push(check_the_parts_asked_for(&insights));
     let raw = check_exports(dir, &insights.floor);
     let reach = match (insights.floor.is_empty(), raw.absent.is_empty()) {
@@ -214,6 +219,12 @@ fn check_who_was_measured(insights: &Insights) -> Held {
                 .pmu
                 .iter()
                 .map(|read| ("the hardware counters", read.instance.as_str())),
+        )
+        .chain(
+            insights
+                .allocations
+                .iter()
+                .map(|counted| ("the allocations", counted.instance.as_str())),
         );
     let mut broken = Vec::new();
     for (part, instance) in measured {
@@ -339,6 +350,34 @@ fn check_the_counted_events(counted: &[Pmu]) -> Held {
     )
 }
 
+fn check_the_counted_allocations(counted: &[Allocations]) -> Held {
+    let mut broken = Vec::new();
+    for one in counted {
+        if one.allocs == 0 && one.bytes_allocated > 0 {
+            broken.push(format!(
+                "{}: {} bytes allocated across 0 allocations",
+                one.instance, one.bytes_allocated
+            ));
+        }
+        if one.at_exit_bytes > one.bytes_allocated {
+            broken.push(format!(
+                "{}: {} bytes in use at exit out of {} allocated",
+                one.instance, one.at_exit_bytes, one.bytes_allocated
+            ));
+        }
+        if one.at_exit_blocks > one.allocs {
+            broken.push(format!(
+                "{}: {} blocks in use at exit out of {} allocations",
+                one.instance, one.at_exit_blocks, one.allocs
+            ));
+        }
+    }
+    Held::of(
+        format!("{} heap summaries hold together", counted.len()),
+        broken,
+    )
+}
+
 /// A part the session was never asked for carries nothing. The other way around does not hold: a
 /// part asked for can still come back empty, since the tool it needs may not be on the machine.
 fn check_the_parts_asked_for(insights: &Insights) -> Held {
@@ -349,6 +388,7 @@ fn check_the_parts_asked_for(insights: &Insights) -> Held {
         (MEMORY_PART, !insights.curves.is_empty()),
         (SYSCALLS_PART, !insights.syscalls.is_empty()),
         (PMU_PART, !insights.pmu.is_empty()),
+        (ALLOCATIONS_PART, !insights.allocations.is_empty()),
     ] {
         if measured && !asked(part) {
             broken.push(format!(
@@ -1008,6 +1048,9 @@ mod tests {
             paranoid: None,
             pmu_unmeasured: None,
             pmu: Vec::new(),
+            valgrind: None,
+            allocations_unmeasured: None,
+            allocations: Vec::new(),
             asked: crate::insight::ask_for_everything(),
         }
     }
@@ -1315,5 +1358,25 @@ mod tests {
         let held = check_control(&[row], &failed);
         assert!(held.holds(), "{held:?}");
         assert!(held.said.contains("hyperfine failed"), "{held:?}");
+    }
+
+    #[test]
+    fn a_heap_summary_whose_exit_bytes_or_blocks_exceed_what_was_allocated_is_caught() {
+        let valid = Allocations {
+            instance: "mezura".to_string(),
+            table: "t1".to_string(),
+            wall_ms: 1000,
+            allocs: 100,
+            frees: 100,
+            bytes_allocated: 4096,
+            at_exit_bytes: 512,
+            at_exit_blocks: 2,
+        };
+        assert!(check_the_counted_allocations(std::slice::from_ref(&valid)).holds());
+        let mut impossible = valid;
+        impossible.at_exit_bytes = 8192;
+        impossible.at_exit_blocks = 200;
+        let held = check_the_counted_allocations(&[impossible]);
+        assert_eq!(held.broken.len(), 2, "{held:?}");
     }
 }

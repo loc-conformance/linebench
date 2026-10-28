@@ -275,6 +275,7 @@ lengthen and disturb it. What each system can answer:
 | peak memory and the curve | yes, `/proc/<pid>/status` | yes, `GetProcessMemoryInfo` | no samples yet |
 | the counts of system calls | yes, `strace -c -f` | no | no |
 | the hardware counters | yes, `perf stat` | no | no |
+| the heap allocations | yes, `valgrind` | no | no |
 
 **The floor** is what a counter costs before it has counted anything. Three timings per instance,
 thirty runs and no settle: the version answer, `<counter> --version`, and the two ready floors,
@@ -339,15 +340,21 @@ Each instance is captured once before its passes, which settles the page cache a
 count the table divides by. Linux only, and it wants root or `kernel.perf_event_paranoid` at 1,
 since above that perf drops the kernel and the counts would cover user space alone.
 
+**The heap allocations** are one execution per instance under `valgrind` with `--leak-check=no` and
+`--undef-value-errors=no`, reporting total allocations, allocations per file, total bytes allocated,
+average bytes per allocation, and bytes still in use at exit. Counters that are scripts (`cloc`) are
+skipped, and counters that bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under
+the table.
+
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
-needs is missing. `--only floor,memory,syscalls,pmu` names which of the insights to measure.
-A part left out is named as left out in the
-record and on the page, so an empty section is never read as a measurement that found nothing.
+needs is missing. `--only floor,memory,syscalls,pmu,allocations` names which of the insights to
+measure. A part left out is named as left out in the record and on the page, so an empty section is
+never read as a measurement that found nothing.
 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
 machine block, the antivirus state, the corpus with its commit and the instances measured, so it
 stands on its own, and the hyperfine exports sit beside it. `insights.md` is the same session for a
-reader: the machine, the corpus and the three tables above as they were printed. An `--args` or
+reader: the machine, the corpus and the five sections above as they were printed. An `--args` or
 `--env` instance or a build of yours sends the session under `results/insights/local/`.
 
 ### ab
@@ -415,8 +422,9 @@ directory, or the `run.json` inside it.
 What one `insights` command wrote is read the same way. Name its directory, or the `insights.json`
 inside it, and the floor is held against itself and against its exports, every memory curve
 against the peak the system reported independently of the samples, every traced instance against
-the calls it listed, and every number against the instances the session says it measured. A part
-`--only` left out and measured all the same fails too.
+the calls it listed, every profiled instance against the events it read, every heap summary
+against what it allocated, and every number against the instances the session says it measured. A
+part `--only` left out and measured all the same fails too.
 
 ![what verify prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/verify.png)
 
@@ -647,7 +655,7 @@ flag belongs to the commands whose help names it, and a command refuses one that
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
-| what `insights` measures | `--only floor,memory,syscalls,pmu` | | | all four |
+| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations` | | | all five |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | cloc |

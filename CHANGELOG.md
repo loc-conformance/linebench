@@ -8,6 +8,9 @@ New:
   under `perf stat` in the order a, b, b, a over corpora and folders, user-space instructions,
   cycles and wall time, count checks, `--json`, and `--files [<n>]` for the largest files of a
   target. Linux, with `kernel.perf_event_paranoid` at 2 or below.
+- `insights` counts heap allocations on Linux through `valgrind` in a new `allocations` section:
+  allocations, allocations per file, total bytes allocated, bytes per allocation, and bytes in use
+  at exit.
 - An instance can carry an environment of its own, `--env <instance>=<NAME>=<value>` or `env` in
   its `[given]` entry.
 

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::allocations::Allocations;
 use crate::corpus::shorten_hash;
 use crate::defender::DefenderState;
 use crate::files::read_json;
@@ -37,9 +38,16 @@ pub const FLOOR_PART: &str = "floor";
 pub const MEMORY_PART: &str = "memory";
 pub const SYSCALLS_PART: &str = "syscalls";
 pub const PMU_PART: &str = "pmu";
+pub const ALLOCATIONS_PART: &str = "allocations";
 /// What `insights` measures, and what `--only` names. A run does all of them unless it says
 /// otherwise.
-pub const INSIGHT_PARTS: [&str; 4] = [FLOOR_PART, MEMORY_PART, SYSCALLS_PART, PMU_PART];
+pub const INSIGHT_PARTS: [&str; 5] = [
+    FLOOR_PART,
+    MEMORY_PART,
+    SYSCALLS_PART,
+    PMU_PART,
+    ALLOCATIONS_PART,
+];
 pub const SYSCALLS_HEADING: &str = "family / call";
 const PMU_HEADING: &str = "instance";
 const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends. What a run cannot \
@@ -55,10 +63,14 @@ const PAGES_READ_IN: &str = "from disk";
 const SYSCALLS_MEANS: &str = "What each counter asked of the kernel, counted by the tracer.";
 const PMU_MEANS: &str = "What the cpu did while each counter counted, read through perf in three \
                          passes of four events.";
+const ALLOCATIONS_MEANS: &str =
+    "What each counter asked of the heap allocator, counted by valgrind.";
 const NO_SYSCALLS: &str = "The system calls were not counted in this session.";
 const NO_PMU: &str = "The hardware counters were not read in this session.";
+const NO_ALLOCATIONS: &str = "The heap allocations were not counted in this session.";
 const NOT_ASKED: &str = "Not asked for in this session.";
 const PMU_TITLE: &str = "Hardware counters";
+const ALLOCATIONS_TITLE: &str = "Allocations";
 const PMU_LINES: &str = "lines";
 const PMU_WORK: &str = "work";
 const PMU_BRANCHES: &str = "branches";
@@ -117,6 +129,14 @@ const SHADES: [[u8; 3]; 8] = [
     [238, 78, 224],
 ];
 const SYSCALLS_HEADINGS: [&str; 4] = ["instance", "syscalls", "per file", "errors"];
+const ALLOCATIONS_HEADINGS: [&str; 6] = [
+    "instance",
+    "allocs",
+    "per file",
+    "allocated",
+    "per alloc",
+    "at exit",
+];
 const MEMBER_INDENT: &str = "  ";
 const REST_LABEL: &str = "rest";
 const SHOWN_PART: u64 = 100;
@@ -150,6 +170,12 @@ pub struct Insights {
     pub pmu_unmeasured: Option<String>,
     #[serde(default)]
     pub pmu: Vec<Pmu>,
+    #[serde(default)]
+    pub valgrind: Option<String>,
+    #[serde(default)]
+    pub allocations_unmeasured: Option<String>,
+    #[serde(default)]
+    pub allocations: Vec<Allocations>,
     /// The parts this run was asked for. A record written before --only was there asked for all of
     /// them, which is what an empty field would otherwise look like.
     #[serde(default = "ask_for_everything")]
@@ -254,33 +280,32 @@ pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -
         counted.push(String::new());
         counted.extend(format_syscalls(&insights.syscalls, Style::Hidden));
     }
-    match (asked_for(SYSCALLS_PART), counted.is_empty()) {
-        (false, _) => lines.extend(say_it_was_not_asked_for("System calls")),
-        (true, true) => lines.extend([
-            "## System calls".to_string(),
-            String::new(),
-            insights
-                .unmeasured
-                .clone()
-                .unwrap_or_else(|| NO_SYSCALLS.to_string()),
-            String::new(),
-        ]),
-        (true, false) => lines.extend(wrap_in_fence("System calls", SYSCALLS_MEANS, counted)),
-    }
+    lines.extend(lay_out_section(
+        asked_for(SYSCALLS_PART),
+        "System calls",
+        SYSCALLS_MEANS,
+        insights.unmeasured.as_deref(),
+        NO_SYSCALLS,
+        counted,
+    ));
     let read = format_pmu(&insights.pmu, insights.paranoid, Style::Hidden);
-    match (asked_for(PMU_PART), read.is_empty()) {
-        (false, _) => lines.extend(say_it_was_not_asked_for(PMU_TITLE)),
-        (true, true) => lines.extend([
-            format!("## {PMU_TITLE}"),
-            String::new(),
-            insights
-                .pmu_unmeasured
-                .clone()
-                .unwrap_or_else(|| NO_PMU.to_string()),
-            String::new(),
-        ]),
-        (true, false) => lines.extend(wrap_in_fence(PMU_TITLE, PMU_MEANS, read)),
-    }
+    lines.extend(lay_out_section(
+        asked_for(PMU_PART),
+        PMU_TITLE,
+        PMU_MEANS,
+        insights.pmu_unmeasured.as_deref(),
+        NO_PMU,
+        read,
+    ));
+    let allocated = format_allocations(&insights.allocations, insights.corpus.files);
+    lines.extend(lay_out_section(
+        asked_for(ALLOCATIONS_PART),
+        ALLOCATIONS_TITLE,
+        ALLOCATIONS_MEANS,
+        insights.allocations_unmeasured.as_deref(),
+        NO_ALLOCATIONS,
+        allocated,
+    ));
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
@@ -407,9 +432,9 @@ pub fn format_syscalls_summary(counted: &[Syscalls], files: Option<u64>) -> Vec<
     if counted.is_empty() {
         return Vec::new();
     }
-    let headings: Vec<String> = SYSCALLS_HEADINGS[1..]
+    let labels: Vec<&str> = counted
         .iter()
-        .map(|heading| (*heading).to_string())
+        .map(|counts| counts.instance.as_str())
         .collect();
     let rows: Vec<Vec<String>> = counted
         .iter()
@@ -421,21 +446,7 @@ pub fn format_syscalls_summary(counted: &[Syscalls], files: Option<u64>) -> Vec<
             ]
         })
         .collect();
-    let gutter = measure_gutter(
-        SYSCALLS_HEADINGS[0],
-        counted.iter().map(|counts| counts.instance.as_str()),
-    );
-    let widths = measure_columns(&headings, &rows);
-    let mut lines = vec![lay_out_numbers(
-        SYSCALLS_HEADINGS[0],
-        &headings,
-        gutter,
-        &widths,
-    )];
-    for (counts, row) in counted.iter().zip(&rows) {
-        lines.push(lay_out_numbers(&counts.instance, row, gutter, &widths));
-    }
-    lines
+    lay_out_summary_table(&SYSCALLS_HEADINGS, &labels, &rows)
 }
 
 pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
@@ -677,7 +688,84 @@ pub fn format_pmu(counted: &[Pmu], paranoid: Option<i64>, style: Style) -> Vec<S
     lines
 }
 
-/// The tables are laid out for a terminal, so the page keeps them in a fence as they are.
+pub fn format_allocations(counted: &[Allocations], files: Option<u64>) -> Vec<String> {
+    if counted.is_empty() {
+        return Vec::new();
+    }
+    let labels: Vec<&str> = counted
+        .iter()
+        .map(|counts| counts.instance.as_str())
+        .collect();
+    let columns = ALLOCATIONS_HEADINGS.len() - 1;
+    let mut unintercepted: Vec<&str> = Vec::new();
+    let rows: Vec<Vec<String>> = counted
+        .iter()
+        .map(|counts| {
+            if counts.allocs == 0 {
+                unintercepted.push(counts.instance.as_str());
+                return vec![String::new(); columns];
+            }
+            let per_alloc = format_heap_bytes(
+                (counts.bytes_allocated as f64 / counts.allocs as f64).round() as u64,
+            );
+            vec![
+                format_thousands(counts.allocs),
+                format_per_file(counts.allocs, files),
+                format_heap_bytes(counts.bytes_allocated),
+                per_alloc,
+                format_heap_bytes(counts.at_exit_bytes),
+            ]
+        })
+        .collect();
+    let mut lines = lay_out_summary_table(&ALLOCATIONS_HEADINGS, &labels, &rows);
+    if !unintercepted.is_empty() {
+        lines.push(String::new());
+        let pronoun = match unintercepted.len() {
+            1 => "its",
+            _ => "their",
+        };
+        lines.push(format!(
+            "{INDENT}{} made no allocations through libc, so valgrind saw none of {pronoun} heap",
+            unintercepted.join(", ")
+        ));
+    }
+    lines
+}
+
+fn lay_out_section(
+    asked: bool,
+    heading: &str,
+    means: &str,
+    unmeasured: Option<&str>,
+    fallback: &str,
+    body: Vec<String>,
+) -> Vec<String> {
+    match (asked, body.is_empty()) {
+        (false, _) => say_it_was_not_asked_for(heading),
+        (true, true) => vec![
+            format!("## {heading}"),
+            String::new(),
+            unmeasured.unwrap_or(fallback).to_string(),
+            String::new(),
+        ],
+        (true, false) => wrap_in_fence(heading, means, body),
+    }
+}
+
+fn lay_out_summary_table(headings: &[&str], labels: &[&str], rows: &[Vec<String>]) -> Vec<String> {
+    let columns: Vec<String> = headings[1..]
+        .iter()
+        .map(|heading| (*heading).to_string())
+        .collect();
+    let gutter = measure_gutter(headings[0], labels.iter().copied());
+    let widths = measure_columns(&columns, rows);
+    let mut lines = vec![lay_out_numbers(headings[0], &columns, gutter, &widths)];
+    for (label, row) in labels.iter().zip(rows) {
+        lines.push(lay_out_numbers(label, row, gutter, &widths));
+    }
+    lines
+}
+
 // A part left out keeps its heading, so the page says the measuring was not asked for rather than
 // leaving a reader to wonder where the section went.
 fn say_it_was_not_asked_for(heading: &str) -> Vec<String> {
@@ -689,6 +777,7 @@ fn say_it_was_not_asked_for(heading: &str) -> Vec<String> {
     ]
 }
 
+/// The tables are laid out for a terminal, so the page keeps them in a fence as they are.
 fn wrap_in_fence(heading: &str, means: &str, body: Vec<String>) -> Vec<String> {
     if body.is_empty() {
         return Vec::new();
@@ -815,6 +904,14 @@ fn format_bytes(bytes: u64) -> String {
         format!("{value:.1} {name}")
     } else {
         format!("{value:.0} {name}")
+    }
+}
+
+fn format_heap_bytes(bytes: u64) -> String {
+    if (bytes as f64) < KILOBYTE {
+        format!("{bytes} B")
+    } else {
+        format_bytes(bytes)
     }
 }
 
@@ -1240,6 +1337,9 @@ mod tests {
             paranoid: None,
             pmu_unmeasured: None,
             pmu,
+            valgrind: None,
+            allocations_unmeasured: None,
+            allocations: Vec::new(),
             asked: ask_for_everything(),
         }
     }
@@ -1713,5 +1813,67 @@ mod tests {
             .find(|line| line.contains("tokei"))
             .expect("the counter has a row");
         assert!(row.ends_with("13.3 ms ± 1.2"), "{row}");
+    }
+
+    #[test]
+    fn the_allocations_summary_formats_the_heap_and_names_an_instance_valgrind_cannot_see() {
+        let counted = vec![
+            Allocations {
+                instance: "mezura".to_string(),
+                table: "t1".to_string(),
+                wall_ms: 4000,
+                allocs: 1000,
+                frees: 1000,
+                bytes_allocated: 1_024_000,
+                at_exit_bytes: 0,
+                at_exit_blocks: 0,
+            },
+            Allocations {
+                instance: "scc".to_string(),
+                table: "t1".to_string(),
+                wall_ms: 2000,
+                allocs: 0,
+                frees: 0,
+                bytes_allocated: 0,
+                at_exit_bytes: 0,
+                at_exit_blocks: 0,
+            },
+            Allocations {
+                instance: "tokei".to_string(),
+                table: "t1".to_string(),
+                wall_ms: 8000,
+                allocs: 25_000,
+                frees: 24_990,
+                bytes_allocated: 8_800_000,
+                at_exit_bytes: 4096,
+                at_exit_blocks: 10,
+            },
+        ];
+        let lines = format_allocations(&counted, Some(500));
+        assert_eq!(
+            lines[1].split_whitespace().collect::<Vec<&str>>(),
+            [
+                "mezura", "1,000", "2.0", "1000", "KB", "1.0", "KB", "0", "B"
+            ]
+        );
+        assert_eq!(lines[2].trim(), "scc");
+        assert_eq!(
+            lines[3].split_whitespace().collect::<Vec<&str>>(),
+            [
+                "tokei", "25,000", "50.0", "8.4", "MB", "352", "B", "4.0", "KB"
+            ]
+        );
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .contains("scc made no allocations through libc"),
+            "{lines:?}"
+        );
+        let mut insights = build_insights(Vec::new(), Vec::new());
+        insights.allocations = counted;
+        let page = build_insights_page(&insights, &only_tokei()).join("\n");
+        assert!(page.contains(ALLOCATIONS_MEANS), "{page}");
+        assert!(page.contains("scc made no allocations"), "{page}");
     }
 }
