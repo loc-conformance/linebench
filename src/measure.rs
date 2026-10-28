@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -122,6 +121,23 @@ pub struct Capture {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedCommand {
+    pub instance: String,
+    pub command: String,
+    pub env: BTreeMap<String, String>,
+}
+
+impl TimedCommand {
+    pub fn describe_command(&self) -> String {
+        if self.env.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", describe_env(&self.env), self.command)
+        }
+    }
+}
+
 pub struct Runner {
     pub failures: Vec<String>,
     pub warnings: Vec<String>,
@@ -159,12 +175,45 @@ impl Runner {
         &mut self,
         out: &mut dyn Write,
         name: &str,
-        commands: &[(String, String)],
-        env: &BTreeMap<String, String>,
+        commands: &[TimedCommand],
     ) -> Result<(), String> {
         print_line(out, &format!(">> {name}"))?;
         let export = self.res.join(format!("{name}.json"));
         let markdown = self.res.join(format!("{name}.md"));
+        let mut results = Vec::new();
+        let mut table = Vec::new();
+        for (index, timed) in commands.iter().enumerate() {
+            if index > 0 && self.style.is_shown() {
+                print_line(out, "")?;
+            }
+            let _ = fs::remove_file(&export);
+            let _ = fs::remove_file(&markdown);
+            let recorded = timed.describe_command();
+            self.commands
+                .insert(recorded.clone(), timed.instance.clone());
+            self.run_one_hyperfine(out, name, timed, &export, &markdown)?;
+            take_json_results(&export, &recorded, &mut results);
+            take_markdown_rows(&markdown, &timed.command, &recorded, &mut table);
+        }
+        if !results.is_empty()
+            && let Ok(compact) = serde_json::to_string(&serde_json::json!({ "results": results }))
+        {
+            let _ = fs::write(&export, compact);
+        }
+        if !table.is_empty() {
+            let _ = fs::write(&markdown, format!("{}\n", table.join("\n")));
+        }
+        Ok(())
+    }
+
+    fn run_one_hyperfine(
+        &mut self,
+        out: &mut dyn Write,
+        name: &str,
+        timed: &TimedCommand,
+        export: &Path,
+        markdown: &Path,
+    ) -> Result<(), String> {
         let mut hyperfine = Command::new(HYPERFINE);
         hyperfine.args([
             "-N",
@@ -180,14 +229,11 @@ impl Runner {
         }
         hyperfine.args(["--export-json", &export.to_string_lossy()]);
         hyperfine.args(["--export-markdown", &markdown.to_string_lossy()]);
-        for (instance, command) in commands {
-            hyperfine.arg(command);
-            self.commands.insert(command.clone(), instance.clone());
-        }
+        hyperfine.arg(&timed.command);
         for name in &self.scrub {
             hyperfine.env_remove(name);
         }
-        hyperfine.envs(env);
+        hyperfine.envs(&timed.env);
         let report = if self.style.is_shown() {
             Stdio::piped()
         } else {
@@ -199,7 +245,7 @@ impl Runner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("{HYPERFINE} could not be run: {error}"))?;
-        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), commands);
+        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), timed);
         let status = child
             .wait()
             .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
@@ -217,10 +263,9 @@ impl Runner {
                 out,
                 &format!("{WARNING_LABEL}{HYPERFINE} reported a problem on {name}: {detail}"),
             )?;
-            self.failures.push(name.to_string());
-        }
-        if export.is_file() {
-            shrink_json(&export);
+            if !self.failures.iter().any(|failed| failed == name) {
+                self.failures.push(name.to_string());
+            }
         }
         Ok(())
     }
@@ -317,34 +362,21 @@ pub fn run_phases(
     extensions: &[String],
 ) -> Result<(), String> {
     let bare = build_command(&instances[control], corpus, extensions, Table::OutOfTheBox)?;
-    let own = &instances[control].env;
-    // A set times every instance under one hyperfine process, which has one environment, so an
-    // instance's own env rides on the control sets alone and run refuses an instance that has one.
-    let shared = BTreeMap::new();
     print_line(out, "\n== opening control run")?;
-    runner.run_hyperfine(out, CONTROL_START, std::slice::from_ref(&bare), own)?;
+    runner.run_hyperfine(out, CONTROL_START, std::slice::from_ref(&bare))?;
     for table in TABLES {
         print_line(out, &format!("\n== {}", table.describe()))?;
-        let commands: Vec<(String, String)> = instances
+        let commands: Vec<TimedCommand> = instances
             .iter()
             .map(|instance| build_command(instance, corpus, extensions, table))
             .collect::<Result<_, _>>()?;
-        runner.run_hyperfine(out, &get_set_name(table, FORWARD), &commands, &shared)?;
+        runner.run_hyperfine(out, &get_set_name(table, FORWARD), &commands)?;
         print_line(out, "")?;
-        let reversed: Vec<(String, String)> = commands.into_iter().rev().collect();
-        runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed, &shared)?;
+        let reversed: Vec<TimedCommand> = commands.into_iter().rev().collect();
+        runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed)?;
     }
     print_line(out, "\n== closing control run")?;
-    runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare), own)
-}
-
-/// What stops an instance with an env of its own from being timed in a set with the others.
-pub fn explain_one_environment(instance: &str, command: &str) -> String {
-    format!(
-        "{instance} carries env, and {command} times every instance under one hyperfine process, \
-         which has one environment. ab, check, noise and insights without the floor run each \
-         instance on its own and take it"
-    )
+    runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare))
 }
 
 pub fn capture_plain_output(
@@ -394,12 +426,13 @@ pub fn build_command(
     corpus: &Path,
     extensions: &[String],
     table: Table,
-) -> Result<(String, String), String> {
+) -> Result<TimedCommand, String> {
     let args = build_args(instance, corpus, extensions, table, false)?;
-    Ok((
-        instance.get_name().to_string(),
-        join_command(&instance.identity.binary, &args),
-    ))
+    Ok(TimedCommand {
+        instance: instance.get_name().to_string(),
+        command: join_command(&instance.identity.binary, &args),
+        env: instance.env.clone(),
+    })
 }
 
 /// An instance's env as it would be typed, `NAME=value` pairs with a space between them.
@@ -469,7 +502,7 @@ fn relay_report(
     out: &mut dyn Write,
     report: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
-    commands: &[(String, String)],
+    timed: &TimedCommand,
 ) -> Result<String, String> {
     thread::scope(|scope| {
         let collected = scope.spawn(move || {
@@ -484,7 +517,11 @@ fn relay_report(
             for line in BufReader::new(report).split(b'\n') {
                 let line = line
                     .map_err(|error| format!("{HYPERFINE}'s report could not be read: {error}"))?;
-                let line = format_report_line(&String::from_utf8_lossy(&line), commands);
+                let line = format_report_line(
+                    &String::from_utf8_lossy(&line),
+                    &timed.instance,
+                    &timed.command,
+                );
                 if line.is_empty() {
                     blank_pending = true;
                     continue;
@@ -500,13 +537,8 @@ fn relay_report(
     })
 }
 
-fn format_report_line(line: &str, commands: &[(String, String)]) -> String {
-    let mut line = line.trim_end().to_string();
-    let mut longest_first: Vec<&(String, String)> = commands.iter().collect();
-    longest_first.sort_by_key(|(_, command)| Reverse(command.len()));
-    for (instance, command) in longest_first {
-        line = line.replace(command.as_str(), instance);
-    }
+fn format_report_line(line: &str, instance: &str, command: &str) -> String {
+    let line = line.trim_end().replace(command, instance);
     if line.is_empty() {
         return line;
     }
@@ -534,16 +566,35 @@ fn build_sleep(platform: Platform, seconds: u32) -> String {
     }
 }
 
-fn shrink_json(path: &Path) {
+fn take_json_results(path: &Path, recorded: &str, results: &mut Vec<Value>) {
     let Ok(text) = fs::read_to_string(path) else {
         return;
     };
-    let Ok(document) = serde_json::from_str::<Value>(&text) else {
+    let _ = fs::remove_file(path);
+    let Ok(mut document) = serde_json::from_str::<Value>(&text) else {
         return;
     };
-    if let Ok(compact) = serde_json::to_string(&document) {
-        let _ = fs::write(path, compact);
+    let Some(entries) = document["results"].as_array_mut() else {
+        return;
+    };
+    for mut entry in entries.drain(..) {
+        entry["command"] = Value::String(recorded.to_string());
+        results.push(entry);
     }
+}
+
+fn take_markdown_rows(path: &Path, command: &str, recorded: &str, table: &mut Vec<String>) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    let _ = fs::remove_file(path);
+    let text = if command == recorded {
+        text
+    } else {
+        text.replace(&format!("`{command}`"), &format!("`{recorded}`"))
+    };
+    let skip = if table.is_empty() { 0 } else { 2 };
+    table.extend(text.lines().skip(skip).map(str::to_string));
 }
 
 fn capture_every_instance(
@@ -684,22 +735,23 @@ mod tests {
 
     #[test]
     fn hyperfine_s_report_names_the_instance_where_hyperfine_named_the_command() {
-        let commands = [
-            ("mezura".to_string(), "/c/mezura /corpus".to_string()),
-            (
-                "mezura@next".to_string(),
-                "/c/mezura /corpus --languages c".to_string(),
-            ),
-        ];
         assert_eq!(
-            format_report_line("Benchmark 1: /c/mezura /corpus --languages c\r", &commands),
+            format_report_line(
+                "Benchmark 1: /c/mezura /corpus --languages c\r",
+                "mezura@next",
+                "/c/mezura /corpus --languages c"
+            ),
             "   Benchmark 1: mezura@next"
         );
         assert_eq!(
-            format_report_line("  \x1b[36m/c/mezura /corpus\x1b[0m ran", &commands),
+            format_report_line(
+                "  \x1b[36m/c/mezura /corpus\x1b[0m ran",
+                "mezura",
+                "/c/mezura /corpus"
+            ),
             "     \x1b[36mmezura\x1b[0m ran"
         );
-        assert_eq!(format_report_line(" ", &commands), "");
+        assert_eq!(format_report_line(" ", "mezura", "/c/mezura /corpus"), "");
     }
 
     #[test]
@@ -713,53 +765,58 @@ mod tests {
             settle: 0,
         };
         let commands = [
-            ("version".to_string(), "git --version".to_string()),
-            ("help".to_string(), "git --help".to_string()),
+            TimedCommand {
+                instance: "version".to_string(),
+                command: "git --version".to_string(),
+                env: BTreeMap::new(),
+            },
+            TimedCommand {
+                instance: "help".to_string(),
+                command: "git --help".to_string(),
+                env: BTreeMap::from([("GIT_PAGER".to_string(), "cat".to_string())]),
+            },
         ];
         let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Plain);
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(&mut printed, "t1-fwd", &commands, &BTreeMap::new())
+            .run_hyperfine(&mut printed, "t1-fwd", &commands)
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.starts_with(">> t1-fwd\n   Benchmark 1: version\n     Time (mean"));
-        assert!(printed.contains("\n   Benchmark 2: help\n"));
-        assert!(printed.contains("\n\n   Summary\n"));
+        assert!(printed.contains("\n\n   Benchmark 1: help\n"));
         assert!(!printed.contains("--version"));
         assert!(!printed.ends_with("\n\n"));
         assert!(runner.failures.is_empty());
-        assert!(dir.join("t1-fwd.json").is_file());
+        let export: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("t1-fwd.json")).unwrap()).unwrap();
+        assert_eq!(export["results"].as_array().unwrap().len(), 2);
+        assert_eq!(export["results"][0]["command"], "git --version");
+        assert_eq!(export["results"][1]["command"], "GIT_PAGER=cat git --help");
+        let markdown = fs::read_to_string(dir.join("t1-fwd.md")).unwrap();
+        assert_eq!(markdown.lines().count(), 4);
+        assert!(markdown.contains("`GIT_PAGER=cat git --help`"));
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(
-                &mut printed,
-                "control-start",
-                &commands[..1],
-                &BTreeMap::new(),
-            )
+            .run_hyperfine(&mut printed, "control-start", &commands[..1])
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.contains("2 runs\n") && !printed.contains("2 runs\n\n"));
         let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Hidden);
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(&mut printed, "check", &commands[..1], &BTreeMap::new())
+            .run_hyperfine(&mut printed, "check", &commands[..1])
             .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(printed.starts_with(">> check\n"));
         assert!(!printed.contains("Benchmark"));
-        let failing = (
-            "git".to_string(),
-            "git --no-such-flag-linebench".to_string(),
-        );
+        let failing = TimedCommand {
+            instance: "git".to_string(),
+            command: "git --no-such-flag-linebench".to_string(),
+            env: BTreeMap::new(),
+        };
         let mut printed = Vec::new();
         runner
-            .run_hyperfine(
-                &mut printed,
-                "t2-fwd",
-                std::slice::from_ref(&failing),
-                &BTreeMap::new(),
-            )
+            .run_hyperfine(&mut printed, "t2-fwd", std::slice::from_ref(&failing))
             .unwrap();
         assert!(String::from_utf8(printed).unwrap().contains(
             "WARNING: hyperfine reported a problem on t2-fwd: Error: Command terminated with \

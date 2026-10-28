@@ -56,7 +56,7 @@ impl FoundRun {
         self.record
             .instances
             .iter()
-            .any(|i| i.identity.is_a_local_build() || !i.args.is_empty())
+            .any(|i| i.identity.is_a_local_build() || !i.args.is_empty() || !i.env.is_empty())
     }
 }
 
@@ -1014,7 +1014,7 @@ fn format_compared_row(
     } else {
         format!(
             "  {:<name_width$} t1   the languages, the same-work flags or the instance's own \
-             arguments changed, so the times do not compare",
+             arguments or environment changed, so the times do not compare",
             now.instance
         )
     };
@@ -1734,6 +1734,20 @@ mod tests {
         let since = format_since(&now, &[&then]);
         assert!(since[1].contains("do not compare"), "{}", since[1]);
         assert!(!since[1].contains("->"), "{}", since[1]);
+
+        let mut env_changed = build_record("20260902-100000", &[("mezura", 0.20)], "nvme0");
+        env_changed.instances[0]
+            .env
+            .insert("MEZURA_DATA_DIR".to_string(), "/tmp/a".to_string());
+        assert!(
+            FoundRun {
+                record: env_changed.clone(),
+                relative: "local/linux/windows/20260902-100000".to_string(),
+            }
+            .is_local()
+        );
+        let since = format_since(&env_changed, &[&then]);
+        assert!(since[1].contains("do not compare"), "{}", since[1]);
     }
 
     #[test]

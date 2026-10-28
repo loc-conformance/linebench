@@ -347,8 +347,8 @@ record and on the page, so an empty section is never read as a measurement that 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
 machine block, the antivirus state, the corpus with its commit and the instances measured, so it
 stands on its own, and the hyperfine exports sit beside it. `insights.md` is the same session for a
-reader: the machine, the corpus and the three tables above as they were printed. An `--args`
-instance or a build of yours sends the session under `results/insights/local/`.
+reader: the machine, the corpus and the three tables above as they were printed. An `--args` or
+`--env` instance or a build of yours sends the session under `results/insights/local/`.
 
 ### ab
 
@@ -514,12 +514,10 @@ so the name carries a tag.
 
 An instance can carry an environment of its own too, `--env mezura@a=MEZURA_DATA_DIR=/x/a` for
 one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set for that instance
-alone wherever linebench runs the instance itself: `ab`, `check`, `noise` and the memory, system
-calls and hardware counters of `insights`. Two builds of mezura that carry different language
-files rewrite a shared data directory in turns, inside the runs being measured, and a directory of
-each one's own stops that. `run` and the floor of `insights` time every instance under one
-hyperfine process, which has one environment, so they refuse an instance that has one. Like
-arguments, an environment makes an instance of its own, so the name carries a tag.
+alone in every invocation of it. Two builds of mezura that carry different language files rewrite
+a shared data directory in turns, inside the runs being measured, and a directory of each one's
+own stops that. Like arguments, an environment makes an instance of its own, so the name carries
+a tag.
 
 A run holding any given instance is written under `results/local/` and the page gives such runs
 headings of their own, under the release ones, with the same sections. A `[given]` entry in the

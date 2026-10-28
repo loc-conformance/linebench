@@ -1952,13 +1952,13 @@ mod tests {
             "ab linux,cpython --counters mezura,mezura@dev --env mezura@dev=ONE=1",
             "check linux --env mezura@dev=ONE=1",
             "insights linux --env mezura@dev=ONE=1",
+            "run linux --env mezura@dev=ONE=1",
         ] {
             assert!(parse(line).is_ok(), "{line}: {:?}", parse(line));
         }
         assert!(parse("check linux -y").is_err());
         for line in [
             "run linux --same-work",
-            "run linux --env mezura@dev=ONE=1",
             "ab linux --out /tmp/x",
             "ab linux --control mezura",
         ] {

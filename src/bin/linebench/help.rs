@@ -80,8 +80,8 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
                 [--runs <n>] [--settle <s>] [--against <stamp>] [--no-prep] [--yes] [--keep-raw]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
-                [--expect-identical a=b] [--counters-dir <dir>] [--add <path>]
-                [--corpus-path <dir>]
+                [--env <c>@<tag>=<NAME>=<v>] [--expect-identical a=b] [--counters-dir <dir>]
+                [--add <path>] [--corpus-path <dir>]
 
     Times every instance over the target through hyperfine, twice, once with the flags that make
     the work equal and once with none, and writes the record, the csv files, the notes and the
@@ -109,12 +109,13 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
     --expect-identical a=b     instances whose JSON output has to match, volatile fields aside
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
-    A run under an instance with args or a build of its own is written under results/local/,
+    A run under an instance with args, env or a build of its own is written under results/local/,
     since its numbers answer for that build alone.
 
 linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu] [--yes]
@@ -137,8 +138,7 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args <c>@<tag>=<text>    arguments of its own, right after the target
-    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone. The floor
-                               refuses it, since one hyperfine process times every instance
+    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout

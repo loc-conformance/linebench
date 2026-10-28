@@ -38,8 +38,8 @@ use linebench::machine::{
     sample_background_busy,
 };
 use linebench::measure::{
-    Instance, Runner, Settings, Style, Table, build_args, build_command, capture_json_outputs,
-    capture_plain_output, describe_env, explain_one_environment, get_capture_name, join_command,
+    Instance, Runner, Settings, Style, Table, TimedCommand, build_args, build_command,
+    capture_json_outputs, capture_plain_output, describe_env, get_capture_name, join_command,
     run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
@@ -1126,11 +1126,6 @@ pub fn run_insights(
         None => ask_for_everything(),
     };
     let asked_for = |part: &str| asked.iter().any(|held| held == part);
-    if asked_for(FLOOR_PART)
-        && let Some(with) = instances.iter().find(|i| !i.env.is_empty())
-    {
-        return Err(explain_one_environment(with.get_name(), "the floor"));
-    }
     let tracing = match platform.is_linux() && asked_for(SYSCALLS_PART) {
         true => find_tracer(&scratch.get_path().join(PROBE_FILE)),
         false => Tracing::NotThere,
@@ -1175,32 +1170,41 @@ pub fn run_insights(
         scrub.clone(),
         Style::Hidden,
     );
-    let mut distinct: Vec<(String, String)> = Vec::new();
+    let mut distinct: Vec<TimedCommand> = Vec::new();
     let mut versions: Vec<(String, String)> = Vec::new();
     for instance in &instances {
         let command = join_command(
             &instance.identity.binary,
             std::slice::from_ref(&instance.definition.version_flag),
         );
-        if !distinct.iter().any(|(_, timed)| *timed == command) {
-            distinct.push((instance.get_name().to_string(), command.clone()));
+        let timed = TimedCommand {
+            instance: instance.get_name().to_string(),
+            command,
+            env: instance.env.clone(),
+        };
+        let recorded = timed.describe_command();
+        if !distinct
+            .iter()
+            .any(|seen| seen.command == timed.command && seen.env == timed.env)
+        {
+            distinct.push(timed);
         }
-        versions.push((instance.get_name().to_string(), command));
+        versions.push((instance.get_name().to_string(), recorded));
     }
     let mut measurements = Vec::new();
     if asked_for(FLOOR_PART) {
         let target = create_floor_target(scratch.get_path())?;
         print_header(out, "== floor")?;
-        runner.run_hyperfine(out, VERSION_SET, &distinct, &BTreeMap::new())?;
+        runner.run_hyperfine(out, VERSION_SET, &distinct)?;
         for table in TABLES {
-            let commands: Vec<(String, String)> = instances
+            let commands: Vec<TimedCommand> = instances
                 .iter()
                 .map(|instance| {
                     build_command(instance, &target, &locations.corpus.extensions, table)
                 })
                 .collect::<Result<_, _>>()?;
             print_line(out, "")?;
-            runner.run_hyperfine(out, &get_floor_set_name(table), &commands, &BTreeMap::new())?;
+            runner.run_hyperfine(out, &get_floor_set_name(table), &commands)?;
         }
         let (found, skipped) = collect_measurements(&res, &runner.commands, &[])?;
         measurements = found;
@@ -1567,9 +1571,6 @@ fn check_the_corpus_is_ready(
     check_commit(&locations.corpus, &locations.checkout)?;
     check_declares_files(&locations.corpus)?;
     let chosen = build_instances(definitions, locations, options, platform)?;
-    if let Some(with) = chosen.instances.iter().find(|i| !i.env.is_empty()) {
-        return Err(explain_one_environment(with.get_name(), "run"));
-    }
     check_identical_pairs(&options.expect_identical, &chosen.instances)?;
     let binaries = collect_binaries(&chosen.instances, platform)?;
     let defender = read_defender_state(platform, privileged, &binaries);
@@ -1792,10 +1793,15 @@ fn measure_and_record(out: &mut dyn Write, context: RunContext) -> Result<(i32, 
         } else {
             format!(" with {}", instance.args.join(" "))
         };
+        let under = if instance.env.is_empty() {
+            String::new()
+        } else {
+            format!(" under {}", describe_env(&instance.env))
+        };
         print_line(
             out,
             &format!(
-                "   {}: {} ({}){with}",
+                "   {}: {} ({}){with}{under}",
                 instance.get_name(),
                 instance.identity.version,
                 instance.identity.describe_origin()
@@ -2251,12 +2257,7 @@ fn check_everything(
         Table::OutOfTheBox,
     )?;
     let failures_before = runner.failures.len();
-    runner.run_hyperfine(
-        out,
-        "check",
-        std::slice::from_ref(&bare),
-        &instances[control].env,
-    )?;
+    runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
     if runner.failures.len() > failures_before {
         print_line(
             out,
@@ -2373,12 +2374,7 @@ fn time_the_control(
         &locations.corpus.extensions,
         Table::OutOfTheBox,
     )?;
-    runner.run_hyperfine(
-        out,
-        "noise",
-        std::slice::from_ref(&bare),
-        &instances[control].env,
-    )?;
+    runner.run_hyperfine(out, "noise", std::slice::from_ref(&bare))?;
     Ok(fs::read_to_string(scratch.join("noise.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
