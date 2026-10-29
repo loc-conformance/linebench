@@ -934,12 +934,14 @@ pub fn run_insights(
             instance: instance.get_name().to_string(),
             command,
             env: instance.env.clone(),
+            execution_env: instance.execution_env.clone(),
         };
         let recorded = timed.describe_command();
-        if !distinct
-            .iter()
-            .any(|seen| seen.command == timed.command && seen.env == timed.env)
-        {
+        if !distinct.iter().any(|seen| {
+            seen.command == timed.command
+                && seen.env == timed.env
+                && seen.execution_env == timed.execution_env
+        }) {
             distinct.push(timed);
         }
         versions.push((instance.get_name().to_string(), recorded));
@@ -988,7 +990,7 @@ pub fn run_insights(
                 INSIGHTS_TABLE,
                 &instance.identity.binary,
                 &args,
-                &instance.env,
+                &instance.execution_env,
                 &scrub,
             ) {
                 Ok(curve) => {
@@ -1304,7 +1306,7 @@ fn build_subject<'a>(
         instance: instance.get_name(),
         binary: &instance.identity.binary,
         args,
-        env: &instance.env,
+        env: &instance.execution_env,
         scrub,
     }
 }
@@ -2712,7 +2714,7 @@ fn check_everything(
                 &get_capture_name(table, instance.get_name()),
                 &instance.identity.binary,
                 &args,
-                &instance.env,
+                &instance.execution_env,
                 true,
             )?;
             if runner.capture_failures.len() > failures_before {
@@ -2961,7 +2963,7 @@ fn collect_syscalls(
             INSIGHTS_TABLE,
             &instance.identity.binary,
             &args,
-            &instance.env,
+            &instance.execution_env,
             scrub,
             &into,
         ) {
@@ -3017,7 +3019,7 @@ fn collect_allocations(
             INSIGHTS_TABLE,
             &instance.identity.binary,
             &args,
-            &instance.env,
+            &instance.execution_env,
             scrub,
             &into,
         ) {
@@ -3136,7 +3138,7 @@ fn find_lines(
         &name,
         &instance.identity.binary,
         &args,
-        &instance.env,
+        &instance.execution_env,
         true,
     )?;
     let text = fs::read_to_string(&capture.path).unwrap_or_default();
@@ -3931,6 +3933,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
+            execution_env: BTreeMap::new(),
         };
         let a = build(
             "mezura@base",
@@ -4020,6 +4023,7 @@ mod tests {
             },
             args: Vec::new(),
             env: BTreeMap::new(),
+            execution_env: BTreeMap::new(),
         };
         let entry = || GivenEntry {
             binary: Some(PathBuf::from("mezura")),

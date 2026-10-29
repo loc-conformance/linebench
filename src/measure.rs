@@ -67,6 +67,7 @@ pub struct Instance {
     pub identity: Identity,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub execution_env: BTreeMap<String, String>,
 }
 
 impl Instance {
@@ -126,6 +127,7 @@ pub struct TimedCommand {
     pub instance: String,
     pub command: String,
     pub env: BTreeMap<String, String>,
+    pub execution_env: BTreeMap<String, String>,
 }
 
 impl TimedCommand {
@@ -228,7 +230,7 @@ impl Runner {
         for name in &self.scrub {
             hyperfine.env_remove(name);
         }
-        hyperfine.envs(&timed.env);
+        hyperfine.envs(&timed.execution_env);
         let report = if self.style.is_shown() {
             Stdio::piped()
         } else {
@@ -427,6 +429,7 @@ pub fn build_command(
         instance: instance.get_name().to_string(),
         command: join_command(&instance.identity.binary, &args),
         env: instance.env.clone(),
+        execution_env: instance.execution_env.clone(),
     })
 }
 
@@ -674,7 +677,7 @@ fn capture_every_instance(
                 &name,
                 &instance.identity.binary,
                 &args,
-                &instance.env,
+                &instance.execution_env,
                 as_json,
             )?;
         }
@@ -829,11 +832,13 @@ mod tests {
                 instance: "version".to_string(),
                 command: "git --version".to_string(),
                 env: BTreeMap::new(),
+                execution_env: BTreeMap::new(),
             },
             TimedCommand {
                 instance: "help".to_string(),
                 command: "git --help".to_string(),
                 env: BTreeMap::from([("GIT_PAGER".to_string(), "cat".to_string())]),
+                execution_env: BTreeMap::from([("GIT_PAGER".to_string(), "cat".to_string())]),
             },
         ];
         let mut runner = Runner::new(&dir, settings, Platform::Linux, Vec::new(), Style::Plain);
@@ -873,6 +878,7 @@ mod tests {
             instance: "git".to_string(),
             command: "git --no-such-flag-linebench".to_string(),
             env: BTreeMap::new(),
+            execution_env: BTreeMap::new(),
         };
         let mut printed = Vec::new();
         runner

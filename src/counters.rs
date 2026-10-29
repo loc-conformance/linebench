@@ -12,6 +12,7 @@ pub const EACH: &str = "each";
 pub const TARGET: &str = "{target}";
 pub const EXTENSIONS: &str = "{extensions}";
 pub const NAMES: &str = "{names}";
+pub const INSTANCE_DIR: &str = "{instance-dir}";
 const VERSION: &str = "{version}";
 const OTHER_SYSTEM: &str = "other";
 const RELEASE_FILE_SYSTEMS: [&str; 4] = ["windows", "linux", "macos", "other"];
@@ -64,6 +65,8 @@ pub struct Run {
     pub same_work: Vec<String>,
     #[serde(default)]
     pub same_work_note: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub scrub_env: Vec<String>,
 }
@@ -236,6 +239,22 @@ impl Definition {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or(binary))
     }
+
+    pub fn build_execution_env(
+        &self,
+        instance_dir: &Path,
+        own: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let dir = instance_dir.to_string_lossy();
+        let mut env: BTreeMap<String, String> = self
+            .run
+            .env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.replace(INSTANCE_DIR, &dir)))
+            .collect();
+        env.extend(own.iter().map(|(k, v)| (k.clone(), v.clone())));
+        env
+    }
 }
 
 pub fn read_definitions(dir: &Path) -> Result<Vec<Definition>, String> {
@@ -364,6 +383,18 @@ fn check_run_block(at: &str, definition: &Definition) -> Result<(), String> {
             "{at}[run] says extension-case = \"exact\" and languages says {NAMES}, so no \
              extension is ever spelled and the setting would never be read"
         ));
+    }
+    for (name, value) in &run.env {
+        if name.trim().is_empty() || value.trim().is_empty() {
+            return Err(format!("{at}[run] env has an empty variable name or value"));
+        }
+        let stripped = value.replace(INSTANCE_DIR, "");
+        if stripped.contains('{') || stripped.contains('}') {
+            return Err(format!(
+                "{at}[run] env {name} = {value:?} carries an unknown placeholder; only \
+                 {INSTANCE_DIR} is expanded there"
+            ));
+        }
     }
     Ok(())
 }
@@ -739,6 +770,33 @@ extension-case = "exact""#,
             "{refusal}"
         );
         assert_eq!(cloc_like.get_process_name("macos").unwrap(), "scc.pl");
+    }
+
+    #[test]
+    fn a_definition_expands_instance_dir_in_its_env_and_lets_an_instance_override_it() {
+        let with_env = SCC.replace(
+            "[run]\n",
+            "[run]\nenv = { SCC_DATA = \"{instance-dir}\", FIXED = \"1\" }\n",
+        );
+        let definition = parse(&with_env, "scc").unwrap();
+        let instance_dir = Path::new("/tmp/counters/data/scc@a");
+        let built = definition.build_execution_env(instance_dir, &BTreeMap::new());
+        assert_eq!(built["SCC_DATA"], "/tmp/counters/data/scc@a");
+        assert_eq!(built["FIXED"], "1");
+        let override_env = BTreeMap::from([("SCC_DATA".to_string(), "/custom".to_string())]);
+        let overridden = definition.build_execution_env(instance_dir, &override_env);
+        assert_eq!(overridden["SCC_DATA"], "/custom");
+        assert_eq!(overridden["FIXED"], "1");
+        assert_refused(
+            &SCC.replace("[run]\n", "[run]\nenv = { SCC_DATA = \"{unknown}\" }\n"),
+            "scc",
+            "carries an unknown placeholder",
+        );
+        assert_refused(
+            &SCC.replace("[run]\n", "[run]\nenv = { SCC_DATA = \"\" }\n"),
+            "scc",
+            "has an empty variable name or value",
+        );
     }
 
     fn parse(text: &str, name: &str) -> Result<Definition, String> {

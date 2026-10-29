@@ -19,6 +19,7 @@ same-work      = ["--no-gitignore", "--no-ignore-files", "--search-in-dotted",
                   "--counting", "region",
                   "--no-shebang"]
 same-work-note = "ignore files off, dotted directories entered, no default and no project settings read, shebang lines unread, keyword and test counting off, minified, generated and non code files counted, region counting model, content identification left on since scc has no way to turn its own off"
+env            = { MEZURA_DATA_DIR = "{instance-dir}" }
 scrub-env      = ["MEZURA_PHASE_TIMING", "CLICOLOR_FORCE"]
 
 [read]

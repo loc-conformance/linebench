@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 use linebench::corpus::Corpus;
 use linebench::counters::{Definition, read_definition_for};
-use linebench::fetch::{INSTANCE_SEPARATOR, identify_counter, read_manifest, stage_given};
+use linebench::fetch::INSTANCE_SEPARATOR;
+use linebench::fetch::{identify_counter, read_manifest, stage_given};
 use linebench::machine::Platform;
 use linebench::measure::Instance;
 
 use crate::config::{Locations, Options};
+
+const INSTANCE_DATA_DIR: &str = "data";
 
 pub struct ChosenInstances {
     pub instances: Vec<Instance>,
@@ -106,11 +110,14 @@ pub fn build_instances(
                     identity
                 }
             };
+            let execution_env =
+                prepare_execution_env(&definition, &locations.staging, name, &entry.env);
             Instance {
                 definition,
                 identity,
                 args: entry.args.clone(),
                 env: entry.env.clone(),
+                execution_env,
             }
         } else {
             let definition = find_definition(definitions, name).map_err(|_| {
@@ -135,11 +142,14 @@ pub fn build_instances(
             })?;
             let identity =
                 identify_counter(&definition, platform, &locations.counters_dir, &manifest)?;
+            let env = BTreeMap::new();
+            let execution_env = prepare_execution_env(&definition, &locations.staging, name, &env);
             Instance {
                 definition,
                 identity,
                 args: Vec::new(),
-                env: BTreeMap::new(),
+                env,
+                execution_env,
             }
         };
         instances.push(instance);
@@ -231,6 +241,19 @@ fn find_definition(definitions: &[Definition], counter: &str) -> Result<Definiti
         .find(|d| d.name == counter)
         .cloned()
         .ok_or_else(|| format!("no counter definition named {counter}"))
+}
+
+fn prepare_execution_env(
+    definition: &Definition,
+    staging: &Path,
+    name: &str,
+    own: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let instance_dir = staging.join(INSTANCE_DATA_DIR).join(name);
+    if !definition.run.env.is_empty() {
+        let _ = fs::remove_dir_all(&instance_dir);
+    }
+    definition.build_execution_env(&instance_dir, own)
 }
 
 #[cfg(test)]
