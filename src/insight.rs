@@ -129,9 +129,10 @@ const SHADES: [[u8; 3]; 8] = [
     [238, 78, 224],
 ];
 const SYSCALLS_HEADINGS: [&str; 4] = ["instance", "syscalls", "per file", "errors"];
-const ALLOCATIONS_HEADINGS: [&str; 6] = [
+const ALLOCATIONS_HEADINGS: [&str; 7] = [
     "instance",
     "allocs",
+    "floor",
     "per file",
     "allocated",
     "per alloc",
@@ -710,7 +711,8 @@ pub fn format_allocations(counted: &[Allocations], files: Option<u64>) -> Vec<St
             );
             vec![
                 format_thousands(counts.allocs),
-                format_per_file(counts.allocs, files),
+                format_thousands(counts.floor_allocs),
+                format_per_file(counts.allocs.saturating_sub(counts.floor_allocs), files),
                 format_heap_bytes(counts.bytes_allocated),
                 per_alloc,
                 format_heap_bytes(counts.at_exit_bytes),
@@ -1828,9 +1830,10 @@ mod tests {
                 instance: "mezura".to_string(),
                 table: "t1".to_string(),
                 wall_ms: 4000,
-                allocs: 1000,
-                frees: 1000,
-                bytes_allocated: 1_024_000,
+                allocs: 1200,
+                floor_allocs: 200,
+                frees: 1200,
+                bytes_allocated: 1_228_800,
                 at_exit_bytes: 0,
                 at_exit_blocks: 0,
             },
@@ -1839,6 +1842,7 @@ mod tests {
                 table: "t1".to_string(),
                 wall_ms: 2000,
                 allocs: 0,
+                floor_allocs: 0,
                 frees: 0,
                 bytes_allocated: 0,
                 at_exit_bytes: 0,
@@ -1849,6 +1853,7 @@ mod tests {
                 table: "t1".to_string(),
                 wall_ms: 8000,
                 allocs: 25_000,
+                floor_allocs: 500,
                 frees: 24_990,
                 bytes_allocated: 8_800_000,
                 at_exit_bytes: 4096,
@@ -1859,14 +1864,14 @@ mod tests {
         assert_eq!(
             lines[1].split_whitespace().collect::<Vec<&str>>(),
             [
-                "mezura", "1,000", "2.0", "1000", "KB", "1.0", "KB", "0", "B"
+                "mezura", "1,200", "200", "2.0", "1.2", "MB", "1.0", "KB", "0", "B"
             ]
         );
         assert_eq!(lines[2].trim(), "scc");
         assert_eq!(
             lines[3].split_whitespace().collect::<Vec<&str>>(),
             [
-                "tokei", "25,000", "50.0", "8.4", "MB", "352", "B", "4.0", "KB"
+                "tokei", "25,000", "500", "49.0", "8.4", "MB", "352", "B", "4.0", "KB"
             ]
         );
         assert!(

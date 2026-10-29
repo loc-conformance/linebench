@@ -37,6 +37,8 @@ pub struct Allocations {
     pub table: String,
     pub wall_ms: u64,
     pub allocs: u64,
+    #[serde(default)]
+    pub floor_allocs: u64,
     pub frees: u64,
     pub bytes_allocated: u64,
     pub at_exit_bytes: u64,
@@ -127,6 +129,7 @@ pub fn count_allocations(
         table: table.as_str().to_string(),
         wall_ms,
         allocs,
+        floor_allocs: 0,
         frees,
         bytes_allocated,
         at_exit_bytes,

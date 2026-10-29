@@ -340,11 +340,11 @@ Each instance is captured once before its passes, which settles the page cache a
 count the table divides by. Linux only, and it wants root or `kernel.perf_event_paranoid` at 1,
 since above that perf drops the kernel and the counts would cover user space alone.
 
-**The heap allocations** are one execution per instance under `valgrind` with `--leak-check=no` and
-`--undef-value-errors=no`, reporting total allocations, allocations per file, total bytes allocated,
-average bytes per allocation, and bytes still in use at exit. Counters that are scripts (`cloc`) are
-skipped, and counters that bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under
-the table.
+**The heap allocations** are `valgrind` with `--leak-check=no` and `--undef-value-errors=no` over
+the empty floor directory and over the corpus, reporting total allocations, the empty-directory
+floor, allocations per file above the floor, total bytes allocated, average bytes per allocation,
+and bytes still in use at exit. Counters that are scripts (`cloc`) are skipped, and counters that
+bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under the table.
 
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
 needs is missing. `--only floor,memory,syscalls,pmu,allocations` names which of the insights to

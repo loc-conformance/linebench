@@ -3093,6 +3093,7 @@ fn collect_allocations(
     scrub: &[String],
     scratch: &Path,
 ) -> Result<Vec<Allocations>, String> {
+    let floor_target = create_floor_target(scratch)?;
     let mut counted = Vec::new();
     for instance in instances {
         print_line(out, &format!(">> {}", instance.get_name()))?;
@@ -3106,6 +3107,32 @@ fn collect_allocations(
             )?;
             continue;
         }
+        let floor_args = build_args(
+            instance,
+            &floor_target,
+            &locations.corpus.extensions,
+            INSIGHTS_TABLE,
+            false,
+        )?;
+        let floor_into = scratch.join(format!(
+            "valgrind-floor-{}.{PROBE_TEXT_SUFFIX}",
+            instance.get_name()
+        ));
+        let floor = match count_allocations(
+            instance.get_name(),
+            INSIGHTS_TABLE,
+            &instance.identity.binary,
+            &floor_args,
+            &instance.execution_env,
+            scrub,
+            &floor_into,
+        ) {
+            Ok(counts) => counts,
+            Err(refused) => {
+                print_warning(out, &refused)?;
+                continue;
+            }
+        };
         let args = build_args(
             instance,
             &locations.checkout,
@@ -3126,7 +3153,9 @@ fn collect_allocations(
             scrub,
             &into,
         ) {
-            Ok(counts) => {
+            Ok(mut counts) => {
+                counts.floor_allocs = floor.allocs;
+                counts.wall_ms += floor.wall_ms;
                 print_line(
                     out,
                     &format!(

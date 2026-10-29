@@ -359,6 +359,12 @@ fn check_the_counted_allocations(counted: &[Allocations]) -> Held {
                 one.instance, one.bytes_allocated
             ));
         }
+        if one.floor_allocs > one.allocs {
+            broken.push(format!(
+                "{}: {} floor allocations out of {} allocations",
+                one.instance, one.floor_allocs, one.allocs
+            ));
+        }
         if one.at_exit_bytes > one.bytes_allocated {
             broken.push(format!(
                 "{}: {} bytes in use at exit out of {} allocated",
@@ -1367,6 +1373,7 @@ mod tests {
             table: "t1".to_string(),
             wall_ms: 1000,
             allocs: 100,
+            floor_allocs: 20,
             frees: 100,
             bytes_allocated: 4096,
             at_exit_bytes: 512,
@@ -1374,9 +1381,10 @@ mod tests {
         };
         assert!(check_the_counted_allocations(std::slice::from_ref(&valid)).holds());
         let mut impossible = valid;
+        impossible.floor_allocs = 120;
         impossible.at_exit_bytes = 8192;
         impossible.at_exit_blocks = 200;
         let held = check_the_counted_allocations(&[impossible]);
-        assert_eq!(held.broken.len(), 2, "{held:?}");
+        assert_eq!(held.broken.len(), 3, "{held:?}");
     }
 }
