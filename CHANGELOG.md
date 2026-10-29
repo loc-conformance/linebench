@@ -1,18 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.3.0, 2026-10-29
 
 New:
 
 - `ab` holds a baseline build against one or more candidates on the hardware counters: each pair
   under `perf stat` in the order a, b, b, a over corpora and folders, user-space instructions,
-  cycles and wall time, count checks, `--json`, and `--files [<n>]` for the largest files of a
-  target. Linux, with `kernel.perf_event_paranoid` at 2 or below.
+  cycles, wall time and `--events`, count checks, `--json`, and `--files [<n>]` for the largest
+  files of a target. Linux, with `kernel.perf_event_paranoid` at 2 or below.
 - `insights` counts heap allocations on Linux through `valgrind` in a new `allocations` section:
   allocations, allocations per file, total bytes allocated, bytes per allocation, and bytes in use
   at exit.
-- An instance can carry an environment of its own, `--env <instance>=<NAME>=<value>` or `env` in
-  its `[given]` entry.
+- An instance can carry an environment of its own, from `--env <instance>=<NAME>=<value>`, `env` in
+  its `[given]` entry, or `[run] env` (with `{instance-dir}`) in its counter definition, and
+  `--args <text>` applies arguments across every instance in the run.
+
+Other:
+
+- mezura is declared at 3.3.0.
 
 ## 0.2.0, 2026-09-19
 

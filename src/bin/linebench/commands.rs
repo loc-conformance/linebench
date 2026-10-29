@@ -144,6 +144,7 @@ const A_KILOBYTE: u64 = 1024;
 const A_MEGABYTE: u64 = 1024 * 1024;
 const SMALL_FILE_BYTES: u64 = 64 * A_KILOBYTE;
 const A_MILLION: f64 = 1_000_000.0;
+const A_MILLION_COUNT: u64 = 1_000_000;
 const STAGED_DELETING: &str = "Delete them manually when you wish";
 const IDENTICAL: &str = "identical";
 const DIFFER: &str = "differ";
@@ -548,11 +549,12 @@ pub fn run_ab(
                     &subjects[chosen_idx],
                     runs,
                     *duration,
+                    &options.events,
                     &path,
                 )?);
             }
-            let a = [blocks[0], blocks[3]];
-            let b = [blocks[1], blocks[2]];
+            let a = [blocks[0].clone(), blocks[3].clone()];
+            let b = [blocks[1].clone(), blocks[2].clone()];
             let tree = match candidate {
                 1 => one.corpus.name.as_str(),
                 _ => "",
@@ -1223,6 +1225,8 @@ struct AbComparison {
     b: AbSide,
     instructions_ratio: f64,
     cycles_ratio: f64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    events_ratio: BTreeMap<String, f64>,
     wall_ratio: Option<f64>,
     equal_counts: bool,
 }
@@ -1231,6 +1235,8 @@ struct AbComparison {
 struct AbSide {
     instructions: u64,
     cycles: u64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    events: BTreeMap<String, u64>,
     wall_ns: Option<u64>,
     wall_noise_pct: Option<f64>,
     files: u64,
@@ -1371,6 +1377,19 @@ fn lay_out_ab(tree: &str, width: usize, comparison: &AbComparison) -> [String; 3
             format!("{:.3}x", comparison.cycles_ratio),
         ],
     ];
+    for (event, &a_count) in &a.events {
+        let b_count = b.events.get(event).copied().unwrap_or_default();
+        let ratio = comparison
+            .events_ratio
+            .get(event)
+            .copied()
+            .unwrap_or_default();
+        columns.push([
+            format!("{} {event}", format_event_count(a_count)),
+            format!("{} {event}", format_event_count(b_count)),
+            format!("{ratio:.3}x"),
+        ]);
+    }
     if let (Some(a_ns), Some(a_noise), Some(b_ns), Some(b_noise), Some(wall_ratio)) = (
         a.wall_ns,
         a.wall_noise_pct,
@@ -1468,6 +1487,24 @@ fn build_ab_comparison(
     let add_instructions =
         |counts: &[UserCounts; 2]| counts[0].instructions + counts[1].instructions;
     let add_cycles = |counts: &[UserCounts; 2]| counts[0].cycles + counts[1].cycles;
+    let add_events = |counts: &[UserCounts; 2]| -> BTreeMap<String, u64> {
+        let mut totals = BTreeMap::new();
+        for one in counts {
+            for (name, count) in &one.extra {
+                *totals.entry(name.clone()).or_default() += *count;
+            }
+        }
+        totals
+    };
+    let a_events = add_events(a);
+    let b_events = add_events(b);
+    let events_ratio = a_events
+        .iter()
+        .map(|(name, &a_sum)| {
+            let b_sum = b_events.get(name).copied().unwrap_or_default();
+            (name.clone(), calculate_ratio(b_sum, a_sum, 3))
+        })
+        .collect();
     let wall = match ([a[0].wall, a[1].wall], [b[0].wall, b[1].wall]) {
         ([Some(a0), Some(a1)], [Some(b0), Some(b1)]) => Some((
             (a0.ns + a1.ns) / 2,
@@ -1478,23 +1515,37 @@ fn build_ab_comparison(
         )),
         _ => None,
     };
-    let build_side =
-        |counts: &[UserCounts; 2], wall: Option<(u64, f64)>, counted: &Counts| AbSide {
-            instructions: add_instructions(counts) / 2,
-            cycles: add_cycles(counts) / 2,
-            wall_ns: wall.map(|(ns, _)| ns),
-            wall_noise_pct: wall.map(|(_, noise)| noise),
-            files: counted.files,
-            lines: counted.lines,
-        };
+    let build_side = |counts: &[UserCounts; 2],
+                      sums: BTreeMap<String, u64>,
+                      wall: Option<(u64, f64)>,
+                      counted: &Counts| AbSide {
+        instructions: add_instructions(counts) / 2,
+        cycles: add_cycles(counts) / 2,
+        events: sums.into_iter().map(|(k, v)| (k, v / 2)).collect(),
+        wall_ns: wall.map(|(ns, _)| ns),
+        wall_noise_pct: wall.map(|(_, noise)| noise),
+        files: counted.files,
+        lines: counted.lines,
+    };
     AbComparison {
         target: target.to_string(),
         candidate: candidate.to_string(),
         instance: instance.to_string(),
-        a: build_side(a, wall.map(|(ns, noise, ..)| (ns, noise)), counted[0]),
-        b: build_side(b, wall.map(|(_, _, ns, noise, _)| (ns, noise)), counted[1]),
+        a: build_side(
+            a,
+            a_events,
+            wall.map(|(ns, noise, ..)| (ns, noise)),
+            counted[0],
+        ),
+        b: build_side(
+            b,
+            b_events,
+            wall.map(|(_, _, ns, noise, _)| (ns, noise)),
+            counted[1],
+        ),
         instructions_ratio: calculate_ratio(add_instructions(b), add_instructions(a), 4),
         cycles_ratio: calculate_ratio(add_cycles(b), add_cycles(a), 3),
+        events_ratio,
         wall_ratio: wall.map(|(.., ratio)| ratio),
         equal_counts,
     }
@@ -1815,6 +1866,13 @@ fn format_millions(count: u64) -> String {
     match count < A_HUNDRED_MILLION {
         true => format!("{millions:.1}M"),
         false => format!("{}M", millions.round()),
+    }
+}
+
+fn format_event_count(count: u64) -> String {
+    match count < A_MILLION_COUNT {
+        true => format_thousands(count),
+        false => format_millions(count),
     }
 }
 
@@ -3852,6 +3910,7 @@ mod tests {
                     ns: 184_000_000,
                     noise_pct: 0.3,
                 }),
+                extra: Vec::new(),
             },
             UserCounts {
                 instructions: 2_000_000_000,
@@ -3860,6 +3919,7 @@ mod tests {
                     ns: 186_000_000,
                     noise_pct: 0.4,
                 }),
+                extra: Vec::new(),
             },
         ];
         let b = [
@@ -3870,6 +3930,7 @@ mod tests {
                     ns: 192_000_000,
                     noise_pct: 0.5,
                 }),
+                extra: Vec::new(),
             },
             UserCounts {
                 instructions: 1_990_000_000,
@@ -3878,6 +3939,7 @@ mod tests {
                     ns: 192_800_000,
                     noise_pct: 0.2,
                 }),
+                extra: Vec::new(),
             },
         ];
         let comparison = build_ab_comparison(
@@ -3926,7 +3988,7 @@ mod tests {
             ]
         );
         let without_wall =
-            |counts: &[UserCounts; 2]| counts.map(|one| UserCounts { wall: None, ..one });
+            |counts: &[UserCounts; 2]| counts.clone().map(|one| UserCounts { wall: None, ..one });
         let no_wall = build_ab_comparison(
             "linux",
             "b",
@@ -3944,8 +4006,36 @@ mod tests {
                 "           b / a  0.9950x              0.998x",
             ]
         );
+        let with_events = |counts: &[UserCounts; 2], misses: u64| {
+            counts.clone().map(|one| UserCounts {
+                extra: vec![("branch-misses".to_string(), misses)],
+                ..one
+            })
+        };
+        let events_ab = build_ab_comparison(
+            "linux",
+            "b",
+            "mezura@cand",
+            &with_events(&a, 45_000),
+            &with_events(&b, 42_300),
+            [&counted, &counted],
+            true,
+        );
+        assert_eq!(events_ab.a.events["branch-misses"], 45_000);
+        assert_eq!(events_ab.b.events["branch-misses"], 42_300);
+        assert_eq!(events_ab.events_ratio["branch-misses"], 0.94);
+        assert_eq!(
+            lay_out_ab("linux", 5, &events_ab),
+            [
+                "   linux   a      2000M instructions   810M cycles   45,000 branch-misses   185 ms ±0.4%   63,738 files   36,012,345 lines",
+                "           b      1990M instructions   808M cycles   42,300 branch-misses   192 ms ±0.5%   63,738 files   36,012,345 lines",
+                "           b / a  0.9950x              0.998x        0.940x                 1.040x",
+            ]
+        );
         assert_eq!(format_millions(12_345_678), "12.3M");
         assert_eq!(format_millions(15_787_520_396), "15788M");
+        assert_eq!(format_event_count(45_000), "45,000");
+        assert_eq!(format_event_count(12_345_678), "12.3M");
     }
 
     #[test]

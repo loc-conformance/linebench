@@ -106,13 +106,14 @@ pub struct Wall {
     pub noise_pct: f64,
 }
 
-/// The means of one `perf stat -r` over the user-space instructions and cycles, and its wall time
-/// when perf reports `duration_time`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The means of one `perf stat -r` over the user-space instructions and cycles, its wall time
+/// when perf reports `duration_time`, and any extra user-space events `--events` asked for.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserCounts {
     pub instructions: u64,
     pub cycles: u64,
     pub wall: Option<Wall>,
+    pub extra: Vec<(String, u64)>,
 }
 
 /// `open` is the paranoid level the asked-for counts stay open at below root: [`OPEN_PARANOID`]
@@ -180,9 +181,13 @@ pub fn count_user_events(
     subject: &Subject,
     runs: u32,
     duration: bool,
+    extra_events: &[String],
     path: &Path,
 ) -> Result<UserCounts, String> {
     let mut names = vec![INSTRUCTIONS, CYCLES];
+    for event in extra_events {
+        names.push(event.trim_end_matches(USER_ONLY));
+    }
     if duration {
         names.push(DURATION_TIME);
     }
@@ -197,10 +202,21 @@ pub fn count_user_events(
             noise_pct: reading.noise_pct,
         })
     });
+    let extra = extra_events
+        .iter()
+        .map(|event| {
+            let bare = event.trim_end_matches(USER_ONLY);
+            Ok((
+                bare.to_string(),
+                require_user_count(&read, subject.instance, bare)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(UserCounts {
         instructions: require_user_count(&read, subject.instance, INSTRUCTIONS)?,
         cycles: require_user_count(&read, subject.instance, CYCLES)?,
         wall,
+        extra,
     })
 }
 

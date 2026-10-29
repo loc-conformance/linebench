@@ -11,6 +11,7 @@ use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::files::read_toml;
 use linebench::insight::INSIGHT_PARTS;
 use linebench::os::capture_with_status;
+use linebench::pmu::{CYCLES, DURATION_TIME, INSTRUCTIONS, USER_ONLY};
 
 use crate::help::{find_block_of, find_flags_of, find_help_of, get_help, name_every_command};
 
@@ -29,6 +30,7 @@ pub const DEFAULT_OUT: &str = "results";
 pub const DRY_RUN_DIR: &str = "linebench-dry-run";
 const DEFAULT_FILES: usize = 10;
 const MAX_FILES: usize = 100;
+const KERNEL_ONLY: &str = ":k";
 pub const COMMANDS: [&str; 9] = [
     "run", "fetch", "check", "noise", "insights", "ab", "report", "status", "verify",
 ];
@@ -132,6 +134,7 @@ pub struct Options {
     pub only: Option<Vec<String>>,
     pub json: Option<PathBuf>,
     pub files: Option<usize>,
+    pub events: Vec<String>,
     #[cfg(feature = "maintenance")]
     pub as_json: bool,
 }
@@ -279,6 +282,11 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             }
             "--args" => {
                 parse_instance_or_shared_args(flag, &value()?, &mut options)?;
+            }
+            "--events" => {
+                let first = value()?;
+                let named = read_list(flag, first, &mut rest)?;
+                options.events = parse_ab_events(flag, named)?;
             }
             "--env" => {
                 let text = value()?;
@@ -916,6 +924,11 @@ fn choose_ab_targets(
     corpora: &[Corpus],
     data_dir: Option<&Path>,
 ) -> Result<ChosenCorpora, String> {
+    if options.files.is_some() && !options.events.is_empty() {
+        return Err(
+            "--events is not used with --files, which counts instructions alone".to_string(),
+        );
+    }
     let mut taken: Vec<(Corpus, PathBuf)> = Vec::new();
     let mut named_corpora: Vec<Corpus> = Vec::new();
     let mut left_behind = Vec::new();
@@ -1239,6 +1252,29 @@ fn parse_instance_or_shared_args(
     }
     options.args.extend(words);
     Ok(())
+}
+
+fn parse_ab_events(flag: &str, named: Vec<String>) -> Result<Vec<String>, String> {
+    let mut events = Vec::new();
+    for event in named {
+        if event.ends_with(KERNEL_ONLY) {
+            return Err(format!(
+                "{flag} counts user space ({USER_ONLY}), and {event} asks for the kernel"
+            ));
+        }
+        let bare = event.trim_end_matches(USER_ONLY);
+        if bare.is_empty() {
+            return Err(format!("empty name in {flag} {event}"));
+        }
+        if [INSTRUCTIONS, CYCLES, DURATION_TIME].contains(&bare) {
+            return Err(format!("{bare} is already counted by ab"));
+        }
+        if events.iter().any(|held| held == bare) {
+            return Err(format!("{bare} is named twice in {flag}"));
+        }
+        events.push(bare.to_string());
+    }
+    Ok(events)
 }
 
 fn parse_number(flag: &str, text: &str) -> Result<u32, String> {
@@ -2191,6 +2227,37 @@ mod tests {
             ["--hide", "tests", "--counting=region", "--threads", "4"]
         );
         assert!(bare.args_of.is_empty());
+    }
+
+    #[test]
+    fn ab_events_are_normalised_to_user_space_and_refused_with_files_or_kernel_suffix() {
+        let options = parse("ab linux --events branch-misses,cache-misses:u").unwrap();
+        assert_eq!(options.events, ["branch-misses", "cache-misses"]);
+        for (line, expected) in [
+            ("ab linux --events branch-misses:k", "asks for the kernel"),
+            ("ab linux --events instructions", "already counted by ab"),
+            ("ab linux --events cycles:u", "already counted by ab"),
+            (
+                "ab linux --events branch-misses,branch-misses:u",
+                "named twice",
+            ),
+            ("ab linux --events :u", "empty name"),
+            ("run linux --events branch-misses", "not a flag"),
+        ] {
+            let refused = parse(line).unwrap_err();
+            assert!(refused.contains(expected), "{line}: {refused}");
+        }
+        let config: Config =
+            toml::from_str("counters = \"D:/c\"\n[corpora]\nlinux = \"D:/linux\"\n").unwrap();
+        let corpora = vec![named_corpus("linux")];
+        let conf = Path::new("linebench.conf");
+        let data = Some(Path::new("D:/data/linebench"));
+        let with_files = parse("ab linux --files --events branch-misses").unwrap();
+        let refused = resolve_one(&with_files, &config, conf, &corpora, data).unwrap_err();
+        assert_eq!(
+            refused,
+            "--events is not used with --files, which counts instructions alone"
+        );
     }
 
     fn parse(line: &str) -> Result<Options, String> {
