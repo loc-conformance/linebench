@@ -181,27 +181,24 @@ impl Runner {
         let export = self.res.join(format!("{name}.json"));
         let markdown = self.res.join(format!("{name}.md"));
         let mut results = Vec::new();
-        let mut table = Vec::new();
         for (index, timed) in commands.iter().enumerate() {
             if index > 0 && self.style.is_shown() {
                 print_line(out, "")?;
             }
             let _ = fs::remove_file(&export);
-            let _ = fs::remove_file(&markdown);
             let recorded = timed.describe_command();
             self.commands
                 .insert(recorded.clone(), timed.instance.clone());
-            self.run_one_hyperfine(out, name, timed, &export, &markdown)?;
+            self.run_one_hyperfine(out, name, timed, &export)?;
             take_json_results(&export, &recorded, &mut results);
-            take_markdown_rows(&markdown, &timed.command, &recorded, &mut table);
         }
         if !results.is_empty()
             && let Ok(compact) = serde_json::to_string(&serde_json::json!({ "results": results }))
         {
             let _ = fs::write(&export, compact);
         }
-        if !table.is_empty() {
-            let _ = fs::write(&markdown, format!("{}\n", table.join("\n")));
+        if let Some(table) = format_markdown_table(&results) {
+            let _ = fs::write(&markdown, table);
         }
         Ok(())
     }
@@ -212,7 +209,6 @@ impl Runner {
         name: &str,
         timed: &TimedCommand,
         export: &Path,
-        markdown: &Path,
     ) -> Result<(), String> {
         let mut hyperfine = Command::new(HYPERFINE);
         hyperfine.args([
@@ -228,7 +224,6 @@ impl Runner {
             hyperfine.args(["--setup", &build_sleep(self.platform, self.settings.settle)]);
         }
         hyperfine.args(["--export-json", &export.to_string_lossy()]);
-        hyperfine.args(["--export-markdown", &markdown.to_string_lossy()]);
         hyperfine.arg(&timed.command);
         for name in &self.scrub {
             hyperfine.env_remove(name);
@@ -583,18 +578,83 @@ fn take_json_results(path: &Path, recorded: &str, results: &mut Vec<Value>) {
     }
 }
 
-fn take_markdown_rows(path: &Path, command: &str, recorded: &str, table: &mut Vec<String>) {
-    let Ok(text) = fs::read_to_string(path) else {
-        return;
-    };
-    let _ = fs::remove_file(path);
-    let text = if command == recorded {
-        text
+fn format_markdown_table(results: &[Value]) -> Option<String> {
+    struct Entry<'a> {
+        command: &'a str,
+        mean: f64,
+        stddev: Option<f64>,
+        min: f64,
+        max: f64,
+    }
+    let entries: Vec<Entry<'_>> = results
+        .iter()
+        .filter_map(|value| {
+            Some(Entry {
+                command: value["command"].as_str()?,
+                mean: value["mean"].as_f64()?,
+                stddev: value["stddev"].as_f64(),
+                min: value["min"].as_f64()?,
+                max: value["max"].as_f64()?,
+            })
+        })
+        .collect();
+    let (fastest_index, fastest) = entries
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.mean.total_cmp(&b.mean))?;
+    let in_ms = fastest.mean < 1.0;
+    let unit = if in_ms { "ms" } else { "s" };
+    let mut lines = vec![
+        format!("| Command | Mean [{unit}] | Min [{unit}] | Max [{unit}] | Relative |"),
+        "|:---|---:|---:|---:|---:|".to_string(),
+    ];
+    for (index, entry) in entries.iter().enumerate() {
+        let command = entry.command.replace('|', "\\|");
+        let mean = match entry.stddev {
+            Some(stddev) => format!(
+                "{} ± {}",
+                format_duration(entry.mean, in_ms),
+                format_duration(stddev, in_ms)
+            ),
+            None => format_duration(entry.mean, in_ms),
+        };
+        let min = format_duration(entry.min, in_ms);
+        let max = format_duration(entry.max, in_ms);
+        let relative = if index == fastest_index || fastest.mean <= 0.0 {
+            "1.00".to_string()
+        } else {
+            format_relative(entry.mean, entry.stddev, fastest.mean, fastest.stddev)
+        };
+        lines.push(format!(
+            "| `{command}` | {mean} | {min} | {max} | {relative} |"
+        ));
+    }
+    Some(format!("{}\n", lines.join("\n")))
+}
+
+fn format_duration(seconds: f64, in_ms: bool) -> String {
+    if in_ms {
+        format!("{:.1}", seconds * 1000.0)
     } else {
-        text.replace(&format!("`{command}`"), &format!("`{recorded}`"))
-    };
-    let skip = if table.is_empty() { 0 } else { 2 };
-    table.extend(text.lines().skip(skip).map(str::to_string));
+        format!("{seconds:.3}")
+    }
+}
+
+fn format_relative(
+    mean: f64,
+    stddev: Option<f64>,
+    fastest_mean: f64,
+    fastest_stddev: Option<f64>,
+) -> String {
+    let ratio = mean / fastest_mean;
+    match (stddev, fastest_stddev) {
+        (Some(stddev), Some(fastest_stddev)) if mean > 0.0 => {
+            let spread =
+                ratio * ((stddev / mean).powi(2) + (fastest_stddev / fastest_mean).powi(2)).sqrt();
+            format!("{ratio:.2} ± {spread:.2}")
+        }
+        _ => format!("{ratio:.2}"),
+    }
 }
 
 fn capture_every_instance(
@@ -824,5 +884,45 @@ mod tests {
         ));
         assert_eq!(runner.failures, ["t2-fwd"]);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_markdown_table_shares_one_unit_and_measures_every_row_against_the_fastest() {
+        let results = [
+            serde_json::json!({
+                "command": "cloc /corpus",
+                "mean": 1.050,
+                "stddev": 0.015,
+                "min": 1.030,
+                "max": 1.072,
+            }),
+            serde_json::json!({
+                "command": "MEZURA_DATA_DIR=/tmp/a mezura /corpus",
+                "mean": 0.0035394,
+                "stddev": 0.0001018,
+                "min": 0.0034,
+                "max": 0.0038,
+            }),
+        ];
+        assert_eq!(
+            format_markdown_table(&results).unwrap(),
+            "| Command | Mean [ms] | Min [ms] | Max [ms] | Relative |\n\
+             |:---|---:|---:|---:|---:|\n\
+             | `cloc /corpus` | 1050.0 ± 15.0 | 1030.0 | 1072.0 | 296.66 ± 9.53 |\n\
+             | `MEZURA_DATA_DIR=/tmp/a mezura /corpus` | 3.5 ± 0.1 | 3.4 | 3.8 | 1.00 |\n"
+        );
+        let in_seconds = [serde_json::json!({
+            "command": "cloc /linux",
+            "mean": 1.42,
+            "stddev": null,
+            "min": 1.42,
+            "max": 1.42,
+        })];
+        assert_eq!(
+            format_markdown_table(&in_seconds).unwrap(),
+            "| Command | Mean [s] | Min [s] | Max [s] | Relative |\n\
+             |:---|---:|---:|---:|---:|\n\
+             | `cloc /linux` | 1.420 | 1.420 | 1.420 | 1.00 |\n"
+        );
     }
 }
