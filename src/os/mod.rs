@@ -22,10 +22,12 @@ const RSS_LINE: &str = "VmRSS:";
 const PEAK_LINE: &str = "VmHWM:";
 const IDLE_COLUMN: usize = 3;
 const IOWAIT_COLUMN: usize = 4;
-/// The tenth and twelfth fields of the line, counted past the last bracket, since the command sits
-/// in the second field and can hold spaces and brackets of its own.
+/// The tenth through thirteenth fields of the line, counted past the last bracket, since the
+/// command sits in the second field and can hold spaces and brackets of its own.
 const MINOR_FAULTS: usize = 7;
+const CHILD_MINOR_FAULTS: usize = 8;
 const MAJOR_FAULTS: usize = 9;
+const CHILD_MAJOR_FAULTS: usize = 10;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
 
@@ -195,8 +197,11 @@ pub fn parse_proc_status(text: &str) -> Option<(u64, u64)> {
 pub fn parse_process_faults(text: &str) -> Option<(u64, u64)> {
     let (_, rest) = text.rsplit_once(')')?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
-    let read = |at: usize| fields.get(at).and_then(|field| field.parse().ok());
-    Some((read(MINOR_FAULTS)?, read(MAJOR_FAULTS)?))
+    let read = |at: usize| fields.get(at).and_then(|field| field.parse::<u64>().ok());
+    Some((
+        read(MINOR_FAULTS)? + read(CHILD_MINOR_FAULTS)?,
+        read(MAJOR_FAULTS)? + read(CHILD_MAJOR_FAULTS)?,
+    ))
 }
 
 pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
@@ -232,6 +237,8 @@ mod tests {
         assert_eq!(parse_process_faults(plain), Some((61_208, 17)));
         let awkward = "4242 (my (odd) name) R 1 4242 4242 0 -1 4194304 27071 0 0 0 31 9 0";
         assert_eq!(parse_process_faults(awkward), Some((27_071, 0)));
+        let children = "4242 (cloc) S 1 4242 4242 0 -1 4194304 1200 48000 3 19 31 9 0";
+        assert_eq!(parse_process_faults(children), Some((49_200, 22)));
         assert_eq!(parse_process_faults("4242 (tokei) R 1 2 3"), None);
         assert_eq!(parse_process_faults("no brackets here at all"), None);
     }
