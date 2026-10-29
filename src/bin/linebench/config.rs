@@ -271,19 +271,26 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--add" => options.add.push(PathBuf::from(value()?)),
             "--given" => {
                 let (instance, path) = split_assignment(flag, &value()?)?;
-                if !options.given_order.contains(&instance) {
-                    options.given_order.push(instance.clone());
+                if options.given.contains_key(&instance) {
+                    return Err(format!("{instance} is named twice in {flag}"));
                 }
+                remember_given_order(&mut options.given_order, &instance);
                 options.given.insert(instance, PathBuf::from(path));
             }
             "--definition" => {
                 let (instance, path) = split_assignment(flag, &value()?)?;
+                if options.definition_of.contains_key(&instance) {
+                    return Err(format!("{instance} is named twice in {flag}"));
+                }
                 options.definition_of.insert(instance, PathBuf::from(path));
             }
             "--args" => {
                 parse_instance_or_shared_args(flag, &value()?, &mut options)?;
             }
             "--events" => {
+                if !options.events.is_empty() {
+                    return Err(format!("{flag} is given twice"));
+                }
                 let first = value()?;
                 let named = read_list(flag, first, &mut rest)?;
                 options.events = parse_ab_events(flag, named)?;
@@ -295,11 +302,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                     (Some(instance), Some(name), Some(given))
                         if !instance.is_empty() && !name.is_empty() =>
                     {
-                        options
-                            .env_of
-                            .entry(instance.to_string())
-                            .or_default()
-                            .insert(name.to_string(), given.to_string());
+                        remember_given_order(&mut options.given_order, instance);
+                        let entry = options.env_of.entry(instance.to_string()).or_default();
+                        if entry.contains_key(name) {
+                            return Err(format!("{name} is named twice for {instance} in {flag}"));
+                        }
+                        entry.insert(name.to_string(), given.to_string());
                     }
                     _ => {
                         return Err(format!(
@@ -1219,6 +1227,12 @@ fn split_assignment(flag: &str, text: &str) -> Result<(String, String), String> 
     }
 }
 
+fn remember_given_order(order: &mut Vec<String>, instance: &str) {
+    if !order.iter().any(|held| held == instance) {
+        order.push(instance.to_string());
+    }
+}
+
 fn parse_instance_or_shared_args(
     flag: &str,
     text: &str,
@@ -1240,8 +1254,15 @@ fn parse_instance_or_shared_args(
             ));
         }
         if instance == EVERYTHING {
-            options.args.extend(words);
+            if !options.args.is_empty() {
+                return Err(format!("{flag} is given twice"));
+            }
+            options.args = words;
         } else {
+            if options.args_of.contains_key(instance) {
+                return Err(format!("{instance} is named twice in {flag}"));
+            }
+            remember_given_order(&mut options.given_order, instance);
             options.args_of.insert(instance.to_string(), words);
         }
         return Ok(());
@@ -1250,19 +1271,22 @@ fn parse_instance_or_shared_args(
     if words.is_empty() {
         return Err(format!("{flag} needs a value"));
     }
-    options.args.extend(words);
+    if !options.args.is_empty() {
+        return Err(format!("{flag} is given twice"));
+    }
+    options.args = words;
     Ok(())
 }
 
 fn parse_ab_events(flag: &str, named: Vec<String>) -> Result<Vec<String>, String> {
     let mut events = Vec::new();
     for event in named {
-        if event.ends_with(KERNEL_ONLY) {
+        let bare = event.trim_end_matches(USER_ONLY);
+        if bare.ends_with(KERNEL_ONLY) {
             return Err(format!(
                 "{flag} counts user space ({USER_ONLY}), and {event} asks for the kernel"
             ));
         }
-        let bare = event.trim_end_matches(USER_ONLY);
         if bare.is_empty() {
             return Err(format!("empty name in {flag} {event}"));
         }
@@ -2209,24 +2233,31 @@ mod tests {
                 "mezura@z=D:/z.exe",
                 "--given",
                 "mezura@a=D:/a.exe",
-                "--given",
-                "mezura@m=D:/m.exe",
                 "--args",
-                "--hide tests",
+                "mezura@m=--threads 8",
                 "--args",
-                "--counting=region",
-                "--args",
-                "all=--threads 4",
+                "--hide tests --counting=region",
             ]
             .map(String::from),
         )
         .unwrap();
         assert_eq!(bare.given_order, ["mezura@z", "mezura@a", "mezura@m"]);
-        assert_eq!(
-            bare.args,
-            ["--hide", "tests", "--counting=region", "--threads", "4"]
-        );
-        assert!(bare.args_of.is_empty());
+        assert_eq!(bare.args, ["--hide", "tests", "--counting=region"]);
+        assert_eq!(bare.args_of["mezura@m"], ["--threads", "8"]);
+        let with_all = parse_args(
+            &["linebench", "ab", "linux", "--args", "all=--threads 4"].map(String::from),
+        )
+        .unwrap();
+        assert_eq!(with_all.args, ["--threads", "4"]);
+        for line in [
+            "ab linux --given mezura@a=D:/a.exe --given mezura@a=D:/b.exe",
+            "ab linux --args mezura@a=-x --args mezura@a=-y",
+            "ab linux --args -x --args -y",
+            "ab linux --env mezura@a=K=1 --env mezura@a=K=2",
+        ] {
+            let refused = parse(line).unwrap_err();
+            assert!(refused.contains("twice"), "{line}: {refused}");
+        }
     }
 
     #[test]
@@ -2235,11 +2266,16 @@ mod tests {
         assert_eq!(options.events, ["branch-misses", "cache-misses"]);
         for (line, expected) in [
             ("ab linux --events branch-misses:k", "asks for the kernel"),
+            ("ab linux --events branch-misses:k:u", "asks for the kernel"),
             ("ab linux --events instructions", "already counted by ab"),
             ("ab linux --events cycles:u", "already counted by ab"),
             (
                 "ab linux --events branch-misses,branch-misses:u",
                 "named twice",
+            ),
+            (
+                "ab linux --events branch-misses --events cache-misses",
+                "twice",
             ),
             ("ab linux --events :u", "empty name"),
             ("run linux --events branch-misses", "not a flag"),

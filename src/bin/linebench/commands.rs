@@ -944,11 +944,10 @@ pub fn run_insights(
             execution_env: instance.execution_env.clone(),
         };
         let recorded = timed.describe_command();
-        if !distinct.iter().any(|seen| {
-            seen.command == timed.command
-                && seen.env == timed.env
-                && seen.execution_env == timed.execution_env
-        }) {
+        if !distinct
+            .iter()
+            .any(|seen| seen.command == timed.command && seen.env == timed.env)
+        {
             distinct.push(timed);
         }
         versions.push((instance.get_name().to_string(), recorded));
@@ -978,6 +977,25 @@ pub fn run_insights(
             print_line(out, &paint_table_line(&line))?;
         }
         print_line(out, "")?;
+    } else if (asked_for(MEMORY_PART) || asked_for(SYSCALLS_PART) || asked_for(ALLOCATIONS_PART))
+        && instances
+            .iter()
+            .any(|instance| !instance.definition.run.env.is_empty())
+    {
+        let target = create_floor_target(scratch.get_path())?;
+        for instance in instances
+            .iter()
+            .filter(|instance| !instance.definition.run.env.is_empty())
+        {
+            let args = build_args(
+                instance,
+                &target,
+                &locations.corpus.extensions,
+                INSIGHTS_TABLE,
+                false,
+            )?;
+            let _ = run_once(&build_subject(instance, &args, &scrub));
+        }
     }
     let mut curves = Vec::new();
     if asked_for(MEMORY_PART) {
@@ -1225,6 +1243,8 @@ struct AbComparison {
     b: AbSide,
     instructions_ratio: f64,
     cycles_ratio: f64,
+    #[serde(skip)]
+    events_order: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     events_ratio: BTreeMap<String, f64>,
     wall_ratio: Option<f64>,
@@ -1377,7 +1397,8 @@ fn lay_out_ab(tree: &str, width: usize, comparison: &AbComparison) -> [String; 3
             format!("{:.3}x", comparison.cycles_ratio),
         ],
     ];
-    for (event, &a_count) in &a.events {
+    for event in &comparison.events_order {
+        let a_count = a.events.get(event).copied().unwrap_or_default();
         let b_count = b.events.get(event).copied().unwrap_or_default();
         let ratio = comparison
             .events_ratio
@@ -1496,6 +1517,7 @@ fn build_ab_comparison(
         }
         totals
     };
+    let events_order: Vec<String> = a[0].extra.iter().map(|(name, _)| name.clone()).collect();
     let a_events = add_events(a);
     let b_events = add_events(b);
     let events_ratio = a_events
@@ -1545,6 +1567,7 @@ fn build_ab_comparison(
         ),
         instructions_ratio: calculate_ratio(add_instructions(b), add_instructions(a), 4),
         cycles_ratio: calculate_ratio(add_cycles(b), add_cycles(a), 3),
+        events_order,
         events_ratio,
         wall_ratio: wall.map(|(.., ratio)| ratio),
         equal_counts,
@@ -4006,9 +4029,12 @@ mod tests {
                 "           b / a  0.9950x              0.998x",
             ]
         );
-        let with_events = |counts: &[UserCounts; 2], misses: u64| {
+        let with_events = |counts: &[UserCounts; 2], branches: u64, misses: u64| {
             counts.clone().map(|one| UserCounts {
-                extra: vec![("branch-misses".to_string(), misses)],
+                extra: vec![
+                    ("branches".to_string(), branches),
+                    ("branch-misses".to_string(), misses),
+                ],
                 ..one
             })
         };
@@ -4016,20 +4042,21 @@ mod tests {
             "linux",
             "b",
             "mezura@cand",
-            &with_events(&a, 45_000),
-            &with_events(&b, 42_300),
+            &with_events(&a, 250_000_000, 45_000),
+            &with_events(&b, 248_000_000, 42_300),
             [&counted, &counted],
             true,
         );
+        assert_eq!(events_ab.a.events["branches"], 250_000_000);
         assert_eq!(events_ab.a.events["branch-misses"], 45_000);
         assert_eq!(events_ab.b.events["branch-misses"], 42_300);
         assert_eq!(events_ab.events_ratio["branch-misses"], 0.94);
         assert_eq!(
             lay_out_ab("linux", 5, &events_ab),
             [
-                "   linux   a      2000M instructions   810M cycles   45,000 branch-misses   185 ms ±0.4%   63,738 files   36,012,345 lines",
-                "           b      1990M instructions   808M cycles   42,300 branch-misses   192 ms ±0.5%   63,738 files   36,012,345 lines",
-                "           b / a  0.9950x              0.998x        0.940x                 1.040x",
+                "   linux   a      2000M instructions   810M cycles   250M branches   45,000 branch-misses   185 ms ±0.4%   63,738 files   36,012,345 lines",
+                "           b      1990M instructions   808M cycles   248M branches   42,300 branch-misses   192 ms ±0.5%   63,738 files   36,012,345 lines",
+                "           b / a  0.9950x              0.998x        0.992x          0.940x                 1.040x",
             ]
         );
         assert_eq!(format_millions(12_345_678), "12.3M");

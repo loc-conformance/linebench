@@ -31,7 +31,7 @@ linebench fetch [--counters all] [--corpus all] [--counters-dir <dir>] [--corpus
 
 linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--control <instance>]
                 [--allow-unequal-exclusions] [--corpus-path <dir>] [--given <c>@<tag>=<path>]
-                [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--counters-dir <dir>]
+                [--definition <c>@<tag>=<f>] [--args [<c>@<tag>=]<text>] [--counters-dir <dir>]
                 [--env <c>@<tag>=<NAME>=<v>] [--add <path>]
 
     Runs every counter once over the target, reads its counts back out of its own output, and
@@ -49,14 +49,14 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--cont
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
-    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
     --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
 
 linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <n>]
                 [--settle <s>] [--extensions rs,c] [--given <c>@<tag>=<path>]
-                [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>] [--counters-dir <dir>]
+                [--definition <c>@<tag>=<f>] [--args [<c>@<tag>=]<text>] [--counters-dir <dir>]
                 [--env <c>@<tag>=<NAME>=<v>] [--add <path>] [--corpus-path <dir>]
 
     Times the control alone, five times by default, and samples what else the machine was doing
@@ -70,7 +70,7 @@ linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <
     --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
-    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
     --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
@@ -79,9 +79,10 @@ linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <
 linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--warmup <n>]
                 [--runs <n>] [--settle <s>] [--against <stamp>] [--no-prep] [--yes] [--keep-raw]
                 [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
-                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
-                [--env <c>@<tag>=<NAME>=<v>] [--expect-identical a=b] [--counters-dir <dir>]
-                [--add <path>] [--corpus-path <dir>]
+                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
+                [--args [<c>@<tag>=]<text>] [--env <c>@<tag>=<NAME>=<v>]
+                [--expect-identical a=b] [--counters-dir <dir>] [--add <path>]
+                [--corpus-path <dir>]
 
     Times every instance over the target through hyperfine, twice, once with the flags that make
     the work equal and once with none, and writes the record, the csv files, the notes and the
@@ -108,7 +109,7 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
-    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
     --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
     --expect-identical a=b     instances whose JSON output has to match, volatile fields aside
     --counters-dir <dir>       where the binaries are
@@ -120,9 +121,9 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
 
 linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu,allocations]
                 [--yes] [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
-                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>] [--args <c>@<tag>=<text>]
-                [--env <c>@<tag>=<NAME>=<v>] [--counters-dir <dir>] [--add <path>]
-                [--corpus-path <dir>]
+                [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
+                [--args [<c>@<tag>=]<text>] [--env <c>@<tag>=<NAME>=<v>] [--counters-dir <dir>]
+                [--add <path>] [--corpus-path <dir>]
 
     Measures what a run cannot measure about itself, since watching a process closely enough
     disturbs the times it would report. The floor is what a counter costs before it has counted
@@ -139,7 +140,7 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
-    --args <c>@<tag>=<text>    arguments of its own, right after the target
+    --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
     --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them

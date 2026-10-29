@@ -17,6 +17,8 @@ New:
 
 Other:
 
+- `<phase>.md` exports share one unit across the table and measure `Relative` against the fastest
+  row in the phase.
 - mezura is declared at 3.3.0.
 
 ## 0.2.0, 2026-09-19

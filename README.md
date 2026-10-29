@@ -387,12 +387,14 @@ left as it is, and `run` stays the command for numbers that are kept.
 By default an instance runs with the definition's target argument and its own `--args`, which is
 all two builds of one counter need. `--same-work` adds the definition's same-work flags and
 languages, as the first table of a run does, for two different counters. `--counters a,b,...`
-names the baseline first and each candidate held against it; without it the two given instances are
-the pair, a before b by name. `--files [<n>]` measures the `n` largest files of the target (ten by
-default, at most 100) under `instructions:u` with an empty-file floor subtracted, sorted by `b / a`
-and summed by directory. Several targets, `ab linux,cpython,./src`, are measured in turn. Linux
-only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are user
-space alone.
+names the baseline first and each candidate held against it; without it the given instances run in
+the order they were named on the command line, or two from `linebench.conf` ordered by name.
+`--events e1,e2` counts extra user-space events (such as `branch-misses`) and their `b / a` ratios
+alongside instructions and cycles. `--files [<n>]` measures the `n` largest files of the target
+(ten by default, at most 100) under `instructions:u` with an empty-file floor subtracted, sorted by
+`b / a` and summed by directory. Several targets, `ab linux,cpython,./src`, are measured in turn.
+Linux only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are
+user space alone.
 
 ### report
 
@@ -516,18 +518,20 @@ definition = "D:/dev/mezura/.linebench/mezura.toml"
 ```
 
 An instance can carry arguments of its own, `--args mezura@c16="--threads 4 16"` for one run or
-`args = ["--threads", "4", "16"]` in its `[given]` entry. They go right after the target, before
-the languages and the same-work flags, in every invocation of that instance. With no binary of its
-own the instance runs the release binary, so a `[given]` entry holding only `args` measures the
-release with those arguments beside the release as it is. Arguments make an instance of their own,
-so the name carries a tag.
+`args = ["--threads", "4", "16"]` in its `[given]` entry, while `--args "--hide tests"` (or
+`--args all="--hide tests"`) passes arguments to every instance in the run. They go right after
+the target, before the languages and the same-work flags, in every invocation of that instance.
+With no binary of its own the instance runs the release binary, so a `[given]` entry holding only
+`args` measures the release with those arguments beside the release as it is. Arguments for one
+instance make an instance of their own, so the name carries a tag.
 
 An instance can carry an environment of its own too, `--env mezura@a=MEZURA_DATA_DIR=/x/a` for
 one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set for that instance
-alone in every invocation of it. Two builds of mezura that carry different language files rewrite
-a shared data directory in turns, inside the runs being measured, and a directory of each one's
-own stops that. Like arguments, an environment makes an instance of its own, so the name carries
-a tag.
+alone in every invocation of it. A counter definition can also give each instance a directory of
+its own through `[run] env` and `{instance-dir}`, as `counters/mezura.toml` does for
+`MEZURA_DATA_DIR`, so two builds of mezura that carry different language files do not rewrite a
+shared data directory inside the runs being measured. Like per-instance arguments, an explicit
+environment makes an instance of their own, so the name carries a tag.
 
 A run holding any given instance is written under `results/local/` and the page gives such runs
 headings of their own, under the release ones, with the same sections. A `[given]` entry in the
@@ -725,6 +729,7 @@ blanks   = "Blank"
 | `extension-case` | `exact` for a counter that matches case, so `{extensions}` is spelled `s,S`; the default is `any` |
 | `same-work` | what the same-work table adds |
 | `same-work-note` | what the results page prints for it |
+| `env` | variables set in `[run]` for every invocation, with `{instance-dir}` expanded to a directory of that instance's own |
 | `volatile` | the fields of the JSON that differ between two runs, in the `[read]` path syntax, so `--expect-identical` can set them aside |
 | `scrub-env` | variables removed from the counter's environment |
 | `[read]` | where the counts sit in the counter's own JSON |

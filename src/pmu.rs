@@ -184,10 +184,12 @@ pub fn count_user_events(
     extra_events: &[String],
     path: &Path,
 ) -> Result<UserCounts, String> {
+    let extra_names: Vec<&str> = extra_events
+        .iter()
+        .map(|event| event.trim_end_matches(USER_ONLY))
+        .collect();
     let mut names = vec![INSTRUCTIONS, CYCLES];
-    for event in extra_events {
-        names.push(event.trim_end_matches(USER_ONLY));
-    }
+    names.extend_from_slice(&extra_names);
     if duration {
         names.push(DURATION_TIME);
     }
@@ -202,10 +204,9 @@ pub fn count_user_events(
             noise_pct: reading.noise_pct,
         })
     });
-    let extra = extra_events
-        .iter()
-        .map(|event| {
-            let bare = event.trim_end_matches(USER_ONLY);
+    let extra = extra_names
+        .into_iter()
+        .map(|bare| {
             Ok((
                 bare.to_string(),
                 require_user_count(&read, subject.instance, bare)?,

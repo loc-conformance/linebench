@@ -59,13 +59,11 @@ pub fn build_instances(
                 &locations.skip,
             )?;
             left_out = reasons;
-            let given_names = locations.given_order.iter().cloned().chain(
-                locations
-                    .given
-                    .keys()
-                    .filter(|name| !locations.given_order.contains(name))
-                    .cloned(),
-            );
+            let given_names: Vec<String> =
+                match locations.given_order.len() == locations.given.len() {
+                    true => locations.given_order.clone(),
+                    false => locations.given.keys().cloned().collect(),
+                };
             let selected: Vec<String> = set_up
                 .into_iter()
                 .filter(|name| !locations.given.contains_key(name))

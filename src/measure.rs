@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::counters::Definition;
 use crate::fetch::Identity;
 use crate::machine::Platform;
+use crate::record::propagate_ratio_stddev;
 
 pub const DEFAULT_WARMUP: u32 = 3;
 pub const DEFAULT_RUNS: u32 = 15;
@@ -652,8 +653,7 @@ fn format_relative(
     let ratio = mean / fastest_mean;
     match (stddev, fastest_stddev) {
         (Some(stddev), Some(fastest_stddev)) if mean > 0.0 => {
-            let spread =
-                ratio * ((stddev / mean).powi(2) + (fastest_stddev / fastest_mean).powi(2)).sqrt();
+            let spread = propagate_ratio_stddev(ratio, mean, stddev, fastest_mean, fastest_stddev);
             format!("{ratio:.2} ± {spread:.2}")
         }
         _ => format!("{ratio:.2}"),
