@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1, 2026-10-29
+
+Other:
+
+- Out of the box (`t2`), the control runs, `noise`, `insights` floor (`floor-t2`), and `ab` pass
+  the target's language flags to every counter, so all counters run on the same language files while
+  keeping their own defaults.
+
 ## 0.3.0, 2026-10-29
 
 New:

@@ -384,9 +384,10 @@ real. The cycles and wall pool both orders, and a cycles change under one percen
 results stay on the screen, or go to `--json <path>` when a script asks for them, the machine is
 left as it is, and `run` stays the command for numbers that are kept.
 
-By default an instance runs with the definition's target argument and its own `--args`, which is
-all two builds of one counter need. `--same-work` adds the definition's same-work flags and
-languages, as the first table of a run does, for two different counters. `--counters a,b,...`
+By default an instance runs with the definition's target argument, the target's languages when it
+declares any, and its own `--args`, which is all two builds of one counter need. `--same-work`
+adds the definition's same-work flags, as the first table of a run does, for two different
+counters. `--counters a,b,...`
 names the baseline first and each candidate held against it; without it the given instances run in
 the order they were named on the command line, or two from `linebench.conf` ordered by name.
 `--events e1,e2` counts extra user-space events (such as `branch-misses`) and their `b / a` ratios
@@ -540,10 +541,10 @@ it out or name the release instances with `--counters`.
 
 ## Reading the numbers
 
-Each run measures two tables. **Same work** pins every instance to the corpus's languages and its
+Each run measures two tables, both over the corpus's languages. **Same work** adds each counter's
 own same-work flags, and the file and line counts beside the times, checked against the corpus,
-prove the work was the same. **Out of the box** runs every instance bare, so the ratio mixes speed
-with how much each one chose to do.
+prove the work was the same. **Out of the box** leaves each counter at its own defaults, so the
+ratio mixes speed with how much each one chose to do on those files.
 
 Every table is measured twice, once in each command order, and the numbers pool the two. How far
 the orders disagreed is a trust check on the page. The control, the same binary timed at the start

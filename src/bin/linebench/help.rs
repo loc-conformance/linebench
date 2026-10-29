@@ -85,9 +85,10 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
                 [--corpus-path <dir>]
 
     Times every instance over the target through hyperfine, twice, once with the flags that make
-    the work equal and once with none, and writes the record, the csv files, the notes and the
-    results page. The control is timed alone at both ends, and the gap between its two answers is
-    the drift the record carries: the run's own claim about whether it replicates.
+    the work equal and once at each counter's own defaults, and writes the record, the csv
+    files, the notes and the results page. The control is timed alone at both ends, and the gap
+    between its two answers is the drift the record carries: the run's own claim about whether it
+    replicates.
 
     Several corpora, run linux,cpython or run all, are measured one after the other in one
     process. The machine is prepared once, each corpus keeps its own run directory and its own
@@ -163,7 +164,7 @@ linebench ab <corpora|all|dir> [--counters a,b,...] [--runs <n>] [--files [<n>]]
     --counters a,b,...         the instances, baseline a first
     --runs <n>                 runs per perf stat pass, default 15 (3 with --files)
     --files [<n>]              measure the n largest files (default 10, at most 100)
-    --same-work                add the definition's same-work flags and languages
+    --same-work                add the definition's same-work flags
     --events e1,e2             extra user-space perf events, e.g. branch-misses,cache-misses
     --extensions rs,c          what to count in a directory of your own
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured

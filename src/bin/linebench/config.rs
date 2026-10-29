@@ -981,25 +981,15 @@ fn choose_ab_targets(
         }
         has_folder = true;
         let checkout = check_target_directory(word, options, config, corpora, data_dir)?;
-        let extensions: &[String] = match (
-            &options.extensions,
-            options.same_work || options.files.is_some(),
-        ) {
-            (Some(extensions), true) => extensions,
-            (Some(_), false) => {
-                return Err(
-                    "--extensions in ab goes with --same-work or --files; without them each \
-                     instance runs with its own arguments"
-                        .to_string(),
-                );
-            }
-            (None, _) if options.same_work => {
+        let extensions: &[String] = match &options.extensions {
+            Some(extensions) => extensions,
+            None if options.same_work => {
                 return Err(format!(
                     "say what to count in {}, with --extensions rs,c",
                     checkout.display()
                 ));
             }
-            (None, _) => &[],
+            None => &[],
         };
         let mut corpus = build_corpus_of(&checkout, extensions)?;
         if named.len() > 1 || (word != "." && word != "..") {
@@ -1978,18 +1968,15 @@ mod tests {
             "{only_corpora}"
         );
 
-        let without_same_work = resolve_locations(
+        let with_extensions = resolve_locations(
             &parse("ab ./src --extensions rs").unwrap(),
             &config,
             conf,
             &corpora,
             data,
         )
-        .unwrap_err();
-        assert!(
-            without_same_work.contains("--same-work"),
-            "{without_same_work}"
-        );
+        .unwrap();
+        assert_eq!(with_extensions.locations[0].corpus.extensions, ["rs"]);
 
         let with_files = resolve_locations(
             &parse("ab ./src --files 5 --extensions rs").unwrap(),

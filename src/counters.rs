@@ -136,8 +136,10 @@ impl Definition {
             .map(|part| part.replace(TARGET, &target))
             .collect();
         args.extend(extra.iter().cloned());
-        if same_work {
+        if !extensions.is_empty() {
             args.extend(self.spell_languages(extensions)?);
+        }
+        if same_work {
             args.extend(self.run.same_work.iter().cloned());
         }
         if as_json {
@@ -682,11 +684,15 @@ extension-case = "exact""#,
         let c = build_strings(&["c"]);
         assert_eq!(
             scc.build_args(tree, &c, &[], false, false).unwrap(),
-            ["/tree"]
+            ["/tree", "-i", "c"]
         );
         assert_eq!(
             scc.build_args(tree, &c, &[], false, true).unwrap(),
-            ["/tree", "--format", "json"]
+            ["/tree", "-i", "c", "--format", "json"]
+        );
+        assert_eq!(
+            scc.build_args(tree, &[], &[], false, false).unwrap(),
+            ["/tree"]
         );
         let own = build_strings(&["--threads", "4"]);
         assert_eq!(

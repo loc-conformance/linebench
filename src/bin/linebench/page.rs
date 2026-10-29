@@ -951,7 +951,7 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         lines.push(format!("  - {}: {note}{with}", instance.identity.instance));
     }
     lines.extend([
-        "- Out of the box: bare `counter <dir>` with no flags, plus an instance's own arguments where it has them.".to_string(),
+        "- Out of the box: the same language set for every counter, with each counter at its own defaults and an instance's own arguments where it has them.".to_string(),
         "- The exact flags: each counter's definition under `counters/` in the linebench repository.".to_string(),
         String::new(),
         "## Terms".to_string(),

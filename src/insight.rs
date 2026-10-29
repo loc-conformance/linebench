@@ -1211,8 +1211,14 @@ mod tests {
     fn build_floor() -> Vec<Measurement> {
         vec![
             measured(VERSION_SET, "tokei", TOKEI_COMMAND, 6.1, 0.4),
-            measured("floor-t1", "tokei", "tokei floor -t Rust", 13.3, 1.2),
-            measured("floor-t2", "tokei", "tokei floor", 13.9, 1.1),
+            measured(
+                "floor-t1",
+                "tokei",
+                "tokei floor -t Rust --no-ignore --hidden",
+                13.3,
+                1.2,
+            ),
+            measured("floor-t2", "tokei", "tokei floor -t Rust", 13.9, 1.1),
         ]
     }
 
