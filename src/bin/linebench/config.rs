@@ -109,7 +109,9 @@ pub struct Options {
     pub extensions: Option<Vec<String>>,
     pub add: Vec<PathBuf>,
     pub given: BTreeMap<String, PathBuf>,
+    pub given_order: Vec<String>,
     pub definition_of: BTreeMap<String, PathBuf>,
+    pub args: Vec<String>,
     pub args_of: BTreeMap<String, Vec<String>>,
     pub env_of: BTreeMap<String, BTreeMap<String, String>>,
     pub same_work: bool,
@@ -156,6 +158,8 @@ pub struct Locations {
     pub out: PathBuf,
     pub history: PathBuf,
     pub given: BTreeMap<String, GivenEntry>,
+    pub given_order: Vec<String>,
+    pub args: Vec<String>,
     pub control: Option<String>,
     pub skip: Vec<String>,
 }
@@ -264,6 +268,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--add" => options.add.push(PathBuf::from(value()?)),
             "--given" => {
                 let (instance, path) = split_assignment(flag, &value()?)?;
+                if !options.given_order.contains(&instance) {
+                    options.given_order.push(instance.clone());
+                }
                 options.given.insert(instance, PathBuf::from(path));
             }
             "--definition" => {
@@ -271,9 +278,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 options.definition_of.insert(instance, PathBuf::from(path));
             }
             "--args" => {
-                let (instance, text) = split_assignment(flag, &value()?)?;
-                let args = text.split_whitespace().map(String::from).collect();
-                options.args_of.insert(instance, args);
+                parse_instance_or_shared_args(flag, &value()?, &mut options)?;
             }
             "--env" => {
                 let text = value()?;
@@ -565,6 +570,8 @@ pub fn resolve_locations(
             out: out.clone(),
             history: history.clone(),
             given: given.clone(),
+            given_order: options.given_order.clone(),
+            args: options.args.clone(),
             control: config.control.clone(),
             skip: config.skip.clone(),
         })
@@ -1197,6 +1204,41 @@ fn split_assignment(flag: &str, text: &str) -> Result<(String, String), String> 
             "{flag} takes <instance>=<path>, and {text} is not that"
         )),
     }
+}
+
+fn parse_instance_or_shared_args(
+    flag: &str,
+    text: &str,
+    options: &mut Options,
+) -> Result<(), String> {
+    if text.starts_with('=') {
+        return Err(format!(
+            "{flag} takes <instance>=<text> or <text>, and {text} is not that"
+        ));
+    }
+    if let Some((instance, rest)) = text.split_once('=')
+        && !instance.starts_with('-')
+        && !instance.contains(char::is_whitespace)
+    {
+        let words: Vec<String> = rest.split_whitespace().map(String::from).collect();
+        if words.is_empty() {
+            return Err(format!(
+                "{flag} takes <instance>=<text> or <text>, and {text} is not that"
+            ));
+        }
+        if instance == EVERYTHING {
+            options.args.extend(words);
+        } else {
+            options.args_of.insert(instance.to_string(), words);
+        }
+        return Ok(());
+    }
+    let words: Vec<String> = text.split_whitespace().map(String::from).collect();
+    if words.is_empty() {
+        return Err(format!("{flag} needs a value"));
+    }
+    options.args.extend(words);
+    Ok(())
 }
 
 fn parse_number(flag: &str, text: &str) -> Result<u32, String> {
@@ -2118,6 +2160,37 @@ mod tests {
         let untagged = parse("ab linux --env mezura=ONE=1").unwrap();
         let refused = resolve_one(&untagged, &config, conf, &corpora, data).unwrap_err();
         assert!(refused.contains("mezura@<tag>"), "{refused}");
+    }
+
+    #[test]
+    fn shared_args_apply_across_instances_and_cli_given_keeps_its_order() {
+        let bare = parse_args(
+            &[
+                "linebench",
+                "ab",
+                "linux",
+                "--given",
+                "mezura@z=D:/z.exe",
+                "--given",
+                "mezura@a=D:/a.exe",
+                "--given",
+                "mezura@m=D:/m.exe",
+                "--args",
+                "--hide tests",
+                "--args",
+                "--counting=region",
+                "--args",
+                "all=--threads 4",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(bare.given_order, ["mezura@z", "mezura@a", "mezura@m"]);
+        assert_eq!(
+            bare.args,
+            ["--hide", "tests", "--counting=region", "--threads", "4"]
+        );
+        assert!(bare.args_of.is_empty());
     }
 
     fn parse(line: &str) -> Result<Options, String> {

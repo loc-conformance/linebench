@@ -437,8 +437,12 @@ pub fn run_ab(
         for warning in &chosen.warnings {
             print_warning(out, warning)?;
         }
-        let instances =
-            choose_ab_instances(chosen.instances, options.counters.is_some(), &one.given)?;
+        let instances = choose_ab_instances(
+            chosen.instances,
+            options.counters.is_some(),
+            &one.given,
+            &one.given_order,
+        )?;
         if !described {
             let labels: Vec<String> = (0..instances.len())
                 .map(|index| match index {
@@ -558,6 +562,7 @@ pub fn run_ab(
             let comparison = build_ab_comparison(
                 &one.corpus.name,
                 &b_label,
+                instances[candidate].get_name(),
                 &a,
                 &b,
                 [&counted[0], &counted[candidate]],
@@ -854,8 +859,6 @@ pub fn run_insights(
             res.display()
         ));
     }
-    fs::create_dir_all(&res)
-        .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
     let scratch = Scratch::create("insights")?;
     let asked = match &options.only {
         Some(named) => named.clone(),
@@ -911,6 +914,8 @@ pub fn run_insights(
     {
         return Err("stopped.".to_string());
     }
+    fs::create_dir_all(&res)
+        .map_err(|error| format!("{} could not be created: {error}", res.display()))?;
     let scrub = collect_scrub(&instances);
     let mut runner = Runner::new(
         &res,
@@ -1009,17 +1014,20 @@ pub fn run_insights(
     }
     let mut syscalls = Vec::new();
     if asked_for(SYSCALLS_PART) {
-        print_header(out, "== syscalls")?;
         syscalls = match &tracer {
             Some(version) => {
+                print_header(out, "== syscalls")?;
                 print_line(out, &format!("   {version}"))?;
                 collect_syscalls(out, &instances, locations, &scrub, scratch.get_path())?
             }
             None => {
-                print_line(
-                    out,
-                    &format!("   {}", unmeasured.as_deref().unwrap_or_default()),
-                )?;
+                if !platform.is_linux() {
+                    print_header(out, "== syscalls")?;
+                    print_line(
+                        out,
+                        &format!("   {}", unmeasured.as_deref().unwrap_or_default()),
+                    )?;
+                }
                 Vec::new()
             }
         };
@@ -1036,9 +1044,9 @@ pub fn run_insights(
     }
     let mut pmu = Vec::new();
     if asked_for(PMU_PART) {
-        print_header(out, "== pmu")?;
         pmu = match &profiler {
             Some(version) => {
+                print_header(out, "== pmu")?;
                 print_line(out, &format!("   {version}"))?;
                 for (pass, events) in PASSES.iter().enumerate() {
                     print_line(
@@ -1056,10 +1064,13 @@ pub fn run_insights(
                 collect_pmu(out, &mut settle, &instances, locations, &scrub, &res)?
             }
             None => {
-                print_line(
-                    out,
-                    &format!("   {}", unread.as_deref().unwrap_or_default()),
-                )?;
+                if !platform.is_linux() {
+                    print_header(out, "== pmu")?;
+                    print_line(
+                        out,
+                        &format!("   {}", unread.as_deref().unwrap_or_default()),
+                    )?;
+                }
                 Vec::new()
             }
         };
@@ -1072,20 +1083,23 @@ pub fn run_insights(
     }
     let mut allocations = Vec::new();
     if asked_for(ALLOCATIONS_PART) {
-        print_header(out, "== allocations")?;
         allocations = match &valgrind {
             Some(version) => {
+                print_header(out, "== allocations")?;
                 print_line(out, &format!("   {version}"))?;
                 collect_allocations(out, &instances, locations, &scrub, scratch.get_path())?
             }
             None => {
-                print_line(
-                    out,
-                    &format!(
-                        "   {}",
-                        allocations_unmeasured.as_deref().unwrap_or_default()
-                    ),
-                )?;
+                if !platform.is_linux() {
+                    print_header(out, "== allocations")?;
+                    print_line(
+                        out,
+                        &format!(
+                            "   {}",
+                            allocations_unmeasured.as_deref().unwrap_or_default()
+                        ),
+                    )?;
+                }
                 Vec::new()
             }
         };
@@ -1204,6 +1218,7 @@ impl AbInstance {
 struct AbComparison {
     target: String,
     candidate: String,
+    instance: String,
     a: AbSide,
     b: AbSide,
     instructions_ratio: f64,
@@ -1226,6 +1241,7 @@ struct AbSide {
 struct AbFilesComparison {
     target: String,
     candidate: String,
+    instance: String,
     total_files: u64,
     total_bytes: u64,
     measured_bytes: u64,
@@ -1258,12 +1274,13 @@ struct AbDirectoryRow {
 }
 
 /// The instances ab compares, in the order they were named: the first is a, and each other is
-/// held against it in turn. Without --counters, two given instances are the pair, in the order
-/// of their names; past two, --counters is required so the baseline is named first.
+/// held against it in turn. Without --counters, the given instances run in the order they were
+/// named on the command line, or two from linebench.conf ordered by name.
 fn choose_ab_instances(
     instances: Vec<Instance>,
     named: bool,
     given: &BTreeMap<String, GivenEntry>,
+    given_order: &[String],
 ) -> Result<Vec<Instance>, String> {
     let candidates: Vec<Instance> = match named {
         true => instances,
@@ -1282,7 +1299,7 @@ fn choose_ab_instances(
             "ab needs at least two instances, and 1 came up ({}): name them with --counters a,b",
             names[0]
         )),
-        (false, count) if count > 2 => Err(format!(
+        (false, count) if count > 2 && given_order.len() < count => Err(format!(
             "{count} given instances came up ({}): name the baseline first with --counters a,b,...",
             names.join(", ")
         )),
@@ -1442,6 +1459,7 @@ fn cmp_ab_rows(
 fn build_ab_comparison(
     target: &str,
     candidate: &str,
+    instance: &str,
     a: &[UserCounts; 2],
     b: &[UserCounts; 2],
     counted: [&Counts; 2],
@@ -1472,6 +1490,7 @@ fn build_ab_comparison(
     AbComparison {
         target: target.to_string(),
         candidate: candidate.to_string(),
+        instance: instance.to_string(),
         a: build_side(a, wall.map(|(ns, noise, ..)| (ns, noise)), counted[0]),
         b: build_side(b, wall.map(|(_, _, ns, noise, _)| (ns, noise)), counted[1]),
         instructions_ratio: calculate_ratio(add_instructions(b), add_instructions(a), 4),
@@ -1546,6 +1565,7 @@ fn measure_ab_files(
         let comparison = build_ab_files_comparison(
             &one.corpus.name,
             &b_label,
+            instances[candidate].get_name(),
             &found,
             &net_by_instance[0],
             &net_by_instance[candidate],
@@ -1579,6 +1599,7 @@ fn measure_ab_files(
 fn build_ab_files_comparison(
     target: &str,
     candidate: &str,
+    instance: &str,
     found: &LargestFiles,
     a_net: &[u64],
     b_net: &[u64],
@@ -1644,6 +1665,7 @@ fn build_ab_files_comparison(
     AbFilesComparison {
         target: target.to_string(),
         candidate: candidate.to_string(),
+        instance: instance.to_string(),
         total_files: found.total_files,
         total_bytes: found.total_bytes,
         measured_bytes,
@@ -3858,7 +3880,16 @@ mod tests {
                 }),
             },
         ];
-        let comparison = build_ab_comparison("linux", "b", &a, &b, [&counted, &counted], true);
+        let comparison = build_ab_comparison(
+            "linux",
+            "b",
+            "mezura@cand",
+            &a,
+            &b,
+            [&counted, &counted],
+            true,
+        );
+        assert_eq!(comparison.instance, "mezura@cand");
         assert_eq!(comparison.a.instructions, 2_000_000_000);
         assert_eq!(comparison.b.instructions, 1_990_000_000);
         assert_eq!(comparison.a.cycles, 810_000_000);
@@ -3877,7 +3908,15 @@ mod tests {
                 "           b / a  0.9950x              0.998x        1.040x",
             ]
         );
-        let second = build_ab_comparison("linux", "b2", &a, &b, [&counted, &counted], true);
+        let second = build_ab_comparison(
+            "linux",
+            "b2",
+            "mezura@c2",
+            &a,
+            &b,
+            [&counted, &counted],
+            true,
+        );
         assert_eq!(
             lay_out_ab("", 5, &second),
             [
@@ -3891,6 +3930,7 @@ mod tests {
         let no_wall = build_ab_comparison(
             "linux",
             "b",
+            "mezura@cand",
             &without_wall(&a),
             &without_wall(&b),
             [&counted, &counted],
@@ -4036,7 +4076,7 @@ mod tests {
             ("mezura@b".to_string(), entry()),
         ]);
         let instances = vec![build("mezura@a"), build("mezura@b"), build("scc")];
-        let chosen = choose_ab_instances(instances.clone(), false, &two_given).unwrap();
+        let chosen = choose_ab_instances(instances.clone(), false, &two_given, &[]).unwrap();
         assert_eq!(chosen.len(), 2);
         assert_eq!(chosen[0].get_name(), "mezura@a");
         assert_eq!(chosen[1].get_name(), "mezura@b");
@@ -4048,10 +4088,20 @@ mod tests {
             ("mezura@c2".to_string(), entry()),
         ]);
         assert_eq!(
-            choose_ab_instances(three.clone(), false, &three_given).unwrap_err(),
+            choose_ab_instances(three.clone(), false, &three_given, &[]).unwrap_err(),
             "3 given instances came up (mezura@base, mezura@c1, mezura@c2): name the baseline first with --counters a,b,..."
         );
-        let named_three = choose_ab_instances(three, true, &three_given).unwrap();
+        let cli_order = vec![
+            "mezura@base".to_string(),
+            "mezura@c1".to_string(),
+            "mezura@c2".to_string(),
+        ];
+        let cli_three =
+            choose_ab_instances(three.clone(), false, &three_given, &cli_order).unwrap();
+        assert_eq!(cli_three.len(), 3);
+        assert_eq!(cli_three[0].get_name(), "mezura@base");
+        assert_eq!(cli_three[2].get_name(), "mezura@c2");
+        let named_three = choose_ab_instances(three, true, &three_given, &[]).unwrap();
         assert_eq!(named_three.len(), 3);
         assert_eq!(named_three[0].get_name(), "mezura@base");
         assert_eq!(named_three[2].get_name(), "mezura@c2");
@@ -4071,6 +4121,8 @@ mod tests {
             checkout: PathBuf::from("D:/x"),
             out: PathBuf::from("D:/out"),
             given: BTreeMap::new(),
+            given_order: Vec::new(),
+            args: Vec::new(),
             control: None,
             skip: Vec::new(),
         };
@@ -4299,7 +4351,9 @@ mod tests {
         };
         let a_net = [100_000_000, 80_000_000, 72_000_000];
         let b_net = [126_000_000, 100_000_000, 72_720_000];
-        let comparison = build_ab_files_comparison("linux", "b", &found, &a_net, &b_net);
+        let comparison =
+            build_ab_files_comparison("linux", "b", "mezura@cand", &found, &a_net, &b_net);
+        assert_eq!(comparison.instance, "mezura@cand");
         assert_eq!(
             lay_out_ab_files(&comparison),
             [
@@ -4325,7 +4379,8 @@ mod tests {
                 bytes: 512,
             }],
         };
-        let multi = build_ab_files_comparison("src", "b2", &one_small, &[0], &[0]);
+        let multi = build_ab_files_comparison("src", "b2", "mezura@c2", &one_small, &[0], &[0]);
+        assert_eq!(multi.instance, "mezura@c2");
         assert_eq!(
             lay_out_ab_files(&multi)[0],
             "== src (b2 against a): 1 largest file (512 B of 2.0 KB, 2 files)"

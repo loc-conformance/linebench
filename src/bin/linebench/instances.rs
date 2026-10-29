@@ -59,10 +59,17 @@ pub fn build_instances(
                 &locations.skip,
             )?;
             left_out = reasons;
+            let given_names = locations.given_order.iter().cloned().chain(
+                locations
+                    .given
+                    .keys()
+                    .filter(|name| !locations.given_order.contains(name))
+                    .cloned(),
+            );
             let selected: Vec<String> = set_up
                 .into_iter()
                 .filter(|name| !locations.given.contains_key(name))
-                .chain(locations.given.keys().cloned())
+                .chain(given_names)
                 .collect();
             if selected.is_empty() {
                 let any_skipped = definitions
@@ -110,12 +117,14 @@ pub fn build_instances(
                     identity
                 }
             };
+            let mut args = locations.args.clone();
+            args.extend(entry.args.iter().cloned());
             let execution_env =
                 prepare_execution_env(&definition, &locations.staging, name, &entry.env);
             Instance {
                 definition,
                 identity,
-                args: entry.args.clone(),
+                args,
                 env: entry.env.clone(),
                 execution_env,
             }
@@ -147,7 +156,7 @@ pub fn build_instances(
             Instance {
                 definition,
                 identity,
-                args: Vec::new(),
+                args: locations.args.clone(),
                 env,
                 execution_env,
             }
