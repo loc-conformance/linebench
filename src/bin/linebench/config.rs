@@ -934,7 +934,7 @@ fn choose_ab_targets(
 ) -> Result<ChosenCorpora, String> {
     if options.files.is_some() && !options.events.is_empty() {
         return Err(
-            "--events is not used with --files, which counts instructions alone".to_string(),
+            "--events is not used with --files, which counts only instructions".to_string(),
         );
     }
     let mut taken: Vec<(Corpus, PathBuf)> = Vec::new();
@@ -2279,7 +2279,7 @@ mod tests {
         let refused = resolve_one(&with_files, &config, conf, &corpora, data).unwrap_err();
         assert_eq!(
             refused,
-            "--events is not used with --files, which counts instructions alone"
+            "--events is not used with --files, which counts only instructions"
         );
     }
 

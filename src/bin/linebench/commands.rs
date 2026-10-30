@@ -108,7 +108,7 @@ const TRACER_REFUSED: &str = "strace is here and it was not allowed to trace, so
                               without CAP_SYS_PTRACE and a hardened kernel.yama.ptrace_scope both \
                               refuse.";
 const TRACER_ELSEWHERE: &str =
-    "strace runs on linux alone, so the system calls cannot be measured here.";
+    "strace runs only on linux, so the system calls cannot be measured here.";
 const PROFILER_MISSING: &str = "perf is not present on the system, or is not in the PATH, so \
                                 the hardware counters cannot be read. On Debian it is the \
                                 linux-perf package.";
@@ -116,14 +116,14 @@ const PROFILER_REFUSED: &str = "perf is here and it read no event, so the hardwa
                                 cannot be read. A virtual machine commonly has no PMU to offer, \
                                 and WSL2 is one of them.";
 const PROFILER_ELSEWHERE: &str =
-    "perf runs on linux alone, so the hardware counters cannot be read here.";
+    "perf runs only on linux, so the hardware counters cannot be read here.";
 const VALGRIND_MISSING: &str = "valgrind is not present on the system, or is not in the PATH, so \
                                 the heap allocations cannot be counted. It is recommended to \
                                 download it first.";
 const VALGRIND_REFUSED: &str = "valgrind is here and it wrote no heap summary, so the heap \
                                 allocations cannot be counted.";
 const VALGRIND_ELSEWHERE: &str =
-    "valgrind runs on linux alone, so the heap allocations cannot be counted here.";
+    "valgrind runs only on linux, so the heap allocations cannot be counted here.";
 const INSIGHTS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const PMU_PROBE_FILE: &str = "pmu-probe.tsv";
@@ -4430,7 +4430,7 @@ mod tests {
     }
 
     #[test]
-    fn counters_are_fetched_when_they_are_asked_for_and_a_corpus_alone_leaves_them_alone() {
+    fn counters_are_fetched_when_they_are_asked_for_and_only_a_corpus_leaves_them_alone() {
         let shipped = crate::shipped::collect_definitions(&mut Vec::new(), &[])
             .unwrap()
             .counters;

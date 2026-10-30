@@ -117,7 +117,7 @@ jobs:
         with:
           tool: hyperfine
 
-      # Every counter is fetched, not the raised one alone, because equal work is compared between
+      # Every counter is fetched, not only the raised one, because equal work is compared between
       # counters and nothing is compared until two of them have counts.
       - name: Fetch every counter and read the counts back
         if: steps.branch.outputs.already == 'no'

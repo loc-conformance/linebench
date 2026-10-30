@@ -29,7 +29,7 @@ handling and tokei's nested languages were caught.
   `cloc-2.10.pl` elsewhere, so it is its own process everywhere. A counter that is only a script
   needs a per-system interpreter table in `[run]`, and the process name the antivirus sees would
   come from the interpreter. It is written the day such a counter exists.
-- **`[acquisition.file]` is keyed by system alone**: `windows`, `linux`, `macos`, `other`. A
+- **`[acquisition.file]` is keyed only by system**: `windows`, `linux`, `macos`, `other`. A
   release that publishes named files per architecture cannot be declared yet. The
   `github-release-asset` channel already picks by system and architecture words, and the file
   channel would take the same keys.
@@ -78,7 +78,7 @@ A corpus is `corpora/<name>.toml`: `name`, `remote`, `commit`, `files`, `extensi
 `tolerance`. The commit is the full 40-character hash in lower case, as `git rev-parse` prints
 it. An abbreviated one cannot be fetched with `--depth 1` and is refused. The extensions are
 spelled once, in whatever case, and each counter spells them its own way. A counter that spells
-languages by name, tokei alone today, needs every extension in its `[language-names]` table,
+languages by name, only tokei today, needs every extension in its `[language-names]` table,
 and the shipped one covers the extensions the shipped corpora name. An extension missing from
 it stops the run before anything is measured, naming the extension and the file to add it to.
 `files` is the number of files carrying them at that commit, required beside a commit: run

@@ -1501,7 +1501,7 @@ mod tests {
             floor: build_floor(),
             curves: vec![build_curve("tokei", 30 * MEGABYTE)],
             tracer: None,
-            unmeasured: Some("strace runs on linux alone".to_string()),
+            unmeasured: Some("strace runs only on linux".to_string()),
             syscalls,
             profiler: None,
             paranoid: None,
@@ -1547,7 +1547,7 @@ mod tests {
             "{bare}"
         );
         assert!(
-            bare.contains("## System calls\n\nstrace runs on linux alone"),
+            bare.contains("## System calls\n\nstrace runs only on linux"),
             "{bare}"
         );
         let mut silent = build_insights(Vec::new(), Vec::new());

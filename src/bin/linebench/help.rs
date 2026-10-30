@@ -50,7 +50,7 @@ linebench check <corpora|all|dir> [--extensions rs,c] [--counters a,b,c] [--cont
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
-    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
+    --env <c>@<tag>=<NAME>=<v> a variable for only that instance's environment
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
 
@@ -71,7 +71,7 @@ linebench noise <corpus|dir> [--control <instance>] [--counters a,b,c] [--runs <
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
-    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
+    --env <c>@<tag>=<NAME>=<v> a variable for only that instance's environment
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
@@ -111,14 +111,14 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
-    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
+    --env <c>@<tag>=<NAME>=<v> a variable for only that instance's environment
     --expect-identical a=b     instances whose JSON output has to match, volatile fields aside
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
 
     A run under an instance with args, env or a build of its own is written under results/local/,
-    since its numbers answer for that build alone.
+    since its numbers answer only for that build.
 
 linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu,allocations,ladder]
                 [--yes] [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
@@ -143,7 +143,7 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
-    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
+    --env <c>@<tag>=<NAME>=<v> a variable for only that instance's environment
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
     --corpus-path <dir>        the folder the corpora sit in, or one corpus's own checkout
@@ -171,7 +171,7 @@ linebench ab <corpora|all|dir> [--counters a,b,...] [--runs <n>] [--files [<n>]]
     --given <c>@<tag>=<path>   a build of your own, copied before it is measured
     --definition <c>@<tag>=<f> the definition that instance runs under
     --args [<c>@<tag>=]<text>  arguments for one instance or all, right after the target
-    --env <c>@<tag>=<NAME>=<v> a variable of that instance's environment alone
+    --env <c>@<tag>=<NAME>=<v> a variable for only that instance's environment
     --json <path>              write the summary to <path> as JSON
     --counters-dir <dir>       where the binaries are
     --add <path>               a definition of your own, or a directory of them
@@ -230,12 +230,12 @@ linebench bump-versions [<counter>] [--json]
 
     Asks every channel what it publishes latest and, where that is ahead of the version a
     definition declares, writes the new one into counters/<name>.toml and leaves the rest of the
-    file as it is. Named a counter, it does that for that one alone.
+    file as it is. Named a counter, it does that only for that one.
 
     --json                     print only what moved, as one document
 
     It maintains this repository's own definitions and nobody who measures needs it, so it is
-    built with --features maintenance alone. A raised version is half a change: the definitions
+    built only with --features maintenance. A raised version is half a change: the definitions
     are compiled into the binary, so it has to be rebuilt before anything measures the new
     version, and the same-work flags are read against that release's notes by a person.
 "#;
@@ -246,7 +246,7 @@ const EVERYWHERE: &str = "Everywhere:";
 const FLAG_OPENING: &str = "--";
 /// Flags of no command in particular, which is why no usage line names them.
 const ALWAYS: [&str; 5] = ["--dry-run", "--help", "-h", "--version", "-V"];
-/// A usage line carries the long spelling alone, and the short one goes wherever it goes.
+/// A usage line carries only the long spelling, and the short one goes wherever it goes.
 const SHORT: [(&str, &str); 1] = [("--yes", "-y")];
 const COUNTERS_HERE: &str = "{counters}";
 const CORPORA_HERE: &str = "{corpora}";

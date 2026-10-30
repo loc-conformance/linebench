@@ -108,7 +108,7 @@ network share, measures the mount.
 
 ## The commands
 
-`linebench --help` lists every flag, and `--help` after a command prints that command alone.
+`linebench --help` lists every flag, and `--help` after a command prints only that command.
 
 ### fetch
 
@@ -339,7 +339,7 @@ runs each:
 Past four events the cpu shares the hardware out in turns and every count becomes an estimate.
 Each instance is captured once before its passes, which settles the page cache and gives the line
 count the table divides by. Linux only, and it wants root or `kernel.perf_event_paranoid` at 1,
-since above that perf drops the kernel and the counts would cover user space alone.
+since above that perf drops the kernel and the counts would cover only user space.
 
 **The heap allocations** are `valgrind` with `--leak-check=no` and `--undef-value-errors=no` over
 the empty floor directory and over the corpus, reporting total allocations, the empty-directory
@@ -404,7 +404,7 @@ alongside instructions and cycles. `--files [<n>]` measures the `n` largest file
 (ten by default, at most 100) under `instructions:u` with an empty-file floor subtracted, sorted by
 `b / a` and summed by directory. Several targets, `ab linux,cpython,./src`, are measured in turn.
 Linux only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are
-user space alone.
+user space only.
 
 ### report
 
@@ -537,8 +537,8 @@ With no binary of its own the instance runs the release binary, so a `[given]` e
 instance make an instance of their own, so the name carries a tag.
 
 An instance can carry an environment of its own too, `--env mezura@a=MEZURA_DATA_DIR=/x/a` for
-one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set for that instance
-alone in every invocation of it. A counter definition can also give each instance a directory of
+one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set only for that
+instance in every invocation of it. A counter definition can also give each instance a directory of
 its own through `[run] env` and `{instance-dir}`, as `counters/mezura.toml` does for
 `MEZURA_DATA_DIR`, so two builds of mezura that carry different language files do not rewrite a
 shared data directory inside the runs being measured. Like per-instance arguments, an explicit

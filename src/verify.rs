@@ -153,7 +153,7 @@ pub fn check_run(dir: &Path) -> Result<Verification, String> {
         (true, true) => "everything published was read, down to the time of every execution",
         (true, false) => "the record and the flat files were read, the raw times were absent",
         (false, true) => "the record and the raw times were read, the flat files were absent",
-        (false, false) => "the record was read alone, the flat files and the raw times were absent",
+        (false, false) => "only the record was read, the flat files and the raw times were absent",
     };
     Ok(Verification {
         run: dir.to_path_buf(),
@@ -339,7 +339,7 @@ fn check_the_counted_events(counted: &[Pmu]) -> Held {
         for reading in &one.readings {
             if reading.event.ends_with(USER_ONLY) {
                 broken.push(format!(
-                    "{} read {} over user space alone",
+                    "{} read {} over user space only",
                     one.instance, reading.event
                 ));
             }

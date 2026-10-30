@@ -400,7 +400,7 @@ fn parse_path(definition: &Definition, name: &str, path: &str) -> Result<Vec<Ste
         } else if !every || part != ELEMENTS {
             return Err(format!(
                 "{}: {name} = \"{path}\" is not a path: dot-separated names, each optionally \
-                 ending in {ELEMENTS}, or {ELEMENTS} alone for the document itself",
+                 ending in {ELEMENTS}, or only {ELEMENTS} for the document itself",
                 definition.path.display()
             ));
         }
