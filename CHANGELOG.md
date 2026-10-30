@@ -11,6 +11,9 @@ New:
 
 Other:
 
+- On Linux, `check` now reports the optional tools `strace`, `perf` (with
+  `kernel.perf_event_paranoid`), and `valgrind` and which commands each missing or shut tool blocks,
+  without changing the exit code.
 - In `insights`, the `allocations` section now measures a `floor` column over an empty directory
   and subtracts those startup allocations from `per file`.
 - On Linux, the `memory` section of `insights` now includes the page faults of waited-for child

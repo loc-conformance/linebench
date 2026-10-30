@@ -3037,6 +3037,21 @@ fn check_everything(
             )?,
         }
     }
+    if platform.is_linux() {
+        let tracing = find_tracer(&scratch.join(PROBE_FILE));
+        let privileged = is_privileged(platform);
+        let paranoid = read_paranoid();
+        let profiling = find_profiler(
+            &scratch.join(PMU_PROBE_FILE),
+            privileged,
+            paranoid,
+            USER_PARANOID,
+        );
+        let valgrind = find_valgrind(&scratch.join(VALGRIND_PROBE_FILE));
+        for line in describe_linux_tools(&tracing, &profiling, privileged, paranoid, &valgrind) {
+            print_line(out, &line)?;
+        }
+    }
     let counted_by_git = match (locations.corpus.is_pinned(), locations.corpus.files) {
         (true, None) => Some(count_tracked_files(
             &locations.checkout,
@@ -4033,6 +4048,89 @@ fn describe_exclusions(state: &DefenderState) -> String {
     }
 }
 
+fn describe_linux_tools(
+    tracing: &Tracing,
+    profiling: &Profiling,
+    privileged: bool,
+    paranoid: Option<i64>,
+    valgrind: &Valgrind,
+) -> [String; 3] {
+    let strace_line = match tracing {
+        Tracing::Ready(version) => format!(
+            "   strace      {}   {}",
+            paint(Color::Green, "ok"),
+            shorten_version(version)
+        ),
+        Tracing::NotThere => format!(
+            "   strace      {}",
+            paint(Color::Yellow, "not found (optional: insights syscalls)")
+        ),
+        Tracing::Refused => format!(
+            "   strace      {}",
+            paint(
+                Color::Yellow,
+                "refused by ptrace (optional: insights syscalls)"
+            )
+        ),
+    };
+    let perf_line = match profiling {
+        Profiling::Ready { version, .. }
+            if !privileged && paranoid.is_some_and(|level| level > OPEN_PARANOID) =>
+        {
+            let level = paranoid.unwrap_or_default();
+            format!(
+                "   perf        {}   {} ({})",
+                paint(Color::Green, "ok"),
+                shorten_version(version),
+                paint(
+                    Color::Yellow,
+                    &format!(
+                        "ab ready; {PARANOID_KEY}={level} blocks insights pmu, needs <={OPEN_PARANOID} or root"
+                    )
+                )
+            )
+        }
+        Profiling::Ready { version, .. } => format!(
+            "   perf        {}   {}",
+            paint(Color::Green, "ok"),
+            shorten_version(version)
+        ),
+        Profiling::Shut(level) => format!(
+            "   perf        {}",
+            paint(
+                Color::Yellow,
+                &format!(
+                    "{PARANOID_KEY}={level} (optional: ab needs <={USER_PARANOID}, insights pmu needs <={OPEN_PARANOID} or root)"
+                )
+            )
+        ),
+        Profiling::NotThere => format!(
+            "   perf        {}",
+            paint(Color::Yellow, "not found (optional: ab, insights pmu)")
+        ),
+        Profiling::Refused => format!(
+            "   perf        {}",
+            paint(Color::Yellow, "no PMU events (optional: ab, insights pmu)")
+        ),
+    };
+    let valgrind_line = match valgrind {
+        Valgrind::Ready(version) => format!(
+            "   valgrind    {}   {}",
+            paint(Color::Green, "ok"),
+            shorten_version(version.strip_prefix("valgrind-").unwrap_or(version))
+        ),
+        Valgrind::NotThere => format!(
+            "   valgrind    {}",
+            paint(Color::Yellow, "not found (optional: insights allocations)")
+        ),
+        Valgrind::Refused => format!(
+            "   valgrind    {}",
+            paint(Color::Yellow, "refused (optional: insights allocations)")
+        ),
+    };
+    [strace_line, perf_line, valgrind_line]
+}
+
 fn paint_table_line(line: &str) -> String {
     let trimmed = line.trim_start();
     if trimmed.starts_with("instance") || trimmed.starts_with(SYSCALLS_HEADING) {
@@ -4687,6 +4785,88 @@ mod tests {
                 "   mezura@b  args  --threads 4",
                 "             env   MEZURA_DATA_DIR=/x/b",
             ]
+        );
+    }
+
+    #[test]
+    fn the_optional_linux_tools_name_their_versions_and_which_commands_each_missing_or_shut_tool_blocks()
+     {
+        let plain = |lines: [String; 3]| lines.map(|line| strip_ansi(&line));
+        let ready_perf = Profiling::Ready {
+            version: "perf version 6.12.11".to_string(),
+            duration: true,
+        };
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Ready("strace version 6.12".to_string()),
+                &ready_perf,
+                false,
+                Some(1),
+                &Valgrind::Ready("valgrind-3.24.0".to_string()),
+            )),
+            [
+                "   strace      ok   6.12",
+                "   perf        ok   6.12.11",
+                "   valgrind    ok   3.24.0",
+            ]
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Ready("6.12".to_string()),
+                &ready_perf,
+                false,
+                Some(2),
+                &Valgrind::Ready("valgrind-3.24.0".to_string()),
+            ))[1],
+            "   perf        ok   6.12.11 (ab ready; kernel.perf_event_paranoid=2 blocks insights pmu, needs <=1 or root)"
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Ready("6.12".to_string()),
+                &ready_perf,
+                true,
+                Some(2),
+                &Valgrind::Ready("valgrind-3.24.0".to_string()),
+            ))[1],
+            "   perf        ok   6.12.11"
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::NotThere,
+                &Profiling::Shut(3),
+                false,
+                Some(3),
+                &Valgrind::NotThere,
+            )),
+            [
+                "   strace      not found (optional: insights syscalls)",
+                "   perf        kernel.perf_event_paranoid=3 (optional: ab needs <=2, insights pmu needs <=1 or root)",
+                "   valgrind    not found (optional: insights allocations)",
+            ]
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Refused,
+                &Profiling::NotThere,
+                false,
+                None,
+                &Valgrind::Refused,
+            )),
+            [
+                "   strace      refused by ptrace (optional: insights syscalls)",
+                "   perf        not found (optional: ab, insights pmu)",
+                "   valgrind    refused (optional: insights allocations)",
+            ]
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Refused,
+                &Profiling::Refused,
+                false,
+                Some(1),
+                &Valgrind::Refused,
+            ))[1],
+            "   perf        no PMU events (optional: ab, insights pmu)"
         );
     }
 }
