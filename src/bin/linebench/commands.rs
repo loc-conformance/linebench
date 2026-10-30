@@ -9,6 +9,20 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::config::{
+    Chosen, Config, FetchPlan, GivenEntry, Locations, Options, choose_corpus_home,
+    choose_counters_dir, find_dry_run_dir, find_settled_results_dir, show_path,
+};
+use crate::instances::{ChosenInstances, build_instances};
+use crate::output::{
+    Color, Output, get_report_style, paint, print_header, print_line, print_warning,
+};
+use crate::page::PAGE_FILE;
+use crate::page::{
+    Collected, FoundRun, collect_records, find_named_run, find_page_differences, format_against,
+    format_since, write_results_page,
+};
+use crate::prep::{self, AppliedPrep};
 use linebench::allocations::{
     Allocations, Valgrind, count_allocations, find_valgrind, is_elf_binary,
 };
@@ -26,13 +40,18 @@ use linebench::fetch::{Manifest, calculate_sha256, fetch_counter, read_manifest}
 use linebench::files::{LargestFiles, find_largest_files};
 use linebench::insight::{
     ALLOCATIONS_PART, FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT,
-    INSIGHTS_PAGE, MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET,
+    INSIGHTS_PAGE, LADDER_PART, MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART,
+    VERSION_SET,
 };
 use linebench::insight::{
     Insights, ask_for_everything, build_insights_path, describe_cold_cache, format_allocations,
-    format_floor, format_memory, format_pmu, format_syscalls, format_syscalls_summary,
-    get_floor_set_name, write_insights, write_insights_page,
+    format_floor, format_ladder, format_memory, format_pmu, format_syscalls,
+    format_syscalls_summary, get_floor_set_name, write_insights, write_insights_page,
 };
+use linebench::ladder::{
+    AffinityRung, Ladder, LadderPlan, build_ladder_plan, build_ladders, get_ladder_set_name,
+};
+use linebench::ladder::{LADDER_PREFIX, LADDER_WARMUP};
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
     describe_latest, describe_pin_origin, describe_pinned_version, find_latest_release,
@@ -48,7 +67,7 @@ use linebench::measure::{
     run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
-use linebench::os::{capture_with_status, is_privileged};
+use linebench::os::{capture_with_status, is_privileged, pin_current_process, read_core_topology};
 use linebench::pmu::{
     AB_RUNS, AB_WARMUP, DURATION_TIME, FILE_RUNS, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER,
     USER_PARANOID,
@@ -59,7 +78,7 @@ use linebench::pmu::{
 };
 use linebench::read::{Counts, compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
-    CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
+    CorpusRecord, CountRecord, InstanceRecord, Measurement, Record, RunSettings, append_to_notes,
     calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
     format_summary_tables, format_thousands, format_utc_date, format_utc_stamp, format_wall,
     read_seconds_since_epoch, shorten_version, widest, write_csvs, write_notes, write_record,
@@ -68,21 +87,6 @@ use linebench::record::{LOCAL_DIR, RECORD_FILE, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 use linebench::verify::{Session, Verification, check_insights, check_run, find_run};
-
-use crate::config::{
-    Chosen, Config, FetchPlan, GivenEntry, Locations, Options, choose_corpus_home,
-    choose_counters_dir, find_dry_run_dir, find_settled_results_dir, show_path,
-};
-use crate::instances::{ChosenInstances, build_instances};
-use crate::output::{
-    Color, Output, get_report_style, paint, print_header, print_line, print_warning,
-};
-use crate::page::PAGE_FILE;
-use crate::page::{
-    Collected, FoundRun, collect_records, find_named_run, find_page_differences, format_against,
-    format_since, write_results_page,
-};
-use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const FLOOR_TARGET: &str = "floor";
@@ -902,18 +906,27 @@ pub fn run_insights(
                 Valgrind::NotThere => (None, Some(VALGRIND_MISSING.to_string())),
             },
         };
-    let stopping: Vec<&str> = [
-        unmeasured.as_deref(),
-        unread.as_deref(),
-        allocations_unmeasured.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if !stopping.is_empty()
-        && platform.is_linux()
-        && !ask_to_go_on(out, &stopping.join(LINE_BREAK), options.yes)?
-    {
+    let (ladder_plan, ladder_unmeasured) = match asked_for(LADDER_PART) {
+        false => (None, None),
+        true => match read_core_topology(platform).and_then(|cores| build_ladder_plan(&cores)) {
+            Ok(plan) => (Some(plan), None),
+            Err(refused) => (None, Some(refused)),
+        },
+    };
+    let stopping: Vec<&str> = match platform {
+        Platform::Linux | Platform::Wsl => [
+            unmeasured.as_deref(),
+            unread.as_deref(),
+            allocations_unmeasured.as_deref(),
+            ladder_unmeasured.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        Platform::Windows => ladder_unmeasured.as_deref().into_iter().collect(),
+        _ => Vec::new(),
+    };
+    if !stopping.is_empty() && !ask_to_go_on(out, &stopping.join(LINE_BREAK), options.yes)? {
         return Err("stopped.".to_string());
     }
     fs::create_dir_all(&res)
@@ -977,7 +990,10 @@ pub fn run_insights(
             print_line(out, &paint_table_line(&line))?;
         }
         print_line(out, "")?;
-    } else if (asked_for(MEMORY_PART) || asked_for(SYSCALLS_PART) || asked_for(ALLOCATIONS_PART))
+    } else if (asked_for(MEMORY_PART)
+        || asked_for(SYSCALLS_PART)
+        || asked_for(ALLOCATIONS_PART)
+        || asked_for(LADDER_PART))
         && instances
             .iter()
             .any(|instance| !instance.definition.run.env.is_empty())
@@ -1130,6 +1146,56 @@ pub fn run_insights(
             }
         }
     }
+    let mut ladder = Vec::new();
+    if asked_for(LADDER_PART) {
+        ladder = match &ladder_plan {
+            Some(plan) => {
+                print_header(out, "== ladder")?;
+                if plan.strong_cores < plan.physical_cores {
+                    print_line(
+                        out,
+                        &format!(
+                            "   {} physical cores ({} strong), {} hardware threads",
+                            plan.physical_cores, plan.strong_cores, plan.logical_cores
+                        ),
+                    )?;
+                } else {
+                    print_line(
+                        out,
+                        &format!(
+                            "   {} physical cores, {} hardware threads",
+                            plan.physical_cores, plan.logical_cores
+                        ),
+                    )?;
+                }
+                collect_ladder(
+                    out,
+                    &mut runner,
+                    plan,
+                    &instances,
+                    locations,
+                    platform,
+                    &res,
+                )?
+            }
+            None => {
+                if !platform.is_linux() && platform != Platform::Windows {
+                    print_header(out, "== ladder")?;
+                    print_line(
+                        out,
+                        &format!("   {}", ladder_unmeasured.as_deref().unwrap_or_default()),
+                    )?;
+                }
+                Vec::new()
+            }
+        };
+        if !ladder.is_empty() {
+            print_header(out, "== ladder summary")?;
+            for line in format_ladder(&ladder, get_report_style()) {
+                print_line(out, &paint_table_line(&line))?;
+            }
+        }
+    }
     let insights = Insights {
         format: INSIGHTS_FORMAT,
         stamp,
@@ -1154,6 +1220,8 @@ pub fn run_insights(
         valgrind,
         allocations_unmeasured,
         allocations,
+        ladder_unmeasured,
+        ladder,
         asked,
     };
     write_insights(&res, &insights)?;
@@ -3169,6 +3237,73 @@ fn collect_allocations(
         }
     }
     Ok(counted)
+}
+
+fn collect_ladder(
+    out: &mut dyn Write,
+    runner: &mut Runner,
+    plan: &LadderPlan,
+    instances: &[Instance],
+    locations: &Locations,
+    platform: Platform,
+    res: &Path,
+) -> Result<Vec<Ladder>, String> {
+    let scrub = collect_scrub(instances);
+    if let Some(first) = instances.first() {
+        let warm_args = build_args(
+            first,
+            &locations.checkout,
+            &locations.corpus.extensions,
+            INSIGHTS_TABLE,
+            false,
+        )?;
+        let _ = run_once(&build_subject(first, &warm_args, &scrub));
+    }
+    let commands: Vec<TimedCommand> = instances
+        .iter()
+        .map(|instance| {
+            build_command(
+                instance,
+                &locations.checkout,
+                &locations.corpus.extensions,
+                INSIGHTS_TABLE,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    for (index, rung) in plan.rungs.iter().enumerate() {
+        if index > 0 {
+            print_line(out, "")?;
+        }
+        runner.set_settings(Settings {
+            warmup: LADDER_WARMUP,
+            runs: rung.runs,
+            settle: 0,
+        });
+        let set_name = get_ladder_set_name(&rung.label);
+        let _guard = pin_current_process(platform, &rung.logical_cpus)?;
+        runner.run_hyperfine(out, &set_name, &commands)?;
+    }
+    let (all_measurements, skipped) = collect_measurements(res, &runner.commands, &[])?;
+    for message in skipped
+        .iter()
+        .filter(|message| message.starts_with(LADDER_PREFIX))
+    {
+        print_warning(out, message)?;
+    }
+    let rung_measurements: Vec<(AffinityRung, Vec<Measurement>)> = plan
+        .rungs
+        .iter()
+        .map(|rung| {
+            let set_name = get_ladder_set_name(&rung.label);
+            let found = all_measurements
+                .iter()
+                .filter(|m| m.set == set_name)
+                .cloned()
+                .collect();
+            (rung.clone(), found)
+        })
+        .collect();
+    Ok(build_ladders(plan, &rung_measurements))
 }
 
 fn describe_what_the_counters_want(

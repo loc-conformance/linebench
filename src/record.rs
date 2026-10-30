@@ -734,6 +734,11 @@ pub fn read_seconds_since_epoch() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
+pub fn round_to(value: f64, decimals: i32) -> f64 {
+    let scale = 10f64.powi(decimals);
+    (value * scale).round() / scale
+}
+
 fn build_measurement(
     set: &str,
     instance: &str,
@@ -831,11 +836,6 @@ fn calculate_mean_stddev(measurement: &Measurement) -> f64 {
         return measurement.stddev_s;
     }
     measurement.stddev_s / (measurement.runs as f64).sqrt()
-}
-
-fn round_to(value: f64, decimals: i32) -> f64 {
-    let scale = 10f64.powi(decimals);
-    (value * scale).round() / scale
 }
 
 fn lay_out_cells(cells: &[String]) -> String {

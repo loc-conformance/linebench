@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0, unreleased
+
+New:
+
+- `insights` measures core scaling on Linux and Windows in a new `ladder` section: physical core
+  doublings up to all strong cores, efficiency cores when present, and SMT siblings, pinned through
+  the OS affinity mask and timed by hyperfine, reporting median wall time, speedup, per-core
+  efficiency, peak speedup, Amdahl's serial fraction, and the SMT gain.
+
+Other:
+
+- In `insights`, the `allocations` section now measures a `floor` column over an empty directory
+  and subtracts those startup allocations from `per file`.
+- On Linux, the `memory` section of `insights` now includes the page faults of waited-for child
+  processes in `pages given` and `from disk`.
+
 ## 0.3.1, 2026-10-29
 
 Other:

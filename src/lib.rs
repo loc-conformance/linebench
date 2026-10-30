@@ -7,6 +7,7 @@ pub mod defender;
 pub mod fetch;
 pub mod files;
 pub mod insight;
+pub mod ladder;
 pub mod latest;
 pub mod machine;
 pub mod measure;

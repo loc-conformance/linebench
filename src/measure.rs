@@ -174,6 +174,10 @@ impl Runner {
         }
     }
 
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+    }
+
     pub fn run_hyperfine(
         &mut self,
         out: &mut dyn Write,
@@ -202,68 +206,6 @@ impl Runner {
         }
         if let Some(table) = format_markdown_table(&results) {
             let _ = fs::write(&markdown, table);
-        }
-        Ok(())
-    }
-
-    fn run_one_hyperfine(
-        &mut self,
-        out: &mut dyn Write,
-        name: &str,
-        timed: &TimedCommand,
-        export: &Path,
-    ) -> Result<(), String> {
-        let mut hyperfine = Command::new(HYPERFINE);
-        hyperfine.args([
-            "-N",
-            "--style",
-            self.style.as_flag(),
-            "--warmup",
-            &self.settings.warmup.to_string(),
-            "--runs",
-            &self.settings.runs.to_string(),
-        ]);
-        if self.settings.settle > 0 {
-            hyperfine.args(["--setup", &build_sleep(self.platform, self.settings.settle)]);
-        }
-        hyperfine.args(["--export-json", &export.to_string_lossy()]);
-        hyperfine.arg(&timed.command);
-        for name in &self.scrub {
-            hyperfine.env_remove(name);
-        }
-        hyperfine.envs(&timed.execution_env);
-        let report = if self.style.is_shown() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        };
-        let mut child = hyperfine
-            .stdin(Stdio::null())
-            .stdout(report)
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("{HYPERFINE} could not be run: {error}"))?;
-        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), timed);
-        let status = child
-            .wait()
-            .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
-        let stderr = relayed?;
-        for warning in find_warnings(&stderr) {
-            print_line(
-                out,
-                &format!("{WARNING_LABEL}{HYPERFINE} on {name}: {warning}"),
-            )?;
-            self.warnings.push(format!("{name}: {warning}"));
-        }
-        if !status.success() {
-            let detail = find_error(&stderr);
-            print_line(
-                out,
-                &format!("{WARNING_LABEL}{HYPERFINE} reported a problem on {name}: {detail}"),
-            )?;
-            if !self.failures.iter().any(|failed| failed == name) {
-                self.failures.push(name.to_string());
-            }
         }
         Ok(())
     }
@@ -337,6 +279,68 @@ impl Runner {
             }
         }
         Ok(Capture { path, stderr })
+    }
+
+    fn run_one_hyperfine(
+        &mut self,
+        out: &mut dyn Write,
+        name: &str,
+        timed: &TimedCommand,
+        export: &Path,
+    ) -> Result<(), String> {
+        let mut hyperfine = Command::new(HYPERFINE);
+        hyperfine.args([
+            "-N",
+            "--style",
+            self.style.as_flag(),
+            "--warmup",
+            &self.settings.warmup.to_string(),
+            "--runs",
+            &self.settings.runs.to_string(),
+        ]);
+        if self.settings.settle > 0 {
+            hyperfine.args(["--setup", &build_sleep(self.platform, self.settings.settle)]);
+        }
+        hyperfine.args(["--export-json", &export.to_string_lossy()]);
+        hyperfine.arg(&timed.command);
+        for name in &self.scrub {
+            hyperfine.env_remove(name);
+        }
+        hyperfine.envs(&timed.execution_env);
+        let report = if self.style.is_shown() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        let mut child = hyperfine
+            .stdin(Stdio::null())
+            .stdout(report)
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("{HYPERFINE} could not be run: {error}"))?;
+        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), timed);
+        let status = child
+            .wait()
+            .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
+        let stderr = relayed?;
+        for warning in find_warnings(&stderr) {
+            print_line(
+                out,
+                &format!("{WARNING_LABEL}{HYPERFINE} on {name}: {warning}"),
+            )?;
+            self.warnings.push(format!("{name}: {warning}"));
+        }
+        if !status.success() {
+            let detail = find_error(&stderr);
+            print_line(
+                out,
+                &format!("{WARNING_LABEL}{HYPERFINE} reported a problem on {name}: {detail}"),
+            )?;
+            if !self.failures.iter().any(|failed| failed == name) {
+                self.failures.push(name.to_string());
+            }
+        }
+        Ok(())
     }
 }
 

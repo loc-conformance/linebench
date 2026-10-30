@@ -5,20 +5,21 @@ use crate::allocations::Allocations;
 use crate::corpus::{Counted, Parity, judge_parity};
 use crate::files::read_text;
 use crate::insight::{
-    ALLOCATIONS_PART, FLOOR_PART, INSIGHTS_FILE, MEMORY_PART, PMU_PART, SYSCALLS_PART,
+    ALLOCATIONS_PART, FLOOR_PART, INSIGHTS_FILE, LADDER_PART, MEMORY_PART, PMU_PART, SYSCALLS_PART,
 };
 use crate::insight::{Insights, read_insights};
+use crate::ladder::Ladder;
 use crate::measure::Table;
 use crate::measure::{CONTROL_END, CONTROL_START};
-use crate::pmu::Pmu;
-use crate::pmu::USER_ONLY;
-use crate::pmu::get_count;
-use crate::pmu::{BRANCH_INSTRUCTIONS, BRANCH_MISSES, CACHE_MISSES, CACHE_REFERENCES};
-use crate::pmu::{FULL_RUN, L1_LOADS, L1_MISSES, PASSES};
+use crate::pmu::{
+    BRANCH_INSTRUCTIONS, BRANCH_MISSES, CACHE_MISSES, CACHE_REFERENCES, FULL_RUN, L1_LOADS,
+    L1_MISSES, PASSES, USER_ONLY,
+};
+use crate::pmu::{Pmu, get_count};
 use crate::record::{COUNTS_CSV, RECORD_FILE, SUMMARY_CSV, UNKNOWN_INSTANCE};
 use crate::record::{
     CountRecord, InstanceRecord, Measurement, Record, RunSettings, Timings, build_counts_csv,
-    build_summary_csv, calculate_drift, read_export, read_record,
+    build_summary_csv, calculate_drift, read_export, read_record, round_to,
 };
 use crate::sample::Curve;
 use crate::syscalls::Syscalls;
@@ -162,12 +163,23 @@ pub fn check_run(dir: &Path) -> Result<Verification, String> {
 }
 
 /// The same reading for an insights session: the numbers it published against each other, and the
-/// floor it timed against the times hyperfine exported.
+/// floor and ladder it timed against the times hyperfine exported.
 pub fn check_insights(dir: &Path) -> Result<Verification, String> {
     let insights = read_insights(&dir.join(INSIGHTS_FILE))?;
+    let timed: Vec<Measurement> = insights
+        .floor
+        .iter()
+        .cloned()
+        .chain(
+            insights
+                .ladder
+                .iter()
+                .flat_map(|one| one.rungs.iter().map(|r| r.measurement.clone())),
+        )
+        .collect();
     let mut level = Level::named(THE_SESSION);
-    level.held.push(check_measurements(&insights.floor));
-    level.held.push(check_derived_columns(&insights.floor));
+    level.held.push(check_measurements(&timed));
+    level.held.push(check_derived_columns(&timed));
     level.held.push(check_who_was_measured(&insights));
     level.held.push(check_curves(&insights.curves));
     level.held.push(check_the_counted_calls(&insights.syscalls));
@@ -175,10 +187,13 @@ pub fn check_insights(dir: &Path) -> Result<Verification, String> {
     level
         .held
         .push(check_the_counted_allocations(&insights.allocations));
+    level.held.push(check_the_ladders(&insights.ladder));
     level.held.push(check_the_parts_asked_for(&insights));
-    let raw = check_exports(dir, &insights.floor);
-    let reach = match (insights.floor.is_empty(), raw.absent.is_empty()) {
-        (true, _) => "the session was read, and it timed no floor for the raw times to hold",
+    let raw = check_exports(dir, &timed);
+    let reach = match (timed.is_empty(), raw.absent.is_empty()) {
+        (true, _) => {
+            "the session was read, and it timed no floor or ladder for the raw times to hold"
+        }
         (false, true) => "everything published was read, down to the time of every execution",
         (false, false) => "the session was read, the raw times were absent",
     };
@@ -225,6 +240,12 @@ fn check_who_was_measured(insights: &Insights) -> Held {
                 .allocations
                 .iter()
                 .map(|counted| ("the allocations", counted.instance.as_str())),
+        )
+        .chain(
+            insights
+                .ladder
+                .iter()
+                .map(|one| ("the affinity ladder", one.instance.as_str())),
         );
     let mut broken = Vec::new();
     for (part, instance) in measured {
@@ -384,6 +405,176 @@ fn check_the_counted_allocations(counted: &[Allocations]) -> Held {
     )
 }
 
+fn check_the_ladders(ladders: &[Ladder]) -> Held {
+    let mut broken = Vec::new();
+    for one in ladders {
+        if one.strong_cores == 0
+            || one.physical_cores < one.strong_cores
+            || one.logical_cores < one.physical_cores
+        {
+            broken.push(format!(
+                "{}: topology {} strong / {} physical / {} logical cores does not hold together",
+                one.instance, one.strong_cores, one.physical_cores, one.logical_cores
+            ));
+        }
+        if one.rungs.len() < 2 {
+            broken.push(format!(
+                "{}: affinity ladder has {} rungs",
+                one.instance,
+                one.rungs.len()
+            ));
+            continue;
+        }
+        let first = &one.rungs[0];
+        if first.cores != 1 || first.smt || first.logical_cpus.len() != 1 {
+            broken.push(format!(
+                "{}: first rung {} is not a single physical core",
+                one.instance, first.label
+            ));
+        }
+        let base_s = first.measurement.median_s;
+        if base_s <= 0.0 {
+            broken.push(format!("{}: first rung has median {base_s}", one.instance));
+            continue;
+        }
+        for (index, rung) in one.rungs.iter().enumerate() {
+            if rung.measurement.instance != one.instance {
+                broken.push(format!(
+                    "{} {}: measurement carries {}",
+                    one.instance, rung.label, rung.measurement.instance
+                ));
+            }
+            if rung.cores == 0
+                || rung.cores > one.physical_cores
+                || rung.logical_cpus.is_empty()
+                || rung.logical_cpus.len() > one.logical_cores as usize
+            {
+                broken.push(format!(
+                    "{} {}: {} cores and {} cpus do not fit {} physical / {} logical cores",
+                    one.instance,
+                    rung.label,
+                    rung.cores,
+                    rung.logical_cpus.len(),
+                    one.physical_cores,
+                    one.logical_cores
+                ));
+                continue;
+            }
+            if !rung.logical_cpus.windows(2).all(|w| w[0] < w[1]) {
+                broken.push(format!(
+                    "{} {}: logical cpus {:?} are not strictly ascending",
+                    one.instance, rung.label, rung.logical_cpus
+                ));
+            }
+            if (!rung.smt && rung.logical_cpus.len() != rung.cores as usize)
+                || (rung.smt && rung.logical_cpus.len() <= rung.cores as usize)
+            {
+                broken.push(format!(
+                    "{} {}: {} logical cpus on {} cores with smt={}",
+                    one.instance,
+                    rung.label,
+                    rung.logical_cpus.len(),
+                    rung.cores,
+                    rung.smt
+                ));
+            }
+            if rung.measurement.median_s <= 0.0 {
+                broken.push(format!(
+                    "{} {}: median {}",
+                    one.instance, rung.label, rung.measurement.median_s
+                ));
+                continue;
+            }
+            let raw_speedup = base_s / rung.measurement.median_s;
+            let expected_speedup = round_to(raw_speedup, 2);
+            let expected_efficiency = round_to(raw_speedup / f64::from(rung.cores), 2);
+            if (rung.speedup - expected_speedup).abs() > 0.01 {
+                broken.push(format!(
+                    "{} {}: speedup {} against {}",
+                    one.instance, rung.label, rung.speedup, expected_speedup
+                ));
+            }
+            if (rung.efficiency - expected_efficiency).abs() > 0.01 {
+                broken.push(format!(
+                    "{} {}: efficiency {} against {}",
+                    one.instance, rung.label, rung.efficiency, expected_efficiency
+                ));
+            }
+            let expected_from_prev = index
+                .checked_sub(1)
+                .and_then(|prev_idx| one.rungs.get(prev_idx))
+                .filter(|prev| prev.measurement.median_s > 0.0)
+                .map(|prev| round_to(prev.measurement.median_s / rung.measurement.median_s, 2));
+            match (rung.from_prev, expected_from_prev) {
+                (Some(said), Some(expected)) if (said - expected).abs() > 0.01 => {
+                    broken.push(format!(
+                        "{} {}: from prev {said} against {expected}",
+                        one.instance, rung.label
+                    ));
+                }
+                (Some(said), None) => {
+                    broken.push(format!(
+                        "{} {}: from prev {said} against none",
+                        one.instance, rung.label
+                    ));
+                }
+                (None, Some(expected)) => {
+                    broken.push(format!(
+                        "{} {}: from prev none against {expected}",
+                        one.instance, rung.label
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if let Some(peak) = one
+            .rungs
+            .iter()
+            .min_by(|a, b| a.measurement.median_s.total_cmp(&b.measurement.median_s))
+            && ((one.peak_speedup - peak.speedup).abs() > 0.01 || one.peak_label != peak.label)
+        {
+            broken.push(format!(
+                "{}: peak {}x ({}) against {}x ({})",
+                one.instance, one.peak_speedup, one.peak_label, peak.speedup, peak.label
+            ));
+        }
+        let widest_physical = one.rungs.iter().rev().find(|r| !r.smt);
+        let smt_rung = one.rungs.iter().find(|r| r.smt);
+        let expected_gain = match (widest_physical, smt_rung) {
+            (Some(phys), Some(smt)) if smt.measurement.median_s > 0.0 => Some(round_to(
+                (phys.measurement.median_s / smt.measurement.median_s - 1.0) * 100.0,
+                1,
+            )),
+            _ => None,
+        };
+        match (one.smt_gain_pct, expected_gain) {
+            (Some(said_gain), Some(expected)) if (said_gain - expected).abs() > 0.2 => {
+                broken.push(format!(
+                    "{}: smt gain {said_gain}% against {expected}%",
+                    one.instance
+                ));
+            }
+            (Some(said_gain), None) => {
+                broken.push(format!(
+                    "{}: smt gain {said_gain}% with no smt rung",
+                    one.instance
+                ));
+            }
+            (None, Some(expected)) => {
+                broken.push(format!(
+                    "{}: smt gain none against {expected}%",
+                    one.instance
+                ));
+            }
+            _ => {}
+        }
+    }
+    Held::of(
+        format!("{} affinity ladders hold together", ladders.len()),
+        broken,
+    )
+}
+
 /// A part the session was never asked for carries nothing. The other way around does not hold: a
 /// part asked for can still come back empty, since the tool it needs may not be on the machine.
 fn check_the_parts_asked_for(insights: &Insights) -> Held {
@@ -395,6 +586,7 @@ fn check_the_parts_asked_for(insights: &Insights) -> Held {
         (SYSCALLS_PART, !insights.syscalls.is_empty()),
         (PMU_PART, !insights.pmu.is_empty()),
         (ALLOCATIONS_PART, !insights.allocations.is_empty()),
+        (LADDER_PART, !insights.ladder.is_empty()),
     ] {
         if measured && !asked(part) {
             broken.push(format!(
@@ -925,6 +1117,7 @@ mod tests {
 
     use crate::defender::DefenderState;
     use crate::fetch::{Identity, Origin};
+    use crate::ladder::LadderRung;
     use crate::machine::{Machine, Platform};
     use crate::pmu::PAGE_FAULTS;
     use crate::pmu::Reading;
@@ -1057,6 +1250,8 @@ mod tests {
             valgrind: None,
             allocations_unmeasured: None,
             allocations: Vec::new(),
+            ladder_unmeasured: None,
+            ladder: Vec::new(),
             asked: crate::insight::ask_for_everything(),
         }
     }
@@ -1385,6 +1580,53 @@ mod tests {
         impossible.at_exit_bytes = 8192;
         impossible.at_exit_blocks = 200;
         let held = check_the_counted_allocations(&[impossible]);
+        assert_eq!(held.broken.len(), 3, "{held:?}");
+    }
+
+    #[test]
+    fn an_affinity_ladder_whose_speedup_efficiency_or_from_prev_drifted_is_caught() {
+        let mut row_1c = build_row("ladder-1c", "scc");
+        row_1c.median_s = 1.0;
+        let mut row_8c = build_row("ladder-8c", "scc");
+        row_8c.median_s = 0.2;
+        let valid = Ladder {
+            instance: "scc".to_string(),
+            physical_cores: 8,
+            strong_cores: 8,
+            logical_cores: 16,
+            peak_speedup: 5.0,
+            peak_label: "8c".to_string(),
+            smt_gain_pct: None,
+            rungs: vec![
+                LadderRung {
+                    label: "1c".to_string(),
+                    cores: 1,
+                    logical_cpus: vec![0],
+                    efficiency_cores: false,
+                    smt: false,
+                    measurement: row_1c,
+                    speedup: 1.0,
+                    from_prev: None,
+                    efficiency: 1.0,
+                },
+                LadderRung {
+                    label: "8c".to_string(),
+                    cores: 8,
+                    logical_cpus: vec![0, 2, 4, 6, 8, 10, 12, 14],
+                    efficiency_cores: false,
+                    smt: false,
+                    measurement: row_8c,
+                    speedup: 5.0,
+                    from_prev: Some(5.0),
+                    efficiency: 0.63,
+                },
+            ],
+        };
+        assert!(check_the_ladders(std::slice::from_ref(&valid)).holds());
+        let mut broken = valid;
+        broken.rungs[1].speedup = 7.5;
+        broken.rungs[1].from_prev = Some(3.0);
+        let held = check_the_ladders(&[broken]);
         assert_eq!(held.broken.len(), 3, "{held:?}");
     }
 }

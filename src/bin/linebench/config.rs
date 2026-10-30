@@ -2067,7 +2067,7 @@ mod tests {
         let refused = parse("insights linux --only floor,noise").unwrap_err();
         assert_eq!(
             refused,
-            "--only takes any of floor, memory, syscalls, pmu, allocations, and noise is none of them"
+            "--only takes any of floor, memory, syscalls, pmu, allocations, ladder, and noise is none of them"
         );
         let elsewhere = parse("run linux --only floor").unwrap_err();
         assert!(

@@ -120,7 +120,7 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     A run under an instance with args, env or a build of its own is written under results/local/,
     since its numbers answer for that build alone.
 
-linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu,allocations]
+linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu,allocations,ladder]
                 [--yes] [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
                 [--args [<c>@<tag>=]<text>] [--env <c>@<tag>=<NAME>=<v>] [--counters-dir <dir>]
@@ -129,12 +129,13 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     Measures what a run cannot measure about itself, since watching a process closely enough
     disturbs the times it would report. The floor is what a counter costs before it has counted
     anything, the memory curve is what it held while it counted, the system calls are how much it
-    asked of the kernel to do it, the hardware counters are what the cpu did while it ran, and the
-    allocations are what it asked of the heap allocator.
+    asked of the kernel to do it, the hardware counters are what the cpu did while it ran, the
+    allocations are what it asked of the heap allocator, and the affinity ladder is how it scales
+    as physical cores and hardware threads are added.
 
     --counters a,b,c           the instances, in the order they are measured
-    --only <parts>             which of floor, memory, syscalls, pmu and allocations to measure,
-                               default all
+    --only <parts>             which of floor, memory, syscalls, pmu, allocations and ladder to
+                               measure, default all
     --yes                      do not ask when a tool the section needs is missing
     --allow-unequal-exclusions measure even with uneven MS Defender exclusions
     --out <dir>                where the session goes, default results/ here
@@ -200,10 +201,11 @@ linebench verify <a run directory|an insights directory>
     re-judged, and the csv files rebuilt from the record. Where the hyperfine exports were kept
     too, every statistic is recomputed from the time of every single execution.
 
-    What one insights command wrote is read the same way. The floor against itself and against its
-    exports, every curve against the peak the system reported, every traced instance against the
-    calls it listed, every profiled instance against the events it read, every heap summary
-    against what it allocated, and every number against the instances that were measured.
+    What one insights command wrote is read the same way. The floor and ladder against themselves
+    and against their exports, every curve against the peak the system reported, every traced
+    instance against the calls it listed, every profiled instance against the events it read,
+    every heap summary against what it allocated, every affinity ladder against its rungs, and
+    every number against the instances that were measured.
 
     Name the directory, or the run.json or insights.json inside it. A folder holding many of them
     is not one, and the refusal says to name a directory further in.

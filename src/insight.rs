@@ -8,23 +8,23 @@ use crate::allocations::Allocations;
 use crate::corpus::shorten_hash;
 use crate::defender::DefenderState;
 use crate::files::read_json;
+use crate::ladder::Ladder;
 use crate::machine::{Machine, Platform};
 use crate::measure::TABLES;
 use crate::measure::{Style, Table};
-use crate::pmu::Pmu;
-use crate::pmu::{BRANCH_INSTRUCTIONS, BRANCH_MISSES, CACHE_MISSES, CACHE_REFERENCES};
-use crate::pmu::{CONTEXT_SWITCHES, CYCLES, DTLB_MISSES, FULL_RUN};
-use crate::pmu::{INSTRUCTIONS, ITLB_MISSES, L1_LOADS, L1_MISSES};
-use crate::pmu::{OPEN_PARANOID, PAGE_FAULTS, PARANOID_KEY, RUNS};
-use crate::pmu::{find_reading, get_count};
+use crate::pmu::{
+    BRANCH_INSTRUCTIONS, BRANCH_MISSES, CACHE_MISSES, CACHE_REFERENCES, CONTEXT_SWITCHES, CYCLES,
+    DTLB_MISSES, FULL_RUN, INSTRUCTIONS, ITLB_MISSES, L1_LOADS, L1_MISSES, OPEN_PARANOID,
+    PAGE_FAULTS, PARANOID_KEY, RUNS,
+};
+use crate::pmu::{Pmu, find_reading, get_count};
 use crate::record::LOCAL_DIR;
-use crate::record::{CorpusRecord, InstanceRecord, Measurement};
-use crate::record::{format_thousands, format_utc_minute, format_versions};
-use crate::sample::Curve;
+use crate::record::{
+    CorpusRecord, InstanceRecord, Measurement, format_thousands, format_utc_minute, format_versions,
+};
 use crate::sample::LEAST_SAMPLES;
-use crate::sample::fold_into_columns;
-use crate::syscalls::get_family;
-use crate::syscalls::{Call, Syscalls};
+use crate::sample::{Curve, fold_into_columns};
+use crate::syscalls::{Call, Syscalls, get_family};
 use crate::syscalls::{FAMILIES, OTHER_FAMILY};
 
 pub const FLOOR_WARMUP: u32 = 5;
@@ -39,17 +39,19 @@ pub const MEMORY_PART: &str = "memory";
 pub const SYSCALLS_PART: &str = "syscalls";
 pub const PMU_PART: &str = "pmu";
 pub const ALLOCATIONS_PART: &str = "allocations";
+pub const LADDER_PART: &str = "ladder";
 /// What `insights` measures, and what `--only` names. A run does all of them unless it says
 /// otherwise.
-pub const INSIGHT_PARTS: [&str; 5] = [
+pub const INSIGHT_PARTS: [&str; 6] = [
     FLOOR_PART,
     MEMORY_PART,
     SYSCALLS_PART,
     PMU_PART,
     ALLOCATIONS_PART,
+    LADDER_PART,
 ];
 pub const SYSCALLS_HEADING: &str = "family / call";
-const PMU_HEADING: &str = "instance";
+const INSTANCE_HEADING: &str = "instance";
 const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends. What a run cannot \
                           measure about itself, since watching a process closely enough disturbs \
                           the times it would report. The tables are the ones the command printed, \
@@ -65,12 +67,23 @@ const PMU_MEANS: &str = "What the cpu did while each counter counted, read throu
                          passes of four events.";
 const ALLOCATIONS_MEANS: &str =
     "What each counter asked of the heap allocator, counted by valgrind.";
+const LADDER_MEANS: &str = "How each counter scales as physical cores and hardware threads are \
+                            added through the process affinity mask.";
 const NO_SYSCALLS: &str = "The system calls were not counted in this session.";
 const NO_PMU: &str = "The hardware counters were not read in this session.";
 const NO_ALLOCATIONS: &str = "The heap allocations were not counted in this session.";
+const NO_LADDER: &str = "The affinity ladder was not measured in this session.";
 const NOT_ASKED: &str = "Not asked for in this session.";
 const PMU_TITLE: &str = "Hardware counters";
 const ALLOCATIONS_TITLE: &str = "Allocations";
+const LADDER_TITLE: &str = "Affinity ladder";
+const LADDER_SUMMARY: &str = "summary";
+const LADDER_MEDIAN: &str = "median";
+const LADDER_SPEEDUP: &str = "speedup";
+const LADDER_FROM_PREV: &str = "from prev";
+const LADDER_EFFICIENCY: &str = "efficiency";
+const LADDER_PEAK: &str = "peak";
+const LADDER_SMT_GAIN: &str = "smt gain";
 const PMU_LINES: &str = "lines";
 const PMU_WORK: &str = "work";
 const PMU_BRANCHES: &str = "branches";
@@ -177,6 +190,10 @@ pub struct Insights {
     pub allocations_unmeasured: Option<String>,
     #[serde(default)]
     pub allocations: Vec<Allocations>,
+    #[serde(default)]
+    pub ladder_unmeasured: Option<String>,
+    #[serde(default)]
+    pub ladder: Vec<Ladder>,
     /// The parts this run was asked for. A record written before --only was there asked for all of
     /// them, which is what an empty field would otherwise look like.
     #[serde(default = "ask_for_everything")]
@@ -306,6 +323,15 @@ pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -
         insights.allocations_unmeasured.as_deref(),
         NO_ALLOCATIONS,
         allocated,
+    ));
+    let scaled = format_ladder(&insights.ladder, Style::Hidden);
+    lines.extend(lay_out_section(
+        asked_for(LADDER_PART),
+        LADDER_TITLE,
+        LADDER_MEANS,
+        insights.ladder_unmeasured.as_deref(),
+        NO_LADDER,
+        scaled,
     ));
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
@@ -583,7 +609,7 @@ pub fn format_pmu(counted: &[Pmu], paranoid: Option<i64>, style: Style) -> Vec<S
     };
     let names: Vec<String> = counted.iter().map(|one| one.instance.clone()).collect();
     let mut table: Vec<(String, Vec<String>)> = vec![
-        (PMU_HEADING.to_string(), names),
+        (INSTANCE_HEADING.to_string(), names),
         (
             PMU_LINES.to_string(),
             counted
@@ -731,6 +757,141 @@ pub fn format_allocations(counted: &[Allocations], files: Option<u64>) -> Vec<St
             unintercepted.join(", ")
         ));
     }
+    lines
+}
+
+pub fn format_ladder(ladders: &[Ladder], style: Style) -> Vec<String> {
+    if ladders.is_empty() {
+        return Vec::new();
+    }
+    let instances: Vec<String> = ladders.iter().map(|one| one.instance.clone()).collect();
+    let mut table: Vec<(String, Vec<String>)> = vec![(INSTANCE_HEADING.to_string(), instances)];
+    let mut rung_specs: Vec<(String, bool)> = Vec::new();
+    for one in ladders {
+        for rung in &one.rungs {
+            if !rung_specs.iter().any(|(label, _)| label == &rung.label) {
+                rung_specs.push((rung.label.clone(), rung.smt));
+            }
+        }
+    }
+    for (rung_index, (label, smt)) in rung_specs.iter().enumerate() {
+        let medians: Vec<String> = ladders
+            .iter()
+            .map(|one| {
+                one.rungs
+                    .iter()
+                    .find(|r| &r.label == label)
+                    .map_or_else(String::new, |r| {
+                        format!("{:.1} ms", r.measurement.median_s * 1000.0)
+                    })
+            })
+            .collect();
+        table.push((label.clone(), vec![String::new(); ladders.len()]));
+        table.push((format!("{MEMBER_INDENT}{LADDER_MEDIAN}"), medians));
+        if rung_index > 0 {
+            let speedups: Vec<String> = ladders
+                .iter()
+                .map(|one| {
+                    one.rungs
+                        .iter()
+                        .find(|r| &r.label == label)
+                        .map_or_else(String::new, |r| format!("{:.2}x", r.speedup))
+                })
+                .collect();
+            let steps: Vec<String> = ladders
+                .iter()
+                .map(|one| {
+                    one.rungs
+                        .iter()
+                        .find(|r| &r.label == label)
+                        .and_then(|r| r.from_prev)
+                        .map_or_else(String::new, |step| format!("{step:.2}x"))
+                })
+                .collect();
+            table.push((format!("{MEMBER_INDENT}{LADDER_SPEEDUP}"), speedups));
+            table.push((format!("{MEMBER_INDENT}{LADDER_FROM_PREV}"), steps));
+            if !smt {
+                let efficiencies: Vec<String> = ladders
+                    .iter()
+                    .map(|one| {
+                        one.rungs
+                            .iter()
+                            .find(|r| &r.label == label)
+                            .map_or_else(String::new, |r| format!("{:.0}%", r.efficiency * 100.0))
+                    })
+                    .collect();
+                table.push((format!("{MEMBER_INDENT}{LADDER_EFFICIENCY}"), efficiencies));
+            }
+        }
+    }
+
+    let summary_members = vec![
+        (
+            LADDER_PEAK,
+            ladders
+                .iter()
+                .map(|one| format!("{:.2}x ({})", one.peak_speedup, one.peak_label))
+                .collect::<Vec<String>>(),
+        ),
+        (
+            LADDER_SMT_GAIN,
+            ladders
+                .iter()
+                .map(|one| {
+                    one.smt_gain_pct
+                        .map_or_else(String::new, |g| format!("{g:+.1}%"))
+                })
+                .collect::<Vec<String>>(),
+        ),
+    ];
+    let held_summary: Vec<(String, Vec<String>)> = summary_members
+        .into_iter()
+        .filter(|(_, cells)| cells.iter().any(|cell| !cell.is_empty()))
+        .map(|(label, cells)| (format!("{MEMBER_INDENT}{label}"), cells))
+        .collect();
+    if !held_summary.is_empty() {
+        table.push((
+            LADDER_SUMMARY.to_string(),
+            vec![String::new(); ladders.len()],
+        ));
+        table.extend(held_summary);
+    }
+
+    let gutter = measure_gutter("", table.iter().map(|(label, _)| label.as_str()));
+    let rows: Vec<Vec<String>> = table
+        .iter()
+        .skip(1)
+        .map(|(_, cells)| cells.clone())
+        .collect();
+    let widths = measure_columns(&table[0].1, &rows);
+    let mut lines: Vec<String> = table
+        .into_iter()
+        .enumerate()
+        .map(|(at, (label, cells))| {
+            let line = lay_out_numbers(&label, &cells, gutter, &widths);
+            match (at, label.starts_with(MEMBER_INDENT)) {
+                (0, _) => line,
+                (_, true) => fade(&line, style),
+                (_, false) => line.replacen(&label, &embolden(&label, style), 1),
+            }
+        })
+        .collect();
+    let first = &ladders[0];
+    lines.push(String::new());
+    if first.strong_cores < first.physical_cores {
+        lines.push(format!(
+            "{INDENT}{} physical cores ({} strong), {} hardware threads",
+            first.physical_cores, first.strong_cores, first.logical_cores
+        ));
+    } else {
+        lines.push(format!(
+            "{INDENT}{} physical cores, {} hardware threads",
+            first.physical_cores, first.logical_cores
+        ));
+    }
+    lines.push(format!(
+        "{INDENT}speedup is against 1c, from prev is against the rung above, and efficiency is speedup divided by physical cores"
+    ));
     lines
 }
 
@@ -1177,6 +1338,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::fetch::{Identity, Origin};
+    use crate::ladder::LadderRung;
     use crate::pmu::Reading;
 
     use super::*;
@@ -1348,6 +1510,8 @@ mod tests {
             valgrind: None,
             allocations_unmeasured: None,
             allocations: Vec::new(),
+            ladder_unmeasured: None,
+            ladder: Vec::new(),
             asked: ask_for_everything(),
         }
     }
@@ -1886,5 +2050,73 @@ mod tests {
         let page = build_insights_page(&insights, &only_tokei()).join("\n");
         assert!(page.contains(ALLOCATIONS_MEANS), "{page}");
         assert!(page.contains("scc made no allocations"), "{page}");
+    }
+
+    #[test]
+    fn the_affinity_ladder_formats_each_rung_and_summary_and_renders_into_the_insights_page() {
+        let ladders = vec![Ladder {
+            instance: "mezura".to_string(),
+            physical_cores: 8,
+            strong_cores: 8,
+            logical_cores: 16,
+            peak_speedup: 6.25,
+            peak_label: "16t".to_string(),
+            smt_gain_pct: Some(18.8),
+            rungs: vec![
+                LadderRung {
+                    label: "1c".to_string(),
+                    cores: 1,
+                    logical_cpus: vec![0],
+                    efficiency_cores: false,
+                    smt: false,
+                    measurement: measured("ladder-1c", "mezura", "mezura", 100.0, 1.0),
+                    speedup: 1.0,
+                    from_prev: None,
+                    efficiency: 1.0,
+                },
+                LadderRung {
+                    label: "8c".to_string(),
+                    cores: 8,
+                    logical_cpus: vec![0, 2, 4, 6, 8, 10, 12, 14],
+                    efficiency_cores: false,
+                    smt: false,
+                    measurement: measured("ladder-8c", "mezura", "mezura", 19.0, 0.5),
+                    speedup: 5.26,
+                    from_prev: Some(5.26),
+                    efficiency: 0.66,
+                },
+                LadderRung {
+                    label: "16t".to_string(),
+                    cores: 8,
+                    logical_cpus: (0..16).collect(),
+                    efficiency_cores: false,
+                    smt: true,
+                    measurement: measured("ladder-16t", "mezura", "mezura", 16.0, 0.4),
+                    speedup: 6.25,
+                    from_prev: Some(1.19),
+                    efficiency: 0.78,
+                },
+            ],
+        }];
+        let lines = format_ladder(&ladders, Style::Plain);
+        let text = lines.join("\n");
+        assert!(text.contains("100.0 ms"), "{text}");
+        assert!(!text.contains("1.00x"), "{text}");
+        assert!(text.contains("5.26x"), "{text}");
+        assert!(text.contains("from prev"), "{text}");
+        assert!(text.contains("1.19x"), "{text}");
+        assert!(text.contains("66%"), "{text}");
+        assert!(text.contains("6.25x (16t)"), "{text}");
+        assert!(text.contains("+18.8%"), "{text}");
+        assert!(
+            text.contains("8 physical cores, 16 hardware threads"),
+            "{text}"
+        );
+
+        let mut insights = build_insights(Vec::new(), Vec::new());
+        insights.ladder = ladders;
+        let page = build_insights_page(&insights, &only_tokei()).join("\n");
+        assert!(page.contains(LADDER_MEANS), "{page}");
+        assert!(page.contains("6.25x (16t)"), "{page}");
     }
 }

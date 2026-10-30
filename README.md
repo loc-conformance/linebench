@@ -276,6 +276,7 @@ lengthen and disturb it. What each system can answer:
 | the counts of system calls | yes, `strace -c -f` | no | no |
 | the hardware counters | yes, `perf stat` | no | no |
 | the heap allocations | yes, `valgrind` | no | no |
+| the affinity ladder | yes, `sched_setaffinity` | yes, `SetProcessAffinityMask` | no |
 
 **The floor** is what a counter costs before it has counted anything. Three timings per instance,
 thirty runs and no settle: the version answer, `<counter> --version`, and the two ready floors,
@@ -346,15 +347,23 @@ floor, allocations per file above the floor, total bytes allocated, average byte
 and bytes still in use at exit. Counters that are scripts (`cloc`) are skipped, and counters that
 bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under the table.
 
+**The affinity ladder** pins the process affinity mask (`sched_setaffinity` on Linux,
+`SetProcessAffinityMask` on Windows, built from the true physical core map in sysfs
+`thread_siblings_list` or `GetLogicalProcessorInformationEx`) to doublings of physical cores up to
+all strong cores, then efficiency cores when present, then SMT siblings, timing each rung through
+hyperfine (3, 3, 5, 5, 10 runs as the rung widens) and reporting median wall time, speedup over one
+physical core, per-core efficiency (`speedup / cores`), peak speedup, Amdahl's serial fraction, and
+the SMT gain.
+
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
-needs is missing. `--only floor,memory,syscalls,pmu,allocations` names which of the insights to
-measure. A part left out is named as left out in the record and on the page, so an empty section is
-never read as a measurement that found nothing.
+needs is missing. `--only floor,memory,syscalls,pmu,allocations,ladder` names which of the insights
+to measure. A part left out is named as left out in the record and on the page, so an empty section
+is never read as a measurement that found nothing.
 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
 machine block, the antivirus state, the corpus with its commit and the instances measured, so it
 stands on its own, and the hyperfine exports sit beside it. `insights.md` is the same session for a
-reader: the machine, the corpus and the five sections above as they were printed. An `--args` or
+reader: the machine, the corpus and the six sections above as they were printed. An `--args` or
 `--env` instance or a build of yours sends the session under `results/insights/local/`.
 
 ### ab
@@ -426,8 +435,9 @@ What one `insights` command wrote is read the same way. Name its directory, or t
 inside it, and the floor is held against itself and against its exports, every memory curve
 against the peak the system reported independently of the samples, every traced instance against
 the calls it listed, every profiled instance against the events it read, every heap summary
-against what it allocated, and every number against the instances the session says it measured. A
-part `--only` left out and measured all the same fails too.
+against what it allocated, every affinity ladder against its rungs and their exports, and every
+number against the instances the session says it measured. A part `--only` left out and measured
+all the same fails too.
 
 ![what verify prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/verify.png)
 
@@ -645,7 +655,7 @@ hyperfine's own output, `transcript.txt` is everything the run printed, and `not
 checklist to fill in by hand, with the since block under it. `out/` holds every counter's JSON and
 is deleted once the counts are read. Inside an insights directory, `insights.json` is the session,
 `insights.md` the same session to read, and hyperfine's own output sits beside them for the floor
-phase.
+and ladder phases.
 
 ## Settings
 
@@ -660,7 +670,7 @@ flag belongs to the commands whose help names it, and a command refuses one that
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
-| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations` | | | all five |
+| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations,ladder` | | | all six |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | cloc |
