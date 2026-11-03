@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::corpus::shorten_hash;
+use crate::counters::INSTANCE_DATA_DIR;
 use crate::counters::{Acquisition, Channel, Definition};
 use crate::files::read_toml;
 use crate::machine::Platform;
 use crate::measure::print_line;
-use crate::os::{Unfinished, capture_with_status};
+use crate::os::{Unfinished, capture_with_status, capture_with_status_in_env};
 
 pub const MANIFEST_FILE: &str = "linebench-fetched.toml";
 pub const GIVEN_DIR: &str = "given";
@@ -165,7 +166,9 @@ pub fn fetch_counter(
     let (binary, source, built_with) = assembled.inspect_err(|_| {
         let _ = fs::remove_dir_all(&partial);
     })?;
-    let printed = read_version(definition, &binary).inspect_err(|_| {
+    let execution_env =
+        definition.build_execution_env(&partial.join(INSTANCE_DATA_DIR), &BTreeMap::new());
+    let printed = read_version(definition, &binary, &execution_env).inspect_err(|_| {
         let _ = fs::remove_dir_all(&partial);
     })?;
     if !is_the_declared_version(&how.version, &printed) {
@@ -209,6 +212,7 @@ pub fn identify_counter(
     platform: Platform,
     dir: &Path,
     manifest: &Manifest,
+    execution_env: &BTreeMap<String, String>,
 ) -> Result<Identity, String> {
     let binary = dir.join(definition.get_binary_name(platform.as_system())?);
     if !binary.is_file() {
@@ -229,7 +233,7 @@ pub fn identify_counter(
         ));
     }
     let sha256 = calculate_sha256(&binary)?;
-    let version = read_version(definition, &binary)?;
+    let version = read_version(definition, &binary, execution_env)?;
     let origin = decide_origin(
         definition,
         &binary,
@@ -262,6 +266,7 @@ pub fn stage_given(
     source: &Path,
     platform: Platform,
     dir: &Path,
+    execution_env: &BTreeMap<String, String>,
 ) -> Result<Identity, String> {
     if !source.is_file() {
         return Err(format!("{} is not a file", source.display()));
@@ -283,7 +288,7 @@ pub fn stage_given(
     })?;
     mark_runnable(&binary)?;
     let sha256 = calculate_sha256(&binary)?;
-    let version = read_version(definition, &binary)?;
+    let version = read_version(definition, &binary, execution_env)?;
     Ok(Identity {
         instance,
         counter: definition.name.clone(),
@@ -337,17 +342,25 @@ pub fn decide_origin(
     })
 }
 
-pub fn read_version(definition: &Definition, binary: &Path) -> Result<String, String> {
+pub fn read_version(
+    definition: &Definition,
+    binary: &Path,
+    execution_env: &BTreeMap<String, String>,
+) -> Result<String, String> {
     let program = binary.to_string_lossy();
-    let (ok, out) = capture_with_status(&program, &[definition.version_flag.as_str()]).map_err(
-        |unfinished| match unfinished {
-            Unfinished::NotFound if binary.is_file() => format!(
-                "{program} is there but cannot be started: the interpreter named on its first \
+    let (ok, out) = capture_with_status_in_env(
+        &program,
+        &[definition.version_flag.as_str()],
+        execution_env,
+        &definition.run.scrub_env,
+    )
+    .map_err(|unfinished| match unfinished {
+        Unfinished::NotFound if binary.is_file() => format!(
+            "{program} is there but cannot be started: the interpreter named on its first \
                  line, or the loader its build was linked against, is not on this machine"
-            ),
-            other => other.describe(&format!("{program} {}", definition.version_flag)),
-        },
-    )?;
+        ),
+        other => other.describe(&format!("{program} {}", definition.version_flag)),
+    })?;
     let printed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     if !ok || printed.is_empty() {
         return Err(format!(
@@ -1029,7 +1042,9 @@ blanks   = \"Blank\"
         fs::create_dir_all(&dir).unwrap();
         let source = env::current_exe().unwrap();
         let platform = detect_platform().unwrap();
-        let identity = stage_given(&definition, Some("dev"), &source, platform, &dir).unwrap();
+        let none = BTreeMap::new();
+        let identity =
+            stage_given(&definition, Some("dev"), &source, platform, &dir, &none).unwrap();
         let copied = identity.binary.is_file();
         let refused = stage_given(
             &definition,
@@ -1037,6 +1052,7 @@ blanks   = \"Blank\"
             &dir.join("nowhere"),
             platform,
             &dir,
+            &none,
         );
         fs::remove_dir_all(&dir).unwrap();
         assert!(copied);
@@ -1125,17 +1141,52 @@ blanks   = \"Blank\"
         fs::write(&script, "#!/no-such-interpreter-linebench\nprint 1;\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         let definition = parse_definition(SCC, Path::new("scc.toml")).unwrap();
-        let refused = read_version(&definition, &script).unwrap_err();
+        let none = BTreeMap::new();
+        let refused = read_version(&definition, &script, &none).unwrap_err();
         assert!(
             refused.contains("the interpreter named on its first line"),
             "{refused}"
         );
-        let gone = read_version(&definition, &dir.join("absent")).unwrap_err();
+        let gone = read_version(&definition, &dir.join("absent"), &none).unwrap_err();
         assert!(
             gone.ends_with("could not be run: no such program"),
             "{gone}"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_version_is_asked_with_the_environment_the_instance_runs_with() {
+        let dir = env::temp_dir().join("linebench-the_version_is_asked_with_the_environment");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let definition = parse_definition(
+            &SCC.replace(
+                "args      = [\"{target}\"]",
+                "args      = [\"{target}\"]\nenv       = { LINEBENCH_PROBE = \"{instance-dir}\" }",
+            ),
+            Path::new("scc.toml"),
+        )
+        .unwrap();
+        let instance_dir = dir.join("instance");
+        let execution_env = definition.build_execution_env(&instance_dir, &BTreeMap::new());
+        #[cfg(unix)]
+        let stub = {
+            use std::os::unix::fs::PermissionsExt;
+            let stub = dir.join("probe.sh");
+            fs::write(&stub, "#!/bin/sh\necho \"seen $LINEBENCH_PROBE\"\n").unwrap();
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+            stub
+        };
+        #[cfg(windows)]
+        let stub = {
+            let stub = dir.join("probe.cmd");
+            fs::write(&stub, "@echo seen %LINEBENCH_PROBE%\r\n").unwrap();
+            stub
+        };
+        let printed = read_version(&definition, &stub, &execution_env).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(format!("seen {}", instance_dir.display()), printed);
     }
 
     fn build_a_release() -> Vec<Asset> {

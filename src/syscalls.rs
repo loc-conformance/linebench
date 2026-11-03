@@ -7,7 +7,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::measure::Table;
-use crate::os::{Unfinished, capture_output, capture_with_status};
+use crate::os::{Unfinished, apply_execution_env, capture_output, capture_with_status};
 
 pub const TRACER: &str = "strace";
 pub const OTHER_FAMILY: &str = "other";
@@ -141,10 +141,7 @@ pub fn count_syscalls(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    for name in scrub {
-        command.env_remove(name);
-    }
-    command.envs(env);
+    apply_execution_env(&mut command, env, scrub);
     let started = Instant::now();
     let finished = command
         .output()

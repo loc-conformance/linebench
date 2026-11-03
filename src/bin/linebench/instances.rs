@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use linebench::corpus::Corpus;
+use linebench::counters::INSTANCE_DATA_DIR;
 use linebench::counters::{Definition, read_definition_for};
 use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::fetch::{identify_counter, read_manifest, stage_given};
@@ -10,8 +11,6 @@ use linebench::machine::Platform;
 use linebench::measure::Instance;
 
 use crate::config::{Locations, Options};
-
-const INSTANCE_DATA_DIR: &str = "data";
 
 pub struct ChosenInstances {
     pub instances: Vec<Instance>,
@@ -100,16 +99,26 @@ pub fn build_instances(
                 None => find_definition(definitions, counter)?,
             };
             let tag = check_given_name(name, &definition)?;
+            // Before the identity, since asking a counter its version runs it, and mezura writes its
+            // data directory on every run
+            let execution_env =
+                prepare_execution_env(&definition, &locations.staging, name, &entry.env);
             let identity = match &entry.binary {
-                Some(binary) => {
-                    stage_given(&definition, tag, binary, platform, &locations.staging)?
-                }
+                Some(binary) => stage_given(
+                    &definition,
+                    tag,
+                    binary,
+                    platform,
+                    &locations.staging,
+                    &execution_env,
+                )?,
                 None => {
                     let mut identity = identify_counter(
                         &definition,
                         platform,
                         &locations.counters_dir,
                         &manifest,
+                        &execution_env,
                     )?;
                     identity.instance = name.clone();
                     identity
@@ -117,8 +126,6 @@ pub fn build_instances(
             };
             let mut args = locations.args.clone();
             args.extend(entry.args.iter().cloned());
-            let execution_env =
-                prepare_execution_env(&definition, &locations.staging, name, &entry.env);
             Instance {
                 definition,
                 identity,
@@ -147,10 +154,15 @@ pub fn build_instances(
                     }
                 )
             })?;
-            let identity =
-                identify_counter(&definition, platform, &locations.counters_dir, &manifest)?;
             let env = BTreeMap::new();
             let execution_env = prepare_execution_env(&definition, &locations.staging, name, &env);
+            let identity = identify_counter(
+                &definition,
+                platform,
+                &locations.counters_dir,
+                &manifest,
+                &execution_env,
+            )?;
             Instance {
                 definition,
                 identity,

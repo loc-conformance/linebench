@@ -13,6 +13,7 @@ pub const TARGET: &str = "{target}";
 pub const EXTENSIONS: &str = "{extensions}";
 pub const NAMES: &str = "{names}";
 pub const INSTANCE_DIR: &str = "{instance-dir}";
+pub const INSTANCE_DATA_DIR: &str = "data";
 const VERSION: &str = "{version}";
 const OTHER_SYSTEM: &str = "other";
 const RELEASE_FILE_SYSTEMS: [&str; 4] = ["windows", "linux", "macos", "other"];

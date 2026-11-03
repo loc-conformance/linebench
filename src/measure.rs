@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::counters::Definition;
 use crate::fetch::Identity;
 use crate::machine::Platform;
+use crate::os::apply_execution_env;
 use crate::record::propagate_ratio_stddev;
 
 pub const DEFAULT_WARMUP: u32 = 3;
@@ -229,10 +230,7 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(file)
             .stderr(Stdio::piped());
-        for name in &self.scrub {
-            command.env_remove(name);
-        }
-        command.envs(env);
+        apply_execution_env(&mut command, env, &self.scrub);
         let finished = command
             .output()
             .map_err(|error| format!("{} could not be run: {error}", program.display()))?;
@@ -303,10 +301,7 @@ impl Runner {
         }
         hyperfine.args(["--export-json", &export.to_string_lossy()]);
         hyperfine.arg(&timed.command);
-        for name in &self.scrub {
-            hyperfine.env_remove(name);
-        }
-        hyperfine.envs(&timed.execution_env);
+        apply_execution_env(&mut hyperfine, &timed.execution_env, &self.scrub);
         let report = if self.style.is_shown() {
             Stdio::piped()
         } else {

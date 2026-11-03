@@ -18,6 +18,8 @@ Other:
   and subtracts those startup allocations from `per file`.
 - On Linux, the `memory` section of `insights` now includes the page faults of waited-for child
   processes in `pages given` and `from disk`.
+- A counter is asked its version with the environment it runs with, so naming a mezura build no
+  longer rewrites your own mezura data directory.
 
 ## 0.3.1, 2026-10-29
 

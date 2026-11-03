@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 #[cfg(unix)]
@@ -99,21 +100,42 @@ pub fn capture_output(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+pub fn apply_execution_env(
+    command: &mut Command,
+    env: &BTreeMap<String, String>,
+    scrub: &[String],
+) {
+    for name in scrub {
+        command.env_remove(name);
+    }
+    command.envs(env);
+}
+
 pub fn capture_with_status(program: &str, args: &[&str]) -> Result<(bool, String), Unfinished> {
+    capture_with_status_in_env(program, args, &BTreeMap::new(), &[])
+}
+
+pub fn capture_with_status_in_env(
+    program: &str,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    scrub: &[String],
+) -> Result<(bool, String), Unfinished> {
     let could_not_run = |error: &dyn std::fmt::Display| Unfinished::CouldNotRun(error.to_string());
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                Unfinished::NotFound
-            } else {
-                could_not_run(&error)
-            }
-        })?;
+        .stderr(Stdio::null());
+    apply_execution_env(&mut command, env, scrub);
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            Unfinished::NotFound
+        } else {
+            could_not_run(&error)
+        }
+    })?;
     let mut stdout = child
         .stdout
         .take()
