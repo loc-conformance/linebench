@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- Results from hyperfine 2.0 are read. Its exports moved the statistics under `summary`, which left
+  every run's summary empty and its drift unknown.
+
 ## 0.3.1, 2026-10-29
 
 Other:

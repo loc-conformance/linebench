@@ -774,19 +774,118 @@ struct HyperfineExport {
 }
 
 #[derive(Deserialize)]
+#[serde(from = "HyperfineExportResult")]
 struct HyperfineResult {
     command: String,
+    mean: f64,
+    stddev: Option<f64>,
+    median: f64,
+    min: f64,
+    max: f64,
+    user: Option<f64>,
+    system: Option<f64>,
+    times: Vec<f64>,
+}
+
+/// A result as hyperfine writes it: its statistics at the top before 2.0, and from 2.0 on under
+/// `summary`, with the times inside `measurements`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HyperfineExportResult {
+    Before2 {
+        command: String,
+        mean: f64,
+        #[serde(default)]
+        stddev: Option<f64>,
+        median: f64,
+        min: f64,
+        max: f64,
+        #[serde(default)]
+        user: Option<f64>,
+        #[serde(default)]
+        system: Option<f64>,
+        times: Vec<f64>,
+    },
+    Since2 {
+        command: String,
+        summary: HyperfineSummary,
+        measurements: Vec<HyperfineMeasurement>,
+    },
+}
+
+#[derive(Deserialize)]
+struct HyperfineSummary {
+    time_wall_clock: HyperfineStatistics,
+    #[serde(default)]
+    time_user: Option<HyperfineStatistics>,
+    #[serde(default)]
+    time_system: Option<HyperfineStatistics>,
+}
+
+#[derive(Deserialize)]
+struct HyperfineStatistics {
     mean: f64,
     #[serde(default)]
     stddev: Option<f64>,
     median: f64,
     min: f64,
     max: f64,
-    #[serde(default)]
-    user: Option<f64>,
-    #[serde(default)]
-    system: Option<f64>,
-    times: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+struct HyperfineMeasurement {
+    time_wall_clock: HyperfineValue,
+}
+
+#[derive(Deserialize)]
+struct HyperfineValue {
+    value: f64,
+}
+
+impl From<HyperfineExportResult> for HyperfineResult {
+    fn from(result: HyperfineExportResult) -> Self {
+        match result {
+            HyperfineExportResult::Before2 {
+                command,
+                mean,
+                stddev,
+                median,
+                min,
+                max,
+                user,
+                system,
+                times,
+            } => Self {
+                command,
+                mean,
+                stddev,
+                median,
+                min,
+                max,
+                user,
+                system,
+                times,
+            },
+            HyperfineExportResult::Since2 {
+                command,
+                summary,
+                measurements,
+            } => Self {
+                command,
+                mean: summary.time_wall_clock.mean,
+                stddev: summary.time_wall_clock.stddev,
+                median: summary.time_wall_clock.median,
+                min: summary.time_wall_clock.min,
+                max: summary.time_wall_clock.max,
+                user: summary.time_user.map(|time| time.mean),
+                system: summary.time_system.map(|time| time.mean),
+                times: measurements
+                    .into_iter()
+                    .map(|measurement| measurement.time_wall_clock.value)
+                    .collect(),
+            },
+        }
+    }
 }
 
 fn describe_exclusions(record: &Record) -> String {
@@ -941,6 +1040,39 @@ mod tests {
         assert!((pooled.mean_stddev_s - of_the_mean).abs() < 1e-9);
         let alone = pool_orders(&one, None);
         assert!((alone.mean_stddev_s - 0.01 / 15f64.sqrt()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_hyperfine_2_export_reads_the_same_as_an_earlier_one() {
+        let res = env::temp_dir().join("linebench-a_hyperfine_2_export_reads_the_same");
+        let _ = fs::remove_dir_all(&res);
+        fs::create_dir_all(&res).unwrap();
+        fs::write(
+            res.join("t1-fwd.json"),
+            r#"{"results":[{"command":"scc tree","mean":0.3,"stddev":0.1,"median":0.3,"user":2.0,"system":1.0,"min":0.2,"max":0.4,"times":[0.2,0.3,0.4]}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            res.join("t1-rev.json"),
+            r#"{"results":[{"command":"scc tree","summary":{"time_wall_clock":{"count":3,"unit":"second","mean":0.3,"stddev":0.1,"median":0.3,"min":0.2,"max":0.4},"time_user":{"count":3,"unit":"second","mean":2.0,"median":2.0,"min":2.0,"max":2.0},"time_system":{"count":3,"unit":"second","mean":1.0,"median":1.0,"min":1.0,"max":1.0}},"measurements":[{"exit_code":0,"time_wall_clock":{"value":0.2,"unit":"second"}},{"exit_code":0,"time_wall_clock":{"value":0.3,"unit":"second"}},{"exit_code":0,"time_wall_clock":{"value":0.4,"unit":"second"}}]}]}"#,
+        )
+        .unwrap();
+        let commands = BTreeMap::from([("scc tree".to_string(), "scc".to_string())]);
+        let (measurements, skipped) = collect_measurements(&res, &commands, &[]).unwrap();
+        let timings = read_export(&res.join("t1-rev.json")).unwrap();
+        fs::remove_dir_all(&res).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let [before, since] = &measurements[..] else {
+            panic!("{measurements:?}");
+        };
+        let shape = |m: &Measurement| {
+            (
+                m.mean_s, m.stddev_s, m.median_s, m.min_s, m.max_s, m.user_s, m.system_s, m.runs,
+            )
+        };
+        assert_eq!(shape(before), shape(since));
+        assert_eq!(timings[0].times, [0.2, 0.3, 0.4]);
+        assert_eq!(timings[0].user_s, Some(2.0));
     }
 
     #[test]

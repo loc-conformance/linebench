@@ -593,12 +593,16 @@ fn format_markdown_table(results: &[Value]) -> Option<String> {
     let entries: Vec<Entry<'_>> = results
         .iter()
         .filter_map(|value| {
+            // hyperfine 2.0 moved the statistics from the top of a result to under `summary`.
+            let statistics = value
+                .get("summary")
+                .map_or(value, |summary| &summary["time_wall_clock"]);
             Some(Entry {
                 command: value["command"].as_str()?,
-                mean: value["mean"].as_f64()?,
-                stddev: value["stddev"].as_f64(),
-                min: value["min"].as_f64()?,
-                max: value["max"].as_f64()?,
+                mean: statistics["mean"].as_f64()?,
+                stddev: statistics["stddev"].as_f64(),
+                min: statistics["min"].as_f64()?,
+                max: statistics["max"].as_f64()?,
             })
         })
         .collect();
@@ -841,6 +845,16 @@ mod tests {
              |:---|---:|---:|---:|---:|\n\
              | `cloc /corpus` | 1050.0 ± 15.0 | 1030.0 | 1072.0 | 296.66 ± 9.53 |\n\
              | `MEZURA_DATA_DIR=/tmp/a mezura /corpus` | 3.5 ± 0.1 | 3.4 | 3.8 | 1.00 |\n"
+        );
+        let since_hyperfine_2 = [serde_json::json!({
+            "command": "cloc /linux",
+            "summary": {"time_wall_clock": {"mean": 1.42, "min": 1.42, "max": 1.42}},
+        })];
+        assert_eq!(
+            format_markdown_table(&since_hyperfine_2).unwrap(),
+            "| Command | Mean [s] | Min [s] | Max [s] | Relative |\n\
+             |:---|---:|---:|---:|---:|\n\
+             | `cloc /linux` | 1.420 | 1.420 | 1.420 | 1.00 |\n"
         );
         let in_seconds = [serde_json::json!({
             "command": "cloc /linux",
