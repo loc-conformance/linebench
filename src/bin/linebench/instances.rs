@@ -306,6 +306,7 @@ blanks   = \"blanks\"
             left_out,
             [
                 "cloc: it is not set up on this machine",
+                "codestats: it is not set up on this machine",
                 "mezura: it is not set up on this machine",
                 "tokei: it is not set up on this machine"
             ]

@@ -83,7 +83,7 @@ linebench noise cpython
 sudo linebench run cpython
 ```
 
-The first line downloads the four counters and clones one of the shipped corpora at its pinned
+The first line downloads the five counters and clones one of the shipped corpora at its pinned
 commit.  
 The second says what arrived and where.  
 The third proves the machine can measure: every counter runs once and its counts are checked
@@ -788,7 +788,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-CI runs the three on Linux, Windows and macOS, then fetches the four counters and the cpython
+CI runs the three on Linux, Windows and macOS, then fetches the five counters and the cpython
 corpus and runs `check` over it, so a definition that cannot be fetched, run or read on one of the
 three systems fails the build. No timing is read there.
 
