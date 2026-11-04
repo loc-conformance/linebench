@@ -487,7 +487,7 @@ h = "C Header"
     fn every_shipped_definition_parses_and_spells_the_linux_corpus() {
         let found = read_definitions(Path::new(SHIPPED)).expect("the shipped definitions");
         let names: Vec<&str> = found.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["cloc", "mezura", "scc", "tokei"]);
+        assert_eq!(names, ["cloc", "codestats", "mezura", "scc", "tokei"]);
         for definition in &found {
             let spelled = definition
                 .spell_languages(&build_strings(&LINUX))
