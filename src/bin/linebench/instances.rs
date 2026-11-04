@@ -324,7 +324,7 @@ blanks   = \"blanks\"
             "cloc: the corpus definition leaves it out on windows"
         );
         assert_eq!(
-            left_out[2],
+            left_out[3],
             "scc: the corpus definition leaves it out on windows"
         );
         assert!(left_out.iter().all(|entry| !entry.starts_with("mine")));
@@ -337,7 +337,7 @@ blanks   = \"blanks\"
         let (set_up, left_out) =
             choose_set_up(&definitions, &dir, Platform::Windows, &plain, &by_conf).unwrap();
         assert!(set_up.is_empty());
-        assert_eq!(left_out[2], "scc: linebench.conf leaves it out");
+        assert_eq!(left_out[3], "scc: linebench.conf leaves it out");
         fs::remove_dir_all(&dir).unwrap();
     }
 
