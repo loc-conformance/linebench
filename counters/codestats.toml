@@ -1,0 +1,29 @@
+name         = "codestats"
+repository   = "https://github.com/trypsynth/codestats"
+version-flag = "--version"
+
+[acquisition]
+channel = "github-release-file"
+name    = "trypsynth/codestats"
+version = "1.0.0"
+
+# Release binaries are built with PGO, and a build from crates.io isn't. A release file is named per system, not per architecture, so these are the ones linebench runs on most.
+[acquisition.file]
+linux   = "cs-x86_64-unknown-linux-gnu"
+macos   = "cs-aarch64-apple-darwin"
+windows = "cs-x86_64-pc-windows-gnu.exe"
+
+[run]
+args           = ["{target}"]
+json           = ["--output", "json-compact"]
+languages      = ["--ext", "{extensions}"]
+same-work      = ["--no-gitignore", "--hidden", "--include-generated", "--no-gitattributes"]
+same-work-note = "ignore files off, hidden files counted, generated files counted, linguist attributes off"
+
+[read]
+files    = "totals.file_count"
+lines    = "totals.lines.total"
+code     = "totals.lines.code"
+comments = "totals.lines.comment"
+blanks   = "totals.lines.blank"
+shebangs = "totals.lines.shebang"
