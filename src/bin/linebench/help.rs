@@ -472,7 +472,10 @@ mod tests {
         let fetch = find_help_of("fetch");
         assert!(fetch.contains(&name_them(COUNTERS)), "{fetch}");
         assert!(fetch.contains(&name_them(CORPORA)), "{fetch}");
-        assert!(name_them(COUNTERS).contains("cloc, codestats, mezura"), "{fetch}");
+        assert!(
+            name_them(COUNTERS).contains("cloc, codestats, mezura"),
+            "{fetch}"
+        );
     }
 
     #[test]
