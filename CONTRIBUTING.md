@@ -27,10 +27,8 @@ handling and tokei's nested languages were caught.
 configuration in the home directory or the working directory changes the counts from one machine
 to the next. The preferred way is a flag in `same-work` that turns every configuration off, so a
 counter should provide one. mezura's `--no-default-config --no-local` and scc's `--no-config` are
-the model. A counter whose only switch takes a configuration file gets `{empty-file}`, which
-linebench replaces with the path of an empty file. cloc runs with `--config {empty-file}` that
-way. tokei reads `tokei.toml` or `.tokeirc` and offers neither, so it is the one shipped exception
-and no model for a new definition.
+the model. If the counter can only be pointed at a configuration file, point it at `{empty-file}`,
+as in `--config {empty-file}`. tokei is the one shipped counter with no such flag.
 
 ## What has already bitten
 

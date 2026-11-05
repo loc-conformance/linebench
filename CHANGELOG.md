@@ -12,8 +12,7 @@ New:
   that is not its name.
 - `[acquisition.file]` takes a file per system and architecture, such as `linux-aarch64`, which is
   tried before the file for the system.
-- `{empty-file}` in `same-work` stands for the path of an empty file, for a counter whose only way
-  to skip its configuration is a flag that takes a file.
+- `{empty-file}` in `same-work` is an empty file, to point a counter's configuration flag at.
 
 Other:
 
