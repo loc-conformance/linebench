@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::files::{parse_toml, read_text};
+use crate::files::{parse_toml, read_text, write_empty_file};
 use crate::machine::WINDOWS;
 
 pub const COUNTS: [&str; 4] = ["files", "lines", "code", "comments"];
@@ -13,6 +13,7 @@ pub const TARGET: &str = "{target}";
 pub const EXTENSIONS: &str = "{extensions}";
 pub const NAMES: &str = "{names}";
 pub const INSTANCE_DIR: &str = "{instance-dir}";
+pub const EMPTY_FILE: &str = "{empty-file}";
 pub const INSTANCE_DATA_DIR: &str = "data";
 const VERSION: &str = "{version}";
 const OTHER_SYSTEM: &str = "other";
@@ -148,6 +149,13 @@ impl Definition {
         }
         if as_json {
             args.extend(self.run.json.iter().cloned());
+        }
+        if args.iter().any(|part| part.contains(EMPTY_FILE)) {
+            let empty = write_empty_file()?;
+            let empty = empty.to_string_lossy();
+            for part in &mut args {
+                *part = part.replace(EMPTY_FILE, &empty);
+            }
         }
         Ok(args)
     }
@@ -762,6 +770,18 @@ extension-case = "exact""#,
                 "json"
             ]
         );
+    }
+
+    #[test]
+    fn the_empty_file_placeholder_becomes_a_file_that_exists_and_holds_nothing() {
+        let with_config = SCC.replace("\"--no-config\"]", "\"--config\", \"{empty-file}\"]");
+        let scc = parse(&with_config, "scc").unwrap();
+        let args = scc
+            .build_args(Path::new("/tree"), &[], &[], true, false)
+            .unwrap();
+        let at = args.iter().position(|part| part == "--config").unwrap();
+        assert!(!args[at + 1].contains(EMPTY_FILE), "{args:?}");
+        assert_eq!(fs::read_to_string(&args[at + 1]).unwrap(), "");
     }
 
     #[test]

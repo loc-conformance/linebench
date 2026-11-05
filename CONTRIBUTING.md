@@ -4,8 +4,8 @@
 
 A counter is one file, `counters/<name>.toml`. Its keys mirror the linejudge adapter where the
 idea is the same (`name`, `binary-name`, `repository`, `version-flag`, `[acquisition]`, the
-`[read]` paths), so a block copies between the two files unchanged. The README's "Counters and corpora"
-section shows a whole one and says what every key does. Before opening a pull request:
+`[read]` paths), so a block copies between the two files unchanged. The README's "Counters and
+corpora" section shows a whole one and says what every key does. Before opening a pull request:
 
 ```
 cargo test --all-features
@@ -22,6 +22,15 @@ runs the fetched counter once per table, reads the counts back, and compares the
 count the corpus declares. CI runs both over the cpython corpus on Linux, Windows and macOS. Run
 `check` on the `linux` corpus too before publishing a definition: the kernel is where cloc's case
 handling and tokei's nested languages were caught.
+
+**A definition is merged only when the counter reads no configuration file on the machine.** A
+configuration in the home directory or the working directory changes the counts from one machine
+to the next. The preferred way is a flag in `same-work` that turns every configuration off, so a
+counter should provide one. mezura's `--no-default-config --no-local` and scc's `--no-config` are
+the model. A counter whose only switch takes a configuration file gets `{empty-file}`, which
+linebench replaces with the path of an empty file. cloc runs with `--config {empty-file}` that
+way. tokei reads `tokei.toml` or `.tokeirc` and offers neither, so it is the one shipped exception
+and no model for a new definition.
 
 ## What has already bitten
 

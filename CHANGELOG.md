@@ -12,6 +12,8 @@ New:
   that is not its name.
 - `[acquisition.file]` takes a file per system and architecture, such as `linux-aarch64`, which is
   tried before the file for the system.
+- `{empty-file}` in `same-work` stands for the path of an empty file, for a counter whose only way
+  to skip its configuration is a flag that takes a file.
 
 Other:
 
@@ -28,6 +30,8 @@ Other:
   1.x. A result that cannot be read is reported with its command and the JSON path that failed.
 - `check` now fails when hyperfine's export cannot be read.
 - mezura is declared at 3.4.0.
+- With the same work, cloc runs with `--config` pointed at an empty file, so an `options.txt` on
+  the machine no longer changes its counts.
 
 ## 0.3.1, 2026-10-29
 

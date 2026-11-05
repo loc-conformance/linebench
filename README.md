@@ -739,7 +739,7 @@ blanks   = "Blank"
 | `languages` | carries `{extensions}`, or `{names}` for a counter that spells languages by name |
 | `[language-names]` | that counter's name for each extension, matched whatever the case |
 | `extension-case` | `exact` for a counter that matches case, so `{extensions}` is spelled `s,S`; the default is `any` |
-| `same-work` | what the same-work table adds |
+| `same-work` | what the same-work table adds, with `{empty-file}` expanded to the path of an empty file for a configuration flag that takes one |
 | `same-work-note` | what the results page prints for it |
 | `env` | variables set in `[run]` for every invocation, with `{instance-dir}` expanded to a directory of that instance's own |
 | `volatile` | the fields of the JSON that differ between two runs, in the `[read]` path syntax, so `--expect-identical` can set them aside |
