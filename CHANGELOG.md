@@ -27,6 +27,7 @@ Other:
 - `run`, `noise`, `insights`, and `verify` read the exports of hyperfine 2.0 as well as those of
   1.x. A result that cannot be read is reported with its command and the JSON path that failed.
 - `check` now fails when hyperfine's export cannot be read.
+- mezura is declared at 3.4.0.
 
 ## 0.3.1, 2026-10-29
 
