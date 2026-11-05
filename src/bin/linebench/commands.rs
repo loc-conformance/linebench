@@ -62,9 +62,9 @@ use linebench::machine::{
     sample_background_busy,
 };
 use linebench::measure::{
-    Instance, Runner, Settings, Style, Table, TimedCommand, build_args, build_command,
-    capture_json_outputs, capture_plain_output, describe_env, get_capture_name, join_command,
-    run_phases, strip_ansi,
+    HyperfineResult, Instance, Runner, Settings, Style, Table, TimedCommand, build_args,
+    build_command, capture_json_outputs, capture_plain_output, describe_env, get_capture_name,
+    join_command, run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
 use linebench::os::{capture_with_status, is_privileged, pin_current_process, read_core_topology};
@@ -1993,7 +1993,7 @@ fn judge_noise(
         )?,
         _ => print_line(out, "   background    not sampled on this platform")?,
     }
-    let export = time_the_control(
+    let Some(result) = time_the_control(
         out,
         locations,
         instances,
@@ -2001,15 +2001,12 @@ fn judge_noise(
         platform,
         scratch.get_path(),
         settings,
-    )?;
-    let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
-        print_line(out, "   workload      hyperfine failed")?;
+    )?
+    else {
+        print_line(out, "   workload      not timed")?;
         return Ok(None);
     };
-    let times: Vec<f64> = result["times"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_f64).collect())
-        .unwrap_or_default();
+    let times = result.times;
     if times.len() < 2 {
         print_line(out, "   workload      hyperfine gave too few runs")?;
         return Ok(None);
@@ -2024,8 +2021,8 @@ fn judge_noise(
     } else {
         0.0
     };
-    let mean = result["mean"].as_f64().unwrap_or(0.0);
-    let cpu = result["user"].as_f64().unwrap_or(0.0) + result["system"].as_f64().unwrap_or(0.0);
+    let mean = result.mean;
+    let cpu = result.user.unwrap_or(0.0) + result.system.unwrap_or(0.0);
     let reached = if mean > 0.0 {
         (cpu / mean * 10.0).round() / 10.0
     } else {
@@ -2973,17 +2970,21 @@ fn check_everything(
         Table::OutOfTheBox,
     )?;
     let failures_before = runner.failures.len();
-    runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
-    if runner.failures.len() > failures_before {
+    let timed = runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
+    let version = match capture_with_status("hyperfine", &["--version"]) {
+        Ok((true, printed)) => shorten_version(&printed),
+        _ => String::new(),
+    };
+    if runner.failures.len() > failures_before || timed.is_empty() {
         print_line(
             out,
-            &format!("   hyperfine   {}", paint(Color::Red, "FAILED")),
+            &format!("   hyperfine   {}   {version}", paint(Color::Red, "FAILED")),
         )?;
         bad.push("hyperfine".to_string());
     } else {
         print_line(
             out,
-            &format!("   hyperfine   {}", paint(Color::Green, "ok")),
+            &format!("   hyperfine   {}   {version}", paint(Color::Green, "ok")),
         )?;
     }
     match capture_with_status("git", &["--version"]) {
@@ -3091,7 +3092,7 @@ fn time_the_control(
     platform: Platform,
     scratch: &Path,
     settings: Settings,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<HyperfineResult>, String> {
     let mut runner = Runner::new(
         scratch,
         settings,
@@ -3105,10 +3106,10 @@ fn time_the_control(
         &locations.corpus.extensions,
         Table::OutOfTheBox,
     )?;
-    runner.run_hyperfine(out, "noise", std::slice::from_ref(&bare))?;
-    Ok(fs::read_to_string(scratch.join("noise.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
+    Ok(runner
+        .run_hyperfine(out, "noise", std::slice::from_ref(&bare))?
+        .into_iter()
+        .next())
 }
 
 fn build_corpus_record(locations: &Locations) -> CorpusRecord {

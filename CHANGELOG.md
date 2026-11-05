@@ -20,6 +20,9 @@ Other:
   processes in `pages given` and `from disk`.
 - A counter is asked its version with the environment it runs with, so naming a mezura build no
   longer rewrites your own mezura data directory.
+- `run`, `noise`, `insights`, and `verify` read the exports of hyperfine 2.0 as well as those of
+  1.x. A result that cannot be read is reported with its command and the JSON path that failed.
+- `check` now fails when hyperfine's export cannot be read.
 
 ## 0.3.1, 2026-10-29
 

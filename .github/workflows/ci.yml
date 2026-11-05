@@ -15,12 +15,17 @@ concurrency:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, hyperfine ${{ matrix.hyperfine }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        hyperfine: [latest]
+        # 1.21.0 is the last 1.x, so check keeps reading back the export format from before 2.0
+        include:
+          - os: ubuntu-latest
+            hyperfine: 1.21.0
 
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +48,7 @@ jobs:
       - name: Install hyperfine
         uses: taiki-e/install-action@v2
         with:
-          tool: hyperfine
+          tool: hyperfine@${{ matrix.hyperfine }}
 
       - name: Test
         run: cargo test --all-features --verbose
