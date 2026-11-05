@@ -832,14 +832,11 @@ pub fn run_insights(
     print_how_the_counters_were_chosen(out, &chosen)?;
     let instances = chosen.instances;
     let privileged = is_privileged(platform);
-    let defender = read_defender_state(
-        platform,
-        privileged,
-        &collect_binaries(&instances, platform)?,
-    );
+    let binaries = collect_binaries(&instances, platform);
+    let defender = read_defender_state(platform, privileged, &binaries);
     let unequal = match find_unequal_exclusions(&defender) {
         Some(unequal) if !options.allow_unequal => {
-            return Err(explain_unequal_exclusions(&unequal));
+            return Err(explain_unequal_exclusions(&unequal, &binaries));
         }
         Some(unequal) => {
             print_warning(
@@ -2285,13 +2282,13 @@ fn check_the_corpus_is_ready(
     check_declares_files(&locations.corpus)?;
     let chosen = build_instances(definitions, locations, options, platform)?;
     check_identical_pairs(&options.expect_identical, &chosen.instances)?;
-    let binaries = collect_binaries(&chosen.instances, platform)?;
+    let binaries = collect_binaries(&chosen.instances, platform);
     let defender = read_defender_state(platform, privileged, &binaries);
     let unequal = find_unequal_exclusions(&defender);
     if let Some(unequal) = &unequal
         && !options.allow_unequal
     {
-        return Err(explain_unequal_exclusions(unequal));
+        return Err(explain_unequal_exclusions(unequal, &binaries));
     }
     Ok(Ready {
         chosen,
@@ -3007,7 +3004,7 @@ fn check_everything(
     let state = read_defender_state(
         platform,
         is_privileged(platform),
-        &collect_binaries(instances, platform)?,
+        &collect_binaries(instances, platform),
     );
     if platform == Platform::Windows {
         match find_unequal_exclusions(&state) {
@@ -3675,18 +3672,14 @@ fn collect_scrub(instances: &[Instance]) -> Vec<String> {
     scrub
 }
 
-fn collect_binaries(
-    instances: &[Instance],
-    platform: Platform,
-) -> Result<Vec<CounterBinary>, String> {
+fn collect_binaries(instances: &[Instance], platform: Platform) -> Vec<CounterBinary> {
+    let (system, arch) = (platform.as_system(), detect_arch());
     instances
         .iter()
-        .map(|i| {
-            Ok(CounterBinary {
-                name: i.get_name().to_string(),
-                path: i.identity.binary.clone(),
-                process: i.definition.get_process_name(platform.as_system())?,
-            })
+        .map(|i| CounterBinary {
+            name: i.get_name().to_string(),
+            path: i.identity.binary.clone(),
+            process: i.definition.get_process_name(system, &arch),
         })
         .collect()
 }
@@ -3763,10 +3756,11 @@ fn describe_binary(
     dir: &Path,
     platform: Platform,
 ) -> String {
-    let Ok(named) = definition.get_binary_name(platform.as_system()) else {
+    let (system, arch) = (platform.as_system(), detect_arch());
+    if definition.lacks_a_release_file_for(system, &arch) {
         return paint(Color::Grey, "nothing is published for this system").to_string();
-    };
-    let binary = dir.join(named);
+    }
+    let binary = dir.join(definition.get_binary_name(system, &arch));
     let name = &definition.name;
     if !binary.is_file() {
         let said = match definition.acquisition.is_some() {
@@ -4645,7 +4639,7 @@ mod tests {
             .find(|definition| definition.name == "scc")
             .unwrap();
         let platform = Platform::Windows;
-        let binary = dir.join(definition.get_binary_name(platform.as_system()).unwrap());
+        let binary = dir.join(definition.get_binary_name(platform.as_system(), "x86_64"));
         fs::write(&binary, b"a build").unwrap();
         let mut manifest = Manifest(BTreeMap::new());
         let fetched = Fetched {

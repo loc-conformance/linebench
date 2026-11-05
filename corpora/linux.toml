@@ -21,10 +21,10 @@ tolerance  = "1%"
 # A filesystem that tells case apart holds all of them.
 #
 # Two counters still land apart, diffed file by file on 2026-09-09. tokei adds 55 files that carry
-# no extension, which it knows by their #! line, and it has no flag to stop. The other three hold
-# to the extensions, mezura through --no-shebang. tokei keeps its 55 because it is also the only
-# one with no content identification, so they stand against work it never does. cloc ends 26 lower
-# over files of zero bytes, which it always skips.
+# no extension, which it knows by their #! line, and it has no flag to stop. cloc, mezura and scc
+# hold to the extensions, mezura through --no-shebang. tokei keeps its 55 because it is also the
+# only one with no content identification, so they stand against work it never does. cloc ends 26
+# lower over files of zero bytes, which it always skips.
 #
 # asm and pm are named because mezura's Assembly owns .s and .asm together and its Perl owns .pl
 # and .pm, so asking for s and pl brought 14 files the extension filtered counters never saw.

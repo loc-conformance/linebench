@@ -17,6 +17,7 @@ pub const INSTANCE_DATA_DIR: &str = "data";
 const VERSION: &str = "{version}";
 const OTHER_SYSTEM: &str = "other";
 const RELEASE_FILE_SYSTEMS: [&str; 4] = ["windows", "linux", "macos", "other"];
+const RELEASE_FILE_ARCHS: [&str; 2] = ["x86_64", "aarch64"];
 const DEFINITION_SUFFIX: &str = "toml";
 const DEFAULT_VERSION_FLAG: &str = "--version";
 const EXE_SUFFIX: &str = ".exe";
@@ -101,6 +102,8 @@ impl Run {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Definition {
     pub name: String,
+    #[serde(rename = "binary-name")]
+    pub name_of_binary: Option<String>,
     #[serde(skip)]
     pub path: PathBuf,
     #[serde(skip)]
@@ -179,16 +182,12 @@ impl Definition {
             .collect())
     }
 
-    pub fn get_binary_name(&self, system: &str) -> Result<String, String> {
-        let released = if self
-            .acquisition
-            .as_ref()
-            .is_some_and(|how| !how.file.is_empty())
-        {
-            Some(self.get_release_file_name(system)?)
-        } else {
-            None
-        };
+    pub fn get_binary_stem(&self) -> &str {
+        self.name_of_binary.as_deref().unwrap_or(&self.name)
+    }
+
+    pub fn get_binary_name(&self, system: &str, arch: &str) -> String {
+        let released = self.get_release_file_name(system, arch).ok();
         let extension = released
             .as_deref()
             .and_then(|released| Path::new(released).extension())
@@ -202,7 +201,7 @@ impl Definition {
                     String::new()
                 }
             });
-        Ok(format!("{}{extension}", self.name))
+        format!("{}{extension}", self.get_binary_stem())
     }
 
     pub fn find_language_name(&self, extension: &str) -> Option<&str> {
@@ -212,22 +211,27 @@ impl Definition {
             .map(|(_, name)| name.as_str())
     }
 
-    pub fn get_release_file_name(&self, system: &str) -> Result<String, String> {
+    pub fn get_release_file_name(&self, system: &str, arch: &str) -> Result<String, String> {
         let Some(acquisition) = self.acquisition.as_ref().filter(|how| !how.file.is_empty()) else {
             return Err(format!(
                 "{}: has no [acquisition.file] table, so no release file is named",
                 self.path.display()
             ));
         };
+        let arch = match arch {
+            "arm64" => "aarch64",
+            other => other,
+        };
         let named = acquisition
             .file
-            .get(system)
+            .get(&format!("{system}-{arch}"))
+            .or_else(|| acquisition.file.get(system))
             .or_else(|| acquisition.file.get(OTHER_SYSTEM))
             .ok_or_else(|| {
                 let keys: Vec<&str> = acquisition.file.keys().map(String::as_str).collect();
                 format!(
-                    "{}: [acquisition.file] names no release file for {system}, only for {}; \
-                     add {system} or other",
+                    "{}: [acquisition.file] names no release file for {system} on {arch}, only \
+                     for {}; add {system}-{arch}, {system} or other",
                     self.path.display(),
                     keys.join(", ")
                 )
@@ -235,12 +239,19 @@ impl Definition {
         Ok(named.replace(VERSION, &acquisition.version))
     }
 
-    pub fn get_process_name(&self, system: &str) -> Result<String, String> {
-        let binary = self.get_binary_name(system)?;
-        Ok(Path::new(&binary)
+    pub fn lacks_a_release_file_for(&self, system: &str, arch: &str) -> bool {
+        self.acquisition
+            .as_ref()
+            .is_some_and(|how| !how.file.is_empty())
+            && self.get_release_file_name(system, arch).is_err()
+    }
+
+    pub fn get_process_name(&self, system: &str, arch: &str) -> String {
+        let binary = self.get_binary_name(system, arch);
+        Path::new(&binary)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or(binary))
+            .unwrap_or(binary)
     }
 
     pub fn build_execution_env(
@@ -302,6 +313,19 @@ fn check_definition(definition: &Definition, counter: &str) -> Result<(), String
             "{at}name = \"{}\" and this is meant to be {counter}; the two have to agree",
             definition.name
         ));
+    }
+    if let Some(named) = &definition.name_of_binary {
+        let file = Path::new(named);
+        let is_plain = file.file_name().and_then(|name| name.to_str()) == Some(named.as_str());
+        let is_exe = file
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+        if !is_plain || is_exe {
+            return Err(format!(
+                "{at}binary-name = \"{named}\" has to be the plain file name of the command, \
+                 without .exe"
+            ));
+        }
     }
     match (&definition.output, &definition.read) {
         (Some(_), Some(_)) => {
@@ -415,16 +439,26 @@ fn check_acquisition(at: &str, acquisition: &Acquisition) -> Result<(), String> 
             "{at}an [acquisition.file] table belongs to github-release-file, and this is not"
         ));
     }
-    for system in acquisition.file.keys() {
-        if !RELEASE_FILE_SYSTEMS.contains(&system.as_str()) {
+    for key in acquisition.file.keys() {
+        if !is_a_release_file_key(key) {
             return Err(format!(
-                "{at}[acquisition.file] {system} is not a system a release file can be named \
-                 for; it knows {}",
-                RELEASE_FILE_SYSTEMS.join(", ")
+                "{at}[acquisition.file] {key} is not a system a release file can be named for; it \
+                 knows {}, and a system with -{} after it",
+                RELEASE_FILE_SYSTEMS.join(", "),
+                RELEASE_FILE_ARCHS.join(" or -")
             ));
         }
     }
     Ok(())
+}
+
+fn is_a_release_file_key(key: &str) -> bool {
+    RELEASE_FILE_SYSTEMS.contains(&key)
+        || key.split_once('-').is_some_and(|(system, arch)| {
+            system != OTHER_SYSTEM
+                && RELEASE_FILE_SYSTEMS.contains(&system)
+                && RELEASE_FILE_ARCHS.contains(&arch)
+        })
 }
 
 fn get_default_version_flag() -> String {
@@ -433,10 +467,13 @@ fn get_default_version_flag() -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::corpus::read_corpora;
+
     use super::*;
 
     const SHIPPED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/counters");
-    const LINUX: [&str; 7] = ["c", "h", "s", "py", "pl", "rs", "sh"];
+    const SHIPPED_CORPORA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/corpora");
+    const X86: &str = "x86_64";
 
     const SCC: &str = r#"
 name         = "scc"
@@ -485,20 +522,23 @@ h = "C Header"
 "#;
 
     #[test]
-    fn every_shipped_definition_parses_and_spells_the_linux_corpus() {
+    fn every_shipped_definition_parses_and_spells_every_shipped_corpus() {
         let found = read_definitions(Path::new(SHIPPED)).expect("the shipped definitions");
-        let names: Vec<&str> = found.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, ["cloc", "mezura", "scc", "tokei"]);
+        let corpora = read_corpora(Path::new(SHIPPED_CORPORA)).expect("the shipped corpora");
+        assert!(!found.is_empty() && !corpora.is_empty());
         for definition in &found {
-            let spelled = definition
-                .spell_languages(&build_strings(&LINUX))
-                .expect(&definition.name);
-            assert!(!spelled.is_empty(), "{}", definition.name);
-            assert!(
-                spelled.iter().all(|part| !part.contains('{')),
-                "{}: {spelled:?}",
-                definition.name
-            );
+            for corpus in &corpora {
+                let spelled = definition
+                    .spell_languages(&corpus.extensions)
+                    .unwrap_or_else(|error| panic!("{}: {error}", corpus.name));
+                assert!(!spelled.is_empty(), "{} {}", definition.name, corpus.name);
+                assert!(
+                    spelled.iter().all(|part| !part.contains('{')),
+                    "{} {}: {spelled:?}",
+                    definition.name,
+                    corpus.name
+                );
+            }
         }
     }
 
@@ -727,9 +767,9 @@ extension-case = "exact""#,
     #[test]
     fn the_binary_and_the_process_are_named_per_system() {
         let scc = parse(SCC, "scc").unwrap();
-        assert_eq!(scc.get_binary_name("windows").unwrap(), "scc.exe");
-        assert_eq!(scc.get_binary_name("linux").unwrap(), "scc");
-        assert_eq!(scc.get_process_name("windows").unwrap(), "scc.exe");
+        assert_eq!(scc.get_binary_name("windows", X86), "scc.exe");
+        assert_eq!(scc.get_binary_name("linux", X86), "scc");
+        assert_eq!(scc.get_process_name("windows", X86), "scc.exe");
 
         let release_file = SCC
             .replace("github-release-asset", "github-release-file")
@@ -740,12 +780,12 @@ extension-case = "exact""#,
             );
         let cloc_like = parse(&release_file, "scc").unwrap();
         assert_eq!(
-            cloc_like.get_release_file_name("windows").unwrap(),
+            cloc_like.get_release_file_name("windows", X86).unwrap(),
             "scc-4.0.0.exe"
         );
-        assert_eq!(cloc_like.get_binary_name("windows").unwrap(), "scc.exe");
-        assert_eq!(cloc_like.get_binary_name("macos").unwrap(), "scc.pl");
-        assert!(scc.get_release_file_name("windows").is_err());
+        assert_eq!(cloc_like.get_binary_name("windows", X86), "scc.exe");
+        assert_eq!(cloc_like.get_binary_name("macos", X86), "scc.pl");
+        assert!(scc.get_release_file_name("windows", X86).is_err());
         for bare in ["scc-{version}", "scc-{version}-linux"] {
             let unsuffixed = parse(
                 &release_file
@@ -760,8 +800,8 @@ extension-case = "exact""#,
                 "scc",
             )
             .unwrap();
-            assert_eq!(unsuffixed.get_binary_name("linux").unwrap(), "scc");
-            assert_eq!(unsuffixed.get_binary_name("windows").unwrap(), "scc.exe");
+            assert_eq!(unsuffixed.get_binary_name("linux", X86), "scc");
+            assert_eq!(unsuffixed.get_binary_name("windows", X86), "scc.exe");
         }
 
         let windows_only = parse(&release_file.replace("other = ", "windows2 = "), "scc");
@@ -771,12 +811,67 @@ extension-case = "exact""#,
             "scc",
         )
         .unwrap();
-        let refusal = windows_only.get_binary_name("linux").unwrap_err();
+        let refusal = windows_only
+            .get_release_file_name("linux", X86)
+            .unwrap_err();
         assert!(
-            refusal.contains("names no release file for linux, only for windows"),
+            refusal.contains("names no release file for linux on x86_64, only for windows"),
             "{refusal}"
         );
-        assert_eq!(cloc_like.get_process_name("macos").unwrap(), "scc.pl");
+        assert!(windows_only.lacks_a_release_file_for("linux", X86));
+        assert!(!windows_only.lacks_a_release_file_for("windows", X86));
+        assert!(!scc.lacks_a_release_file_for("linux", X86));
+        assert_eq!(windows_only.get_binary_name("linux", X86), "scc");
+        assert_eq!(cloc_like.get_process_name("macos", X86), "scc.pl");
+    }
+
+    #[test]
+    fn a_release_file_for_the_architecture_comes_before_the_one_for_the_system() {
+        let per_arch = SCC
+            .replace("github-release-asset", "github-release-file")
+            .replace(
+                "version = \"4.0.0\"",
+                "version = \"4.0.0\"\n[acquisition.file]\nwindows = \"w.exe\"\n\
+             windows-aarch64 = \"w-arm.exe\"\nlinux-x86_64 = \"l-x86\"\n\
+             linux-aarch64 = \"l-arm\"\nother = \"o.pl\"",
+            );
+        let definition = parse(&per_arch, "scc").unwrap();
+        for (system, arch, wanted) in [
+            ("windows", X86, "w.exe"),
+            ("windows", "aarch64", "w-arm.exe"),
+            ("windows", "arm64", "w-arm.exe"),
+            ("linux", "aarch64", "l-arm"),
+            ("macos", X86, "o.pl"),
+        ] {
+            assert_eq!(
+                definition.get_release_file_name(system, arch).unwrap(),
+                wanted,
+                "{system} on {arch}"
+            );
+        }
+        assert_eq!(definition.get_binary_name("linux", X86), "scc");
+        assert_eq!(definition.get_binary_name("macos", "arm64"), "scc.pl");
+        for unknown in ["linux-i686", "other-aarch64", "aarch64"] {
+            let refused = parse(&per_arch.replace("linux-x86_64", unknown), "scc").unwrap_err();
+            assert!(refused.contains("-x86_64 or -aarch64"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_binary_name_names_the_stored_file_and_the_counter_keeps_its_name() {
+        let renamed = SCC.replace(
+            "name         = \"scc\"\n",
+            "name         = \"scc\"\nbinary-name  = \"sc\"\n",
+        );
+        let scc = parse(&renamed, "scc").unwrap();
+        assert_eq!(scc.name, "scc");
+        assert_eq!(scc.get_binary_name("windows", X86), "sc.exe");
+        assert_eq!(scc.get_process_name("windows", X86), "sc.exe");
+        for crooked in ["../sc", "bin/sc", "", "sc.exe", "sc.EXE"] {
+            let refused =
+                parse(&renamed.replace("\"sc\"", &format!("\"{crooked}\"")), "scc").unwrap_err();
+            assert!(refused.contains("plain file name"), "{refused}");
+        }
     }
 
     #[test]

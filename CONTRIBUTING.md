@@ -3,9 +3,9 @@
 ## Adding a counter
 
 A counter is one file, `counters/<name>.toml`. Its keys mirror the linejudge adapter where the
-idea is the same (`name`, `repository`, `version-flag`, `[acquisition]`, the `[read]` paths), so
-a block copies between the two files unchanged. The README's "Counters and corpora" section
-shows a whole one and says what every key does. Before opening a pull request:
+idea is the same (`name`, `binary-name`, `repository`, `version-flag`, `[acquisition]`, the
+`[read]` paths), so a block copies between the two files unchanged. The README's "Counters and corpora"
+section shows a whole one and says what every key does. Before opening a pull request:
 
 ```
 cargo test --all-features
@@ -29,14 +29,15 @@ handling and tokei's nested languages were caught.
   `cloc-2.10.pl` elsewhere, so it is its own process everywhere. A counter that is only a script
   needs a per-system interpreter table in `[run]`, and the process name the antivirus sees would
   come from the interpreter. It is written the day such a counter exists.
-- **`[acquisition.file]` is keyed only by system**: `windows`, `linux`, `macos`, `other`. A
-  release that publishes named files per architecture cannot be declared yet. The
-  `github-release-asset` channel already picks by system and architecture words, and the file
-  channel would take the same keys.
-- **The fetched file is stored under the counter's own name** plus the release file's extension,
+- **A release that publishes one file per architecture needs a key per architecture.**
+  `[acquisition.file]` takes `windows`, `linux`, `macos`, `other`, and a system with `-x86_64` or
+  `-aarch64` after it, which is tried first. Keyed by system alone, an arm64 machine is handed the
+  x86_64 file.
+- **The fetched file is stored under `binary-name`** plus the release file's extension,
   `cloc.exe` and `cloc.pl`, whatever the release calls it. Windows Defender matches process
-  exclusions by image name, so the name has to survive a version bump. The release file's name
-  still goes into `linebench-fetched.toml` as the source.
+  exclusions by image name, so the name has to survive a version bump. `binary-name` defaults to
+  `name`, and a counter whose command is not its name sets it to the command. The release file's
+  name still goes into `linebench-fetched.toml` as the source.
 - **A counter that matches an extension by its exact case says `extension-case = "exact"`.**
   Measured on the kernel: cloc on Linux given `--include-ext=s` skipped all 1,350 `.S` files,
   and on Windows given `S` it matched nothing, so the harness spells both cases, `s,S`.
@@ -57,7 +58,7 @@ handling and tokei's nested languages were caught.
   `--given` as the way around it.
 - **`same-work` is the counter's own claim, and the equal work check is what tests it.** A
   definition that turns off less than it should, or selects fewer files, comes out over or under
-  the corpus and the run is marked. Look at the four shipped definitions for what "the same
+  the corpus and the run is marked. Look at the shipped definitions for what "the same
   work" means: the corpus's languages, no ignore file read by anyone, and everything beyond
   counting off.
 - **Counters disagree about directories whose name starts with a dot.** Measured on a tree of
@@ -78,9 +79,9 @@ A corpus is `corpora/<name>.toml`: `name`, `remote`, `commit`, `files`, `extensi
 `tolerance`. The commit is the full 40-character hash in lower case, as `git rev-parse` prints
 it. An abbreviated one cannot be fetched with `--depth 1` and is refused. The extensions are
 spelled once, in whatever case, and each counter spells them its own way. A counter that spells
-languages by name, only tokei today, needs every extension in its `[language-names]` table,
-and the shipped one covers the extensions the shipped corpora name. An extension missing from
-it stops the run before anything is measured, naming the extension and the file to add it to.
+languages by name, as tokei does, needs every extension in its `[language-names]` table, and
+each shipped table covers the extensions the shipped corpora name. An extension missing from
+the table stops the run before anything is measured, naming the extension and the file to add it to.
 `files` is the number of files carrying them at that commit, required beside a commit: run
 `check` on the checkout, read what the counters answer, and write the number you trust. The
 tolerance belongs to the corpus because how many odd files a tree holds is a property of the

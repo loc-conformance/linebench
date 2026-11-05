@@ -18,8 +18,8 @@ The shape of the answer over a tree the size of the Linux kernel, names left out
 rounded. The runs worth reading are the ones each counter publishes in its own repository.
 
 The counters are data, one `counters/<name>.toml` each, and linebench never builds one: it
-fetches the release, hashes it, and writes the hash into the record. Today it knows cloc,
-mezura, scc and tokei.
+fetches the release, hashes it, and writes the hash into the record. `linebench --help` names
+the ones it ships.
 
 ## Contents
 
@@ -83,11 +83,11 @@ linebench noise cpython
 sudo linebench run cpython
 ```
 
-The first line downloads the four counters and clones one of the shipped corpora at its pinned
+The first line downloads every counter and clones one of the shipped corpora at its pinned
 commit.  
 The second says what arrived and where.  
-The third proves the machine can measure: every counter runs once and its counts are checked
-against the corpus.  
+The third runs each counter the corpus does not skip once, and checks its counts against the
+corpus.  
 The fourth measures the noise: the background cpu, the spread of a few runs, and whether the
 machine is steady enough to benchmark.  
 The fifth measures, elevated so the power scheme can be set for it.
@@ -162,7 +162,7 @@ fetches those and status is the only place that says they exist.
 
 ```
 linebench check linux
-linebench check cpython --counters cloc,mezura,scc,tokei
+linebench check cpython --counters cloc,scc
 linebench check linux,cpython
 linebench check all
 ```
@@ -256,7 +256,7 @@ The control is the instance timed alone at the start and at the end. Its shift i
 machine's own movement, and it is also what `noise` times. `control = "mezura"` in the conf names
 it for every run on the machine, `--control` for one run, and with neither it is the first
 instance named, which with no `--counters` is the first definition alphabetically that the corpus
-does not skip, today mezura. Keep the control the same across the runs you want compared: "since
+does not skip. Keep the control the same across the runs you want compared: "since
 the last run" reads every change against the control's own shift, and that shift is known only
 when an earlier run timed the same control build.
 
@@ -700,8 +700,8 @@ With no target named, a command that needs one refuses and prints the two forms 
 ## Counters and corpora
 
 A counter is `counters/<name>.toml`. Its keys mirror the linejudge adapter where the idea is the
-same (`name`, `repository`, `version-flag`, `[acquisition]`, the `[read]` paths), so a block copies
-between the two files unchanged:
+same (`name`, `binary-name`, `repository`, `version-flag`, `[acquisition]`, the `[read]` paths), so
+a block copies between the two files unchanged:
 
 ```toml
 name         = "scc"
@@ -733,6 +733,7 @@ blanks   = "Blank"
 
 | key | what it says |
 |---|---|
+| `binary-name` | the file name the counter's command is stored and run under, without the extension; the default is `name` |
 | `args` | the command that gets timed, with `{target}` where the directory goes |
 | `json` | appended only for the capture that reads the counts |
 | `languages` | carries `{extensions}`, or `{names}` for a counter that spells languages by name |
@@ -746,19 +747,20 @@ blanks   = "Blank"
 | `[read]` | where the counts sit in the counter's own JSON |
 | `output` | a compiled reader for JSON the paths cannot reach, `tokei-json` today, in place of `[read]` |
 
-The shipped `[language-names]` covers the extensions the shipped corpora name, and a corpus of
-your own carrying another extension adds a line for it. Every bucket in `[read]` beyond code and
-comments is read by name, so one block covers a counter that prints `blanks` in one mode and
-`extra` in another, and the buckets have to add up to `lines`.
+Each shipped `[language-names]` table covers the extensions the shipped corpora name, and a
+corpus added with `--add` that carries another extension needs a line for it. Every bucket in
+`[read]` beyond code and comments is read by name, so one block covers a counter that prints
+`blanks` in one mode and `extra` in another, and the buckets have to add up to `lines`.
 
 The channels are `github-release-asset` (the file for this system and architecture is picked by the
 words in its name, and the published checksums are checked), `github-release-file` (a file named
-outright per system, `[acquisition.file]`, stored under the counter's own name plus the release
-file's extension, so the process the antivirus sees stays `cloc.exe` across versions), and
-`crates-io` (built with cargo, and the rustc that built it goes into the record). A counter that
-ships as a script runs through its own first line once fetch has marked it runnable, and needs its
-interpreter on the machine, or `check` says so. A counter that is a script on Windows is the one
-case this format does not cover yet.
+outright per system, `[acquisition.file]`, stored under `binary-name` plus the release file's
+extension, so the process the antivirus sees stays `cloc.exe` across versions), and `crates-io`
+(built with cargo, and the rustc that built it goes into the record). `[acquisition.file]` also
+takes a system and an architecture, `windows-aarch64`, which comes before the system alone. A
+counter that ships as a script runs through its own first line once fetch has marked it runnable,
+and needs its interpreter on the machine, or `check` says so. A counter that is a script on
+Windows is the one case this format does not cover yet.
 
 A corpus is `corpora/<name>.toml`:
 
@@ -783,7 +785,7 @@ files carrying those extensions in the tree of that commit, `git ls-tree -r HEAD
 index, working tree or gitignore can move: `check` over a definition with a `commit` and no `files`
 counts them and prints the line to paste, and `run` refuses until it is there. `[skip]` names, per
 system, the counters left out of the default set over this corpus, with WSL counting as linux: cloc
-takes far longer over these trees than the other three, about 90 s per run over the kernel, so a
+takes far longer over these trees than the other counters, about 90 s per run over the kernel, so a
 plain `run` would be mostly it. All three shipped corpora leave it out on every system, and a
 name in `--counters` runs it anyway. Leave `commit` blank to measure a tree as it stands.
 `remote` is needed only to fetch.
@@ -798,7 +800,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-CI runs the three on Linux, Windows and macOS, then fetches the four counters and the cpython
+CI runs the three on Linux, Windows and macOS, then fetches every counter and the cpython
 corpus and runs `check` over it, so a definition that cannot be fetched, run or read on one of the
 three systems fails the build. No timing is read there.
 

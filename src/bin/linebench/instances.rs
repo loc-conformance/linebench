@@ -7,7 +7,7 @@ use linebench::counters::INSTANCE_DATA_DIR;
 use linebench::counters::{Definition, read_definition_for};
 use linebench::fetch::INSTANCE_SEPARATOR;
 use linebench::fetch::{identify_counter, read_manifest, stage_given};
-use linebench::machine::Platform;
+use linebench::machine::{Platform, detect_arch};
 use linebench::measure::Instance;
 
 use crate::config::{Locations, Options};
@@ -56,7 +56,7 @@ pub fn build_instances(
                 platform,
                 corpus,
                 &locations.skip,
-            )?;
+            );
             left_out = reasons;
             let given_names: Vec<String> =
                 match locations.given_order.len() == locations.given.len() {
@@ -228,12 +228,20 @@ fn choose_set_up(
     platform: Platform,
     corpus: &Corpus,
     conf_skip: &[String],
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> (Vec<String>, Vec<String>) {
     let system = platform.as_system();
+    let arch = detect_arch();
     let mut set_up = Vec::new();
     let mut left_out = Vec::new();
     for definition in definitions {
-        let binary = counters_dir.join(definition.get_binary_name(system)?);
+        if definition.lacks_a_release_file_for(system, &arch) {
+            left_out.push(format!(
+                "{}: nothing is published for {system} on {arch}",
+                definition.name
+            ));
+            continue;
+        }
+        let binary = counters_dir.join(definition.get_binary_name(system, &arch));
         let could_run = binary.is_file() || definition.acquisition.is_some();
         if could_run && conf_skip.contains(&definition.name) {
             left_out.push(format!("{}: linebench.conf leaves it out", definition.name));
@@ -251,7 +259,7 @@ fn choose_set_up(
             ));
         }
     }
-    Ok((set_up, left_out))
+    (set_up, left_out)
 }
 
 fn find_definition(definitions: &[Definition], counter: &str) -> Result<Definition, String> {
@@ -281,7 +289,7 @@ mod tests {
     use std::fs;
 
     use linebench::corpus::parse_corpus;
-    use linebench::counters::{parse_definition, read_definitions};
+    use linebench::counters::parse_definition;
 
     use super::*;
 
@@ -299,71 +307,98 @@ code     = \"code\"
 comments = \"comments\"
 blanks   = \"blanks\"
 ";
+    const RELEASE_ASSET: &str = "channel = \"github-release-asset\"\n";
+    const RELEASE_FILE_FOR_LINUX: &str =
+        "channel = \"github-release-file\"\n[acquisition.file]\nlinux = \"delta\"\n";
 
     #[test]
     fn the_default_set_is_what_setup_fetched_and_a_release_that_was_not_is_named_as_left_out() {
         let dir = env::temp_dir().join("linebench-the_default_set_is_what_setup_fetched");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("scc.exe"), "").unwrap();
-        let mut definitions =
-            read_definitions(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/counters"))).unwrap();
-        definitions.push(parse_definition(GIVEN_ONLY, Path::new("mine.toml")).unwrap());
+        fs::write(dir.join("beta.exe"), "").unwrap();
+        let definitions = [
+            build_released("alpha", RELEASE_ASSET),
+            build_released("beta", RELEASE_ASSET),
+            build_released("gamma", RELEASE_ASSET),
+            parse_definition(GIVEN_ONLY, Path::new("mine.toml")).unwrap(),
+        ];
         let plain =
             parse_corpus("name = \"t\"\nextensions = [\"c\"]\n", Path::new("t.toml")).unwrap();
-        let (set_up, left_out) =
-            choose_set_up(&definitions, &dir, Platform::Windows, &plain, &[]).unwrap();
-        assert_eq!(set_up, ["scc"]);
+        let (set_up, left_out) = choose_set_up(&definitions, &dir, Platform::Windows, &plain, &[]);
+        assert_eq!(set_up, ["beta"]);
         assert_eq!(
             left_out,
             [
-                "cloc: it is not set up on this machine",
-                "mezura: it is not set up on this machine",
-                "tokei: it is not set up on this machine"
+                "alpha: it is not set up on this machine",
+                "gamma: it is not set up on this machine"
             ]
         );
         let skipping = parse_corpus(
-            "name = \"t\"\nextensions = [\"c\"]\n[skip]\nwindows = [\"scc\", \"cloc\"]\n",
+            "name = \"t\"\nextensions = [\"c\"]\n[skip]\nwindows = [\"beta\", \"alpha\"]\n",
             Path::new("t.toml"),
         )
         .unwrap();
         let (set_up, left_out) =
-            choose_set_up(&definitions, &dir, Platform::Windows, &skipping, &[]).unwrap();
+            choose_set_up(&definitions, &dir, Platform::Windows, &skipping, &[]);
         assert!(set_up.is_empty());
         assert_eq!(
-            left_out[0],
-            "cloc: the corpus definition leaves it out on windows"
+            left_out,
+            [
+                "alpha: the corpus definition leaves it out on windows",
+                "beta: the corpus definition leaves it out on windows",
+                "gamma: it is not set up on this machine"
+            ]
         );
-        assert_eq!(
-            left_out[2],
-            "scc: the corpus definition leaves it out on windows"
-        );
-        assert!(left_out.iter().all(|entry| !entry.starts_with("mine")));
-        let (_, on_wsl) = choose_set_up(&definitions, &dir, Platform::Wsl, &skipping, &[]).unwrap();
+        let (_, on_wsl) = choose_set_up(&definitions, &dir, Platform::Wsl, &skipping, &[]);
         assert!(
             on_wsl.iter().all(|entry| !entry.contains("leaves it out")),
             "{on_wsl:?}"
         );
-        let by_conf = ["scc".to_string()];
+        let by_conf = ["beta".to_string()];
         let (set_up, left_out) =
-            choose_set_up(&definitions, &dir, Platform::Windows, &plain, &by_conf).unwrap();
+            choose_set_up(&definitions, &dir, Platform::Windows, &plain, &by_conf);
         assert!(set_up.is_empty());
-        assert_eq!(left_out[2], "scc: linebench.conf leaves it out");
+        assert_eq!(
+            left_out,
+            [
+                "alpha: it is not set up on this machine",
+                "beta: linebench.conf leaves it out",
+                "gamma: it is not set up on this machine"
+            ]
+        );
+        let linux_only = [build_released("delta", RELEASE_FILE_FOR_LINUX)];
+        let (set_up, left_out) = choose_set_up(&linux_only, &dir, Platform::Windows, &plain, &[]);
+        assert!(set_up.is_empty());
+        assert_eq!(
+            left_out,
+            [format!(
+                "delta: nothing is published for windows on {}",
+                detect_arch()
+            )]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_plain_name_is_a_given_build_only_for_a_counter_that_has_no_release() {
         let mine = parse_definition(GIVEN_ONLY, Path::new("mine.toml")).unwrap();
-        let scc = read_definitions(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/counters")))
-            .unwrap()
-            .into_iter()
-            .find(|d| d.name == "scc")
-            .unwrap();
+        let released = build_released("beta", RELEASE_ASSET);
         assert_eq!(check_given_name("mine", &mine).unwrap(), None);
         assert_eq!(check_given_name("mine@x", &mine).unwrap(), Some("x"));
-        assert_eq!(check_given_name("scc@dev", &scc).unwrap(), Some("dev"));
-        let refused = check_given_name("scc", &scc).unwrap_err();
-        assert!(refused.contains("scc@<tag>"), "{refused}");
+        assert_eq!(
+            check_given_name("beta@dev", &released).unwrap(),
+            Some("dev")
+        );
+        let refused = check_given_name("beta", &released).unwrap_err();
+        assert!(refused.contains("beta@<tag>"), "{refused}");
+    }
+
+    fn build_released(name: &str, channel: &str) -> Definition {
+        let text = format!(
+            "{}\n[acquisition]\nname    = \"someone/{name}\"\nversion = \"1.0.0\"\n{channel}",
+            GIVEN_ONLY.replace("\"mine\"", &format!("\"{name}\""))
+        );
+        parse_definition(&text, Path::new(&format!("{name}.toml"))).unwrap()
     }
 }

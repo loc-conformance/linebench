@@ -129,8 +129,9 @@ jobs:
             --counters-dir "${{ runner.temp }}/counters" \
             --corpus-path "${{ runner.temp }}/cpython" \
             --counters all --corpus cpython
+          counters=$(ls counters/*.toml | xargs -n1 basename -s .toml | paste -sd, -)
           ./target/release/linebench check cpython \
-            --counters cloc,mezura,scc,tokei \
+            --counters "$counters" \
             --counters-dir "${{ runner.temp }}/counters" \
             --corpus-path "${{ runner.temp }}/cpython" | tee "$RUNNER_TEMP/check.txt"
           read=${PIPESTATUS[0]}

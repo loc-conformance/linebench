@@ -15,7 +15,7 @@ use crate::corpus::shorten_hash;
 use crate::counters::INSTANCE_DATA_DIR;
 use crate::counters::{Acquisition, Channel, Definition};
 use crate::files::read_toml;
-use crate::machine::Platform;
+use crate::machine::{Platform, detect_arch};
 use crate::measure::print_line;
 use crate::os::{Unfinished, capture_with_status, capture_with_status_in_env};
 
@@ -122,7 +122,7 @@ pub fn fetch_counter(
     latest: bool,
 ) -> Result<PathBuf, String> {
     let system = platform.as_system();
-    let named = definition.get_binary_name(system)?;
+    let named = definition.get_binary_name(system, arch);
     let target = dir.join(&named);
     let Some(how) = &definition.acquisition else {
         return Err(format!(
@@ -160,7 +160,7 @@ pub fn fetch_counter(
             out,
             how,
             &partial,
-            &definition.get_release_file_name(system)?,
+            &definition.get_release_file_name(system, arch)?,
         ),
     };
     let (binary, source, built_with) = assembled.inspect_err(|_| {
@@ -214,7 +214,7 @@ pub fn identify_counter(
     manifest: &Manifest,
     execution_env: &BTreeMap<String, String>,
 ) -> Result<Identity, String> {
-    let binary = dir.join(definition.get_binary_name(platform.as_system())?);
+    let binary = dir.join(definition.get_binary_name(platform.as_system(), &detect_arch()));
     if !binary.is_file() {
         let how = match &definition.acquisition {
             Some(how) => format!(
@@ -278,7 +278,7 @@ pub fn stage_given(
     let staged = dir.join(GIVEN_DIR).join(&instance);
     fs::create_dir_all(&staged)
         .map_err(|error| format!("{} could not be created: {error}", staged.display()))?;
-    let binary = staged.join(definition.get_binary_name(platform.as_system())?);
+    let binary = staged.join(definition.get_binary_name(platform.as_system(), &detect_arch()));
     fs::copy(source, &binary).map_err(|error| {
         format!(
             "{} could not be copied to {}: {error}",
@@ -491,14 +491,15 @@ fn build_from_crates_io(
         ),
         Refusal::Refused(message) => message,
     })?;
-    let built = root
-        .join("bin")
-        .join(format!("{}{EXE_SUFFIX}", definition.name));
+    let looked_for = format!("{}{EXE_SUFFIX}", definition.get_binary_stem());
+    let built = root.join("bin").join(&looked_for);
     if !built.is_file() {
         return Err(format!(
-            "cargo built {} {} and no {named} came out of it, so the crate installs its command \
-             under another name",
-            how.name, how.version
+            "cargo built {} {} as {} and no {looked_for} came out of it; set binary-name to the \
+             command, without .exe",
+            how.name,
+            how.version,
+            list_file_names(&root.join("bin")).join(", ")
         ));
     }
     let binary = into.join(named);
@@ -539,7 +540,9 @@ fn download_release_asset(
     })?;
     let _ = fs::remove_file(&archive);
     let binary = find_file_named(named, into).ok_or_else(|| {
-        format!("{downloaded} holds no {named}, so this counter is packed under another name")
+        format!(
+            "{downloaded} holds no {named}; set binary-name to the command it holds, without .exe"
+        )
     })?;
     Ok((binary, downloaded, None))
 }
@@ -768,6 +771,17 @@ fn find_file_named(named: &str, under: &Path) -> Option<PathBuf> {
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .find_map(|dir| find_file_named(named, &dir))
+}
+
+fn list_file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 fn read_url(url: &str) -> Result<String, String> {

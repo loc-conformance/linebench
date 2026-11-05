@@ -474,7 +474,8 @@ mod tests {
         let fetch = find_help_of("fetch");
         assert!(fetch.contains(&name_them(COUNTERS)), "{fetch}");
         assert!(fetch.contains(&name_them(CORPORA)), "{fetch}");
-        assert!(name_them(COUNTERS).contains("cloc, mezura"), "{fetch}");
+        let named = name_them(&[("counters/alpha.toml", ""), ("counters/beta.toml", "")]);
+        assert_eq!(named, "alpha, beta");
     }
 
     #[test]

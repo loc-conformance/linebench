@@ -8,6 +8,10 @@ New:
   doublings up to all strong cores, efficiency cores when present, and SMT siblings, pinned through
   the OS affinity mask and timed by hyperfine, reporting median wall time, speedup, per-core
   efficiency, peak speedup, Amdahl's serial fraction, and the SMT gain.
+- A counter definition can set `binary-name`, the command a counter is stored and run under when
+  that is not its name.
+- `[acquisition.file]` takes a file per system and architecture, such as `linux-aarch64`, which is
+  tried before the file for the system.
 
 Other:
 
