@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::counters::Definition;
 use crate::fetch::Identity;
 use crate::machine::Platform;
+use crate::os::apply_execution_env;
 use crate::record::propagate_ratio_stddev;
 
 pub const DEFAULT_WARMUP: u32 = 3;
@@ -141,6 +142,61 @@ impl TimedCommand {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub struct HyperfineResult {
+    pub command: String,
+    pub mean: f64,
+    pub stddev: Option<f64>,
+    pub median: f64,
+    pub min: f64,
+    pub max: f64,
+    pub user: Option<f64>,
+    pub system: Option<f64>,
+    pub times: Vec<f64>,
+}
+
+impl HyperfineResult {
+    pub fn of(value: &Value) -> Result<HyperfineResult, String> {
+        let command = value["command"]
+            .as_str()
+            .ok_or_else(|| "command is missing or is not a string".to_string())?;
+        // hyperfine 2.0 nests the statistics under `summary` and the times under `measurements`.
+        // 1.x wrote them flat, and the run directories it made are still read back.
+        let (wall_clock, user, system, runs, time) = match value.get("summary") {
+            Some(_) => (
+                "/summary/time_wall_clock",
+                "/summary/time_user/mean",
+                "/summary/time_system/mean",
+                "/measurements",
+                "/time_wall_clock/value",
+            ),
+            None => ("", "/user", "/system", "/times", ""),
+        };
+        let find = |path: &str| value.pointer(path).and_then(Value::as_f64);
+        let require = |path: String| {
+            find(&path).ok_or_else(|| format!("{command}: {path} is missing or is not a number"))
+        };
+        let count = value
+            .pointer(runs)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{command}: {runs} is missing or is not an array"))?
+            .len();
+        Ok(HyperfineResult {
+            command: command.to_string(),
+            mean: require(format!("{wall_clock}/mean"))?,
+            stddev: find(&format!("{wall_clock}/stddev")),
+            median: require(format!("{wall_clock}/median"))?,
+            min: require(format!("{wall_clock}/min"))?,
+            max: require(format!("{wall_clock}/max"))?,
+            user: find(user),
+            system: find(system),
+            times: (0..count)
+                .map(|run| require(format!("{runs}/{run}{time}")))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
 pub struct Runner {
     pub failures: Vec<String>,
     pub warnings: Vec<String>,
@@ -174,12 +230,16 @@ impl Runner {
         }
     }
 
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+    }
+
     pub fn run_hyperfine(
         &mut self,
         out: &mut dyn Write,
         name: &str,
         commands: &[TimedCommand],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<HyperfineResult>, String> {
         print_line(out, &format!(">> {name}"))?;
         let export = self.res.join(format!("{name}.json"));
         let markdown = self.res.join(format!("{name}.md"));
@@ -200,72 +260,24 @@ impl Runner {
         {
             let _ = fs::write(&export, compact);
         }
-        if let Some(table) = format_markdown_table(&results) {
+        let read = match results
+            .iter()
+            .map(HyperfineResult::of)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(read) => read,
+            Err(refused) => {
+                print_line(
+                    out,
+                    &format!("{WARNING_LABEL}{name}.json could not be read: {refused}"),
+                )?;
+                return Ok(Vec::new());
+            }
+        };
+        if let Some(table) = format_markdown_table(&read) {
             let _ = fs::write(&markdown, table);
         }
-        Ok(())
-    }
-
-    fn run_one_hyperfine(
-        &mut self,
-        out: &mut dyn Write,
-        name: &str,
-        timed: &TimedCommand,
-        export: &Path,
-    ) -> Result<(), String> {
-        let mut hyperfine = Command::new(HYPERFINE);
-        hyperfine.args([
-            "-N",
-            "--style",
-            self.style.as_flag(),
-            "--warmup",
-            &self.settings.warmup.to_string(),
-            "--runs",
-            &self.settings.runs.to_string(),
-        ]);
-        if self.settings.settle > 0 {
-            hyperfine.args(["--setup", &build_sleep(self.platform, self.settings.settle)]);
-        }
-        hyperfine.args(["--export-json", &export.to_string_lossy()]);
-        hyperfine.arg(&timed.command);
-        for name in &self.scrub {
-            hyperfine.env_remove(name);
-        }
-        hyperfine.envs(&timed.execution_env);
-        let report = if self.style.is_shown() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        };
-        let mut child = hyperfine
-            .stdin(Stdio::null())
-            .stdout(report)
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("{HYPERFINE} could not be run: {error}"))?;
-        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), timed);
-        let status = child
-            .wait()
-            .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
-        let stderr = relayed?;
-        for warning in find_warnings(&stderr) {
-            print_line(
-                out,
-                &format!("{WARNING_LABEL}{HYPERFINE} on {name}: {warning}"),
-            )?;
-            self.warnings.push(format!("{name}: {warning}"));
-        }
-        if !status.success() {
-            let detail = find_error(&stderr);
-            print_line(
-                out,
-                &format!("{WARNING_LABEL}{HYPERFINE} reported a problem on {name}: {detail}"),
-            )?;
-            if !self.failures.iter().any(|failed| failed == name) {
-                self.failures.push(name.to_string());
-            }
-        }
-        Ok(())
+        Ok(read)
     }
 
     pub fn capture_output(
@@ -287,10 +299,7 @@ impl Runner {
             .stdin(Stdio::null())
             .stdout(file)
             .stderr(Stdio::piped());
-        for name in &self.scrub {
-            command.env_remove(name);
-        }
-        command.envs(env);
+        apply_execution_env(&mut command, env, &self.scrub);
         let finished = command
             .output()
             .map_err(|error| format!("{} could not be run: {error}", program.display()))?;
@@ -338,6 +347,65 @@ impl Runner {
         }
         Ok(Capture { path, stderr })
     }
+
+    fn run_one_hyperfine(
+        &mut self,
+        out: &mut dyn Write,
+        name: &str,
+        timed: &TimedCommand,
+        export: &Path,
+    ) -> Result<(), String> {
+        let mut hyperfine = Command::new(HYPERFINE);
+        hyperfine.args([
+            "-N",
+            "--style",
+            self.style.as_flag(),
+            "--warmup",
+            &self.settings.warmup.to_string(),
+            "--runs",
+            &self.settings.runs.to_string(),
+        ]);
+        if self.settings.settle > 0 {
+            hyperfine.args(["--setup", &build_sleep(self.platform, self.settings.settle)]);
+        }
+        hyperfine.args(["--export-json", &export.to_string_lossy()]);
+        hyperfine.arg(&timed.command);
+        apply_execution_env(&mut hyperfine, &timed.execution_env, &self.scrub);
+        let report = if self.style.is_shown() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        let mut child = hyperfine
+            .stdin(Stdio::null())
+            .stdout(report)
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("{HYPERFINE} could not be run: {error}"))?;
+        let relayed = relay_report(out, child.stdout.take(), child.stderr.take(), timed);
+        let status = child
+            .wait()
+            .map_err(|error| format!("{HYPERFINE} could not be waited for: {error}"))?;
+        let stderr = relayed?;
+        for warning in find_warnings(&stderr) {
+            print_line(
+                out,
+                &format!("{WARNING_LABEL}{HYPERFINE} on {name}: {warning}"),
+            )?;
+            self.warnings.push(format!("{name}: {warning}"));
+        }
+        if !status.success() {
+            let detail = find_error(&stderr);
+            print_line(
+                out,
+                &format!("{WARNING_LABEL}{HYPERFINE} reported a problem on {name}: {detail}"),
+            )?;
+            if !self.failures.iter().any(|failed| failed == name) {
+                self.failures.push(name.to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn capture_json_outputs(
@@ -374,7 +442,8 @@ pub fn run_phases(
         runner.run_hyperfine(out, &get_set_name(table, REVERSE), &reversed)?;
     }
     print_line(out, "\n== closing control run")?;
-    runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare))
+    runner.run_hyperfine(out, CONTROL_END, std::slice::from_ref(&bare))?;
+    Ok(())
 }
 
 pub fn capture_plain_output(
@@ -459,6 +528,16 @@ pub fn quote(part: &str) -> String {
         return part;
     }
     format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+pub fn parse_export(text: &str) -> Result<Vec<HyperfineResult>, String> {
+    let document: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    document["results"]
+        .as_array()
+        .ok_or_else(|| "results is missing or is not an array".to_string())?
+        .iter()
+        .map(HyperfineResult::of)
+        .collect()
 }
 
 pub fn find_warnings(stderr: &str) -> Vec<String> {
@@ -582,27 +661,8 @@ fn take_json_results(path: &Path, recorded: &str, results: &mut Vec<Value>) {
     }
 }
 
-fn format_markdown_table(results: &[Value]) -> Option<String> {
-    struct Entry<'a> {
-        command: &'a str,
-        mean: f64,
-        stddev: Option<f64>,
-        min: f64,
-        max: f64,
-    }
-    let entries: Vec<Entry<'_>> = results
-        .iter()
-        .filter_map(|value| {
-            Some(Entry {
-                command: value["command"].as_str()?,
-                mean: value["mean"].as_f64()?,
-                stddev: value["stddev"].as_f64(),
-                min: value["min"].as_f64()?,
-                max: value["max"].as_f64()?,
-            })
-        })
-        .collect();
-    let (fastest_index, fastest) = entries
+fn format_markdown_table(results: &[HyperfineResult]) -> Option<String> {
+    let (fastest_index, fastest) = results
         .iter()
         .enumerate()
         .min_by(|(_, a), (_, b)| a.mean.total_cmp(&b.mean))?;
@@ -612,22 +672,22 @@ fn format_markdown_table(results: &[Value]) -> Option<String> {
         format!("| Command | Mean [{unit}] | Min [{unit}] | Max [{unit}] | Relative |"),
         "|:---|---:|---:|---:|---:|".to_string(),
     ];
-    for (index, entry) in entries.iter().enumerate() {
-        let command = entry.command.replace('|', "\\|");
-        let mean = match entry.stddev {
+    for (index, result) in results.iter().enumerate() {
+        let command = result.command.replace('|', "\\|");
+        let mean = match result.stddev {
             Some(stddev) => format!(
                 "{} ± {}",
-                format_duration(entry.mean, in_ms),
+                format_duration(result.mean, in_ms),
                 format_duration(stddev, in_ms)
             ),
-            None => format_duration(entry.mean, in_ms),
+            None => format_duration(result.mean, in_ms),
         };
-        let min = format_duration(entry.min, in_ms);
-        let max = format_duration(entry.max, in_ms);
+        let min = format_duration(result.min, in_ms);
+        let max = format_duration(result.max, in_ms);
         let relative = if index == fastest_index || fastest.mean <= 0.0 {
             "1.00".to_string()
         } else {
-            format_relative(entry.mean, entry.stddev, fastest.mean, fastest.stddev)
+            format_relative(result.mean, result.stddev, fastest.mean, fastest.stddev)
         };
         lines.push(format!(
             "| `{command}` | {mean} | {min} | {max} | {relative} |"
@@ -818,22 +878,95 @@ mod tests {
     }
 
     #[test]
+    fn the_two_shapes_hyperfine_has_written_read_as_one_result() {
+        let before_2 = r#"{"results":[
+            {"command":"scc tree","mean":0.31,"stddev":0.12,"median":0.3,"user":2.0,"system":1.0,
+             "min":0.2,"max":0.43,"times":[0.2,0.3,0.43]},
+            {"command":"cloc tree","mean":0.5,"stddev":null,"median":0.5,"min":0.5,"max":0.5,
+             "times":[0.5]}]}"#;
+        let since_2 = r#"{"schema_version":2,"results":[
+            {"command":"scc tree","summary":{
+                "time_wall_clock":{"unit":"second","count":3,"mean":0.31,"stddev":0.12,
+                                   "median":0.3,"min":0.2,"max":0.43},
+                "time_user":{"unit":"second","count":3,"mean":2.0,"stddev":0.25,
+                             "median":1.9,"min":1.8,"max":2.3},
+                "time_system":{"unit":"second","count":3,"mean":1.0,"stddev":0.15,
+                               "median":0.9,"min":0.95,"max":1.15}},
+             "measurements":[
+                {"time_wall_clock":{"value":0.2,"unit":"second"},"exit_code":0},
+                {"time_wall_clock":{"value":0.3,"unit":"second"},"exit_code":0},
+                {"time_wall_clock":{"value":0.43,"unit":"second"},"exit_code":0}]},
+            {"command":"cloc tree","summary":{
+                "time_wall_clock":{"unit":"second","count":1,"mean":0.5,"stddev":null,
+                                   "median":0.5,"min":0.5,"max":0.5}},
+             "measurements":[{"time_wall_clock":{"value":0.5,"unit":"second"},"exit_code":0}]}]}"#;
+        let read = parse_export(since_2).unwrap();
+        assert_eq!(read, parse_export(before_2).unwrap());
+        assert_eq!(
+            read[0],
+            HyperfineResult {
+                command: "scc tree".to_string(),
+                mean: 0.31,
+                stddev: Some(0.12),
+                median: 0.3,
+                min: 0.2,
+                max: 0.43,
+                user: Some(2.0),
+                system: Some(1.0),
+                times: vec![0.2, 0.3, 0.43],
+            }
+        );
+        assert_eq!((read[1].stddev, read[1].user), (None, None));
+    }
+
+    #[test]
+    fn a_result_that_cannot_be_read_names_its_command_and_where_it_looked() {
+        let refused =
+            |result: &str| parse_export(&format!(r#"{{"results":[{result}]}}"#)).unwrap_err();
+        let no_median = refused(
+            r#"{"command":"scc tree","summary":{"time_wall_clock":{"mean":0.3,"min":0.2,"max":0.4}},
+                "measurements":[{"time_wall_clock":{"value":0.3}}]}"#,
+        );
+        assert!(
+            no_median.starts_with("scc tree: /summary/time_wall_clock/median "),
+            "{no_median}"
+        );
+        let no_mean =
+            refused(r#"{"command":"scc tree","median":0.3,"min":0.2,"max":0.4,"times":[0.3]}"#);
+        assert!(no_mean.starts_with("scc tree: /mean "), "{no_mean}");
+        let no_time = refused(
+            r#"{"command":"scc tree","summary":{"time_wall_clock":{"mean":0.3,"median":0.3,"min":0.2,
+                "max":0.4}},"measurements":[{"exit_code":0}]}"#,
+        );
+        assert!(
+            no_time.starts_with("scc tree: /measurements/0/time_wall_clock/value "),
+            "{no_time}"
+        );
+    }
+
+    #[test]
     fn the_markdown_table_shares_one_unit_and_measures_every_row_against_the_fastest() {
+        let build_result =
+            |command: &str, mean: f64, stddev: Option<f64>, min: f64, max: f64| HyperfineResult {
+                command: command.to_string(),
+                mean,
+                stddev,
+                median: mean,
+                min,
+                max,
+                user: None,
+                system: None,
+                times: Vec::new(),
+            };
         let results = [
-            serde_json::json!({
-                "command": "cloc /corpus",
-                "mean": 1.050,
-                "stddev": 0.015,
-                "min": 1.030,
-                "max": 1.072,
-            }),
-            serde_json::json!({
-                "command": "MEZURA_DATA_DIR=/tmp/a mezura /corpus",
-                "mean": 0.0035394,
-                "stddev": 0.0001018,
-                "min": 0.0034,
-                "max": 0.0038,
-            }),
+            build_result("cloc /corpus", 1.050, Some(0.015), 1.030, 1.072),
+            build_result(
+                "MEZURA_DATA_DIR=/tmp/a mezura /corpus",
+                0.0035394,
+                Some(0.0001018),
+                0.0034,
+                0.0038,
+            ),
         ];
         assert_eq!(
             format_markdown_table(&results).unwrap(),
@@ -842,13 +975,7 @@ mod tests {
              | `cloc /corpus` | 1050.0 ± 15.0 | 1030.0 | 1072.0 | 296.66 ± 9.53 |\n\
              | `MEZURA_DATA_DIR=/tmp/a mezura /corpus` | 3.5 ± 0.1 | 3.4 | 3.8 | 1.00 |\n"
         );
-        let in_seconds = [serde_json::json!({
-            "command": "cloc /linux",
-            "mean": 1.42,
-            "stddev": null,
-            "min": 1.42,
-            "max": 1.42,
-        })];
+        let in_seconds = [build_result("cloc /linux", 1.42, None, 1.42, 1.42)];
         assert_eq!(
             format_markdown_table(&in_seconds).unwrap(),
             "| Command | Mean [s] | Min [s] | Max [s] | Relative |\n\

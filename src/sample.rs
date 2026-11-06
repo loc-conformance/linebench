@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::machine::Platform;
 use crate::measure::Table;
-use crate::os::read_process_memory;
+use crate::os::{apply_execution_env, read_process_memory};
 
 pub const MEMORY_STEP_MS: u64 = 2;
 pub const LEAST_SAMPLES: usize = 30;
@@ -47,10 +47,7 @@ pub fn sample_memory(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for name in scrub {
-        command.env_remove(name);
-    }
-    command.envs(env);
+    apply_execution_env(&mut command, env, scrub);
     let refuse = |what: &str, error: &dyn std::fmt::Display| {
         format!("{instance} could not be {what}: {error}")
     };

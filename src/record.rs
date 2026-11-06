@@ -14,7 +14,7 @@ use crate::fetch::Origin;
 use crate::files::{read_json, read_text};
 use crate::machine::Machine;
 use crate::measure::{CONTROL_END, CONTROL_START, FORWARD, REVERSE};
-use crate::measure::{Instance, Table, get_set_name};
+use crate::measure::{HyperfineResult, Instance, Table, get_set_name, parse_export};
 use crate::read::Counts;
 
 pub const RECORD_FORMAT: u32 = 1;
@@ -212,17 +212,17 @@ pub fn collect_measurements(
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let export: HyperfineExport = match fs::read_to_string(&path)
+        let results = match fs::read_to_string(&path)
             .map_err(|error| error.to_string())
-            .and_then(|text| serde_json::from_str(&text).map_err(|error| error.to_string()))
+            .and_then(|text| parse_export(&text))
         {
-            Ok(export) => export,
+            Ok(results) => results,
             Err(error) => {
                 skipped.push(format!("skipping {set}.json: {error}"));
                 continue;
             }
         };
-        for result in export.results {
+        for result in results {
             let instance = commands
                 .get(&result.command)
                 .cloned()
@@ -242,10 +242,9 @@ pub fn collect_measurements(
 /// was built from.
 pub fn read_export(path: &Path) -> Result<Vec<Timings>, String> {
     let text = read_text(path)?;
-    let export: HyperfineExport =
-        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(export
-        .results
+    let named = path.file_name().unwrap_or_default().to_string_lossy();
+    let results = parse_export(&text).map_err(|error| format!("{named}: {error}"))?;
+    Ok(results
         .into_iter()
         .map(|result| Timings {
             command: result.command,
@@ -734,6 +733,11 @@ pub fn read_seconds_since_epoch() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
+pub fn round_to(value: f64, decimals: i32) -> f64 {
+    let scale = 10f64.powi(decimals);
+    (value * scale).round() / scale
+}
+
 fn build_measurement(
     set: &str,
     instance: &str,
@@ -766,27 +770,6 @@ fn build_measurement(
             .filter(|_| cpu > 0.0)
             .map(|l| (l as f64 / cpu).round() as u64),
     }
-}
-
-#[derive(Deserialize)]
-struct HyperfineExport {
-    results: Vec<HyperfineResult>,
-}
-
-#[derive(Deserialize)]
-struct HyperfineResult {
-    command: String,
-    mean: f64,
-    #[serde(default)]
-    stddev: Option<f64>,
-    median: f64,
-    min: f64,
-    max: f64,
-    #[serde(default)]
-    user: Option<f64>,
-    #[serde(default)]
-    system: Option<f64>,
-    times: Vec<f64>,
 }
 
 fn describe_exclusions(record: &Record) -> String {
@@ -831,11 +814,6 @@ fn calculate_mean_stddev(measurement: &Measurement) -> f64 {
         return measurement.stddev_s;
     }
     measurement.stddev_s / (measurement.runs as f64).sqrt()
-}
-
-fn round_to(value: f64, decimals: i32) -> f64 {
-    let scale = 10f64.powi(decimals);
-    (value * scale).round() / scale
 }
 
 fn lay_out_cells(cells: &[String]) -> String {

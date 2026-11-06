@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::counters::{Acquisition, Channel, Definition};
-use crate::fetch::{
-    Manifest, explain_github_refusal, mentions_any, read_github_api_within, read_url_within,
-};
+use crate::fetch::{Manifest, explain_github_refusal, read_github_api, read_url_within};
 use crate::files::read_toml;
 
 pub const LATEST_FILE: &str = "linebench-latest.toml";
@@ -18,7 +16,6 @@ pub const CACHE_SECONDS: u64 = 6 * 60 * 60;
 const LOOKUP_SECONDS: u32 = 10;
 const GITHUB_API: &str = "https://api.github.com/repos";
 const CRATES_API: &str = "https://crates.io/api/v1/crates";
-const NOT_FOUND_MARKS: [&str; 2] = ["error: 404", "error 404"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
@@ -293,8 +290,8 @@ fn write_cache(dir: &Path, cache: &Cache) -> Result<(), String> {
 
 fn read_github_latest(repository: &str) -> Result<String, String> {
     let url = format!("{GITHUB_API}/{repository}/releases/latest");
-    let text = read_github_api_within(&url, LOOKUP_SECONDS)
-        .map_err(|message| explain_latest_refusal(repository, &[message]))?;
+    let text = read_github_api(&url, Some(LOOKUP_SECONDS))
+        .map_err(|message| explain_github_refusal(repository, None, &[message]))?;
     parse_latest_tag(repository, &text)
 }
 
@@ -326,19 +323,6 @@ fn parse_crate_version(name: &str, text: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("crates.io lists no stable version of {name}"))
-}
-
-fn explain_latest_refusal(repository: &str, refused: &[String]) -> String {
-    if let Some(explained) = explain_github_refusal(repository, refused) {
-        return explained;
-    }
-    if mentions_any(refused, &NOT_FOUND_MARKS) {
-        return format!("github lists no latest release for {repository}");
-    }
-    format!(
-        "github could not be asked what {repository} has released: {}",
-        refused.join("; ")
-    )
 }
 
 fn strip_leading_v(text: &str) -> &str {
@@ -574,14 +558,14 @@ blanks   = \"Total.blanks\"
         );
         let missing = ["curl: (22) The requested URL returned error: 404".to_string()];
         assert_eq!(
-            explain_latest_refusal("boyter/scc", &missing),
+            explain_github_refusal("boyter/scc", None, &missing),
             "github lists no latest release for boyter/scc"
         );
         let limited = ["curl: (22) The requested URL returned error: 403".to_string()];
-        assert!(explain_latest_refusal("boyter/scc", &limited).contains("GITHUB_TOKEN"));
+        assert!(explain_github_refusal("boyter/scc", None, &limited).contains("GITHUB_TOKEN"));
         let stalled = ["curl: (28) Operation timed out after 10001 milliseconds".to_string()];
         assert!(
-            explain_latest_refusal("boyter/scc", &stalled)
+            explain_github_refusal("boyter/scc", None, &stalled)
                 .starts_with("github could not be asked what boyter/scc has released")
         );
     }

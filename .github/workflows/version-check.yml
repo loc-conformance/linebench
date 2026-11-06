@@ -117,7 +117,7 @@ jobs:
         with:
           tool: hyperfine
 
-      # Every counter is fetched, not the raised one alone, because equal work is compared between
+      # Every counter is fetched, not only the raised one, because equal work is compared between
       # counters and nothing is compared until two of them have counts.
       - name: Fetch every counter and read the counts back
         if: steps.branch.outputs.already == 'no'
@@ -129,8 +129,9 @@ jobs:
             --counters-dir "${{ runner.temp }}/counters" \
             --corpus-path "${{ runner.temp }}/cpython" \
             --counters all --corpus cpython
+          counters=$(ls counters/*.toml | xargs -n1 basename -s .toml | paste -sd, -)
           ./target/release/linebench check cpython \
-            --counters cloc,mezura,scc,tokei \
+            --counters "$counters" \
             --counters-dir "${{ runner.temp }}/counters" \
             --corpus-path "${{ runner.temp }}/cpython" | tee "$RUNNER_TEMP/check.txt"
           read=${PIPESTATUS[0]}

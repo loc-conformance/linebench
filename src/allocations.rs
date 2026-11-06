@@ -8,7 +8,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::measure::Table;
-use crate::os::{Unfinished, capture_output, capture_with_status};
+use crate::os::{Unfinished, apply_execution_env, capture_output, capture_with_status};
 
 pub const ALLOCATOR_TRACER: &str = "valgrind";
 const PROBE_TARGET: &str = "true";
@@ -37,6 +37,8 @@ pub struct Allocations {
     pub table: String,
     pub wall_ms: u64,
     pub allocs: u64,
+    #[serde(default)]
+    pub floor_allocs: u64,
     pub frees: u64,
     pub bytes_allocated: u64,
     pub at_exit_bytes: u64,
@@ -97,10 +99,7 @@ pub fn count_allocations(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    for name in scrub {
-        command.env_remove(name);
-    }
-    command.envs(env);
+    apply_execution_env(&mut command, env, scrub);
     let started = Instant::now();
     let finished = command.output().map_err(|error| {
         format!("{instance} could not be run under {ALLOCATOR_TRACER}: {error}")
@@ -127,6 +126,7 @@ pub fn count_allocations(
         table: table.as_str().to_string(),
         wall_ms,
         allocs,
+        floor_allocs: 0,
         frees,
         bytes_allocated,
         at_exit_bytes,

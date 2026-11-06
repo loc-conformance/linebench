@@ -169,14 +169,23 @@ pub fn find_unequal_exclusions(state: &DefenderState) -> Option<String> {
     }
 }
 
-pub fn explain_unequal_exclusions(unequal: &str) -> String {
+pub fn explain_unequal_exclusions(unequal: &str, binaries: &[CounterBinary]) -> String {
+    let width = binaries
+        .iter()
+        .map(|binary| binary.name.len())
+        .max()
+        .unwrap_or(0);
+    let processes: String = binaries
+        .iter()
+        .map(|binary| format!("\x20 {:<width$}  runs as {}\n", binary.name, binary.process))
+        .collect();
     format!(
-        "MS Defender does not treat the counters equally:\n{unequal}.\n\n\
+        "MS Defender does not treat the counters equally:\n{unequal}.\n\n{processes}\n\
          Files opened by an excluded process are never scanned in real time, so this\n\
          run would measure which counter escaped the antivirus, not which counts faster.\n\n\
          \x20 Get-MpPreference | Select -ExpandProperty ExclusionProcess\n\
          \x20 Get-MpPreference | Select -ExpandProperty ExclusionPath\n\
-         \x20 Remove-MpPreference -ExclusionProcess <name>.exe\n\n\
+         \x20 Remove-MpPreference -ExclusionProcess <process>\n\n\
          Either exclude every counter or none, or rerun with --allow-unequal-exclusions\n\
          to measure anyway and have the results marked as such."
     )

@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
-use crate::os::{Unfinished, capture_with_status};
+use crate::os::{Unfinished, apply_execution_env, capture_with_status};
 
 pub const PROFILER: &str = "perf";
 pub const PARANOID_KEY: &str = "kernel.perf_event_paranoid";
@@ -235,7 +235,7 @@ pub fn run_once(subject: &Subject) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_subject_env(&mut command, subject);
+    apply_execution_env(&mut command, subject.env, subject.scrub);
     let finished = command
         .output()
         .map_err(|error| format!("{} could not be run, {error}", subject.instance))?;
@@ -311,7 +311,7 @@ fn count_events(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    apply_subject_env(&mut command, subject);
+    apply_execution_env(&mut command, subject.env, subject.scrub);
     let finished = command
         .output()
         .map_err(|error| format!("{} could not be profiled, {error}", subject.instance))?;
@@ -326,13 +326,6 @@ fn count_events(
     let text = fs::read_to_string(path)
         .map_err(|error| format!("{} could not be read, {error}", path.display()))?;
     Ok(parse_counts(&text))
-}
-
-fn apply_subject_env(command: &mut Command, subject: &Subject) {
-    for name in subject.scrub {
-        command.env_remove(name);
-    }
-    command.envs(subject.env);
 }
 
 fn require_user_count(readings: &[Reading], instance: &str, event: &str) -> Result<u64, String> {

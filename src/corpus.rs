@@ -459,9 +459,25 @@ pub fn setup_corpus(out: &mut dyn Write, corpus: &Corpus, checkout: &Path) -> Re
     } else {
         "HEAD"
     };
-    run_git(
-        &corpus.name,
-        &["-C", &shown, "fetch", "--depth", "1", "origin", wanted],
+    let fetch_args = ["-C", &shown, "fetch", "--depth", "1", "origin", wanted];
+    crate::fetch::try_a_few_times(out, &crate::fetch::RETRY_WAITS, |_| {
+        let ran = Command::new("git")
+            .args(fetch_args)
+            .status()
+            .map_err(|error| format!("git could not be run: {error}"))?;
+        match ran.success() {
+            true => Ok(()),
+            false => Err(format!("git {}", fetch_args.join(" "))),
+        }
+    })
+    .map_err(
+        |refused| match refused.starts_with("git could not be run:") {
+            true => refused,
+            false => format!(
+                "this failed, and {} cannot be set up without it:\n  {refused}",
+                corpus.name
+            ),
+        },
     )?;
     run_git(
         &corpus.name,

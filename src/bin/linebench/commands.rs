@@ -9,6 +9,20 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::config::{
+    Chosen, Config, FetchPlan, GivenEntry, Locations, Options, choose_corpus_home,
+    choose_counters_dir, find_dry_run_dir, find_settled_results_dir, show_path,
+};
+use crate::instances::{ChosenInstances, build_instances};
+use crate::output::{
+    Color, Output, get_report_style, paint, print_header, print_line, print_warning,
+};
+use crate::page::PAGE_FILE;
+use crate::page::{
+    Collected, FoundRun, collect_records, find_named_run, find_page_differences, format_against,
+    format_since, write_results_page,
+};
+use crate::prep::{self, AppliedPrep};
 use linebench::allocations::{
     Allocations, Valgrind, count_allocations, find_valgrind, is_elf_binary,
 };
@@ -26,13 +40,18 @@ use linebench::fetch::{Manifest, calculate_sha256, fetch_counter, read_manifest}
 use linebench::files::{LargestFiles, find_largest_files};
 use linebench::insight::{
     ALLOCATIONS_PART, FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT,
-    INSIGHTS_PAGE, MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART, VERSION_SET,
+    INSIGHTS_PAGE, LADDER_PART, MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART,
+    VERSION_SET,
 };
 use linebench::insight::{
     Insights, ask_for_everything, build_insights_path, describe_cold_cache, format_allocations,
-    format_floor, format_memory, format_pmu, format_syscalls, format_syscalls_summary,
-    get_floor_set_name, write_insights, write_insights_page,
+    format_floor, format_ladder, format_memory, format_pmu, format_syscalls,
+    format_syscalls_summary, get_floor_set_name, write_insights, write_insights_page,
 };
+use linebench::ladder::{
+    AffinityRung, Ladder, LadderPlan, build_ladder_plan, build_ladders, get_ladder_set_name,
+};
+use linebench::ladder::{LADDER_PREFIX, LADDER_WARMUP};
 use linebench::latest::{
     Lookup, Standing, apply_latest_pins, choose_counters_to_look_up, collect_latest_releases,
     describe_latest, describe_pin_origin, describe_pinned_version, find_latest_release,
@@ -43,12 +62,12 @@ use linebench::machine::{
     sample_background_busy,
 };
 use linebench::measure::{
-    Instance, Runner, Settings, Style, Table, TimedCommand, build_args, build_command,
-    capture_json_outputs, capture_plain_output, describe_env, get_capture_name, join_command,
-    run_phases, strip_ansi,
+    HyperfineResult, Instance, Runner, Settings, Style, Table, TimedCommand, build_args,
+    build_command, capture_json_outputs, capture_plain_output, describe_env, get_capture_name,
+    join_command, run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
-use linebench::os::{capture_with_status, is_privileged};
+use linebench::os::{capture_with_status, is_privileged, pin_current_process, read_core_topology};
 use linebench::pmu::{
     AB_RUNS, AB_WARMUP, DURATION_TIME, FILE_RUNS, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER,
     USER_PARANOID,
@@ -59,7 +78,7 @@ use linebench::pmu::{
 };
 use linebench::read::{Counts, compare_documents, find_absent_volatile_paths, read_counts};
 use linebench::record::{
-    CorpusRecord, CountRecord, InstanceRecord, Record, RunSettings, append_to_notes,
+    CorpusRecord, CountRecord, InstanceRecord, Measurement, Record, RunSettings, append_to_notes,
     calculate_drift, collect_measurements, describe_empty_bare_counts, format_busy,
     format_summary_tables, format_thousands, format_utc_date, format_utc_stamp, format_wall,
     read_seconds_since_epoch, shorten_version, widest, write_csvs, write_notes, write_record,
@@ -68,21 +87,6 @@ use linebench::record::{LOCAL_DIR, RECORD_FILE, RECORD_FORMAT};
 use linebench::sample::sample_memory;
 use linebench::syscalls::{Syscalls, Tracing, count_syscalls, find_tracer};
 use linebench::verify::{Session, Verification, check_insights, check_run, find_run};
-
-use crate::config::{
-    Chosen, Config, FetchPlan, GivenEntry, Locations, Options, choose_corpus_home,
-    choose_counters_dir, find_dry_run_dir, find_settled_results_dir, show_path,
-};
-use crate::instances::{ChosenInstances, build_instances};
-use crate::output::{
-    Color, Output, get_report_style, paint, print_header, print_line, print_warning,
-};
-use crate::page::PAGE_FILE;
-use crate::page::{
-    Collected, FoundRun, collect_records, find_named_run, find_page_differences, format_against,
-    format_since, write_results_page,
-};
-use crate::prep::{self, AppliedPrep};
 
 const TRANSCRIPT_FILE: &str = "transcript.txt";
 const FLOOR_TARGET: &str = "floor";
@@ -104,7 +108,7 @@ const TRACER_REFUSED: &str = "strace is here and it was not allowed to trace, so
                               without CAP_SYS_PTRACE and a hardened kernel.yama.ptrace_scope both \
                               refuse.";
 const TRACER_ELSEWHERE: &str =
-    "strace runs on linux alone, so the system calls cannot be measured here.";
+    "strace runs only on linux, so the system calls cannot be measured here.";
 const PROFILER_MISSING: &str = "perf is not present on the system, or is not in the PATH, so \
                                 the hardware counters cannot be read. On Debian it is the \
                                 linux-perf package.";
@@ -112,14 +116,14 @@ const PROFILER_REFUSED: &str = "perf is here and it read no event, so the hardwa
                                 cannot be read. A virtual machine commonly has no PMU to offer, \
                                 and WSL2 is one of them.";
 const PROFILER_ELSEWHERE: &str =
-    "perf runs on linux alone, so the hardware counters cannot be read here.";
+    "perf runs only on linux, so the hardware counters cannot be read here.";
 const VALGRIND_MISSING: &str = "valgrind is not present on the system, or is not in the PATH, so \
                                 the heap allocations cannot be counted. It is recommended to \
                                 download it first.";
 const VALGRIND_REFUSED: &str = "valgrind is here and it wrote no heap summary, so the heap \
                                 allocations cannot be counted.";
 const VALGRIND_ELSEWHERE: &str =
-    "valgrind runs on linux alone, so the heap allocations cannot be counted here.";
+    "valgrind runs only on linux, so the heap allocations cannot be counted here.";
 const INSIGHTS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const PMU_PROBE_FILE: &str = "pmu-probe.tsv";
@@ -828,14 +832,11 @@ pub fn run_insights(
     print_how_the_counters_were_chosen(out, &chosen)?;
     let instances = chosen.instances;
     let privileged = is_privileged(platform);
-    let defender = read_defender_state(
-        platform,
-        privileged,
-        &collect_binaries(&instances, platform)?,
-    );
+    let binaries = collect_binaries(&instances, platform);
+    let defender = read_defender_state(platform, privileged, &binaries);
     let unequal = match find_unequal_exclusions(&defender) {
         Some(unequal) if !options.allow_unequal => {
-            return Err(explain_unequal_exclusions(&unequal));
+            return Err(explain_unequal_exclusions(&unequal, &binaries));
         }
         Some(unequal) => {
             print_warning(
@@ -902,18 +903,27 @@ pub fn run_insights(
                 Valgrind::NotThere => (None, Some(VALGRIND_MISSING.to_string())),
             },
         };
-    let stopping: Vec<&str> = [
-        unmeasured.as_deref(),
-        unread.as_deref(),
-        allocations_unmeasured.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if !stopping.is_empty()
-        && platform.is_linux()
-        && !ask_to_go_on(out, &stopping.join(LINE_BREAK), options.yes)?
-    {
+    let (ladder_plan, ladder_unmeasured) = match asked_for(LADDER_PART) {
+        false => (None, None),
+        true => match read_core_topology(platform).and_then(|cores| build_ladder_plan(&cores)) {
+            Ok(plan) => (Some(plan), None),
+            Err(refused) => (None, Some(refused)),
+        },
+    };
+    let stopping: Vec<&str> = match platform {
+        Platform::Linux | Platform::Wsl => [
+            unmeasured.as_deref(),
+            unread.as_deref(),
+            allocations_unmeasured.as_deref(),
+            ladder_unmeasured.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        Platform::Windows => ladder_unmeasured.as_deref().into_iter().collect(),
+        _ => Vec::new(),
+    };
+    if !stopping.is_empty() && !ask_to_go_on(out, &stopping.join(LINE_BREAK), options.yes)? {
         return Err("stopped.".to_string());
     }
     fs::create_dir_all(&res)
@@ -977,7 +987,10 @@ pub fn run_insights(
             print_line(out, &paint_table_line(&line))?;
         }
         print_line(out, "")?;
-    } else if (asked_for(MEMORY_PART) || asked_for(SYSCALLS_PART) || asked_for(ALLOCATIONS_PART))
+    } else if (asked_for(MEMORY_PART)
+        || asked_for(SYSCALLS_PART)
+        || asked_for(ALLOCATIONS_PART)
+        || asked_for(LADDER_PART))
         && instances
             .iter()
             .any(|instance| !instance.definition.run.env.is_empty())
@@ -1130,6 +1143,56 @@ pub fn run_insights(
             }
         }
     }
+    let mut ladder = Vec::new();
+    if asked_for(LADDER_PART) {
+        ladder = match &ladder_plan {
+            Some(plan) => {
+                print_header(out, "== ladder")?;
+                if plan.strong_cores < plan.physical_cores {
+                    print_line(
+                        out,
+                        &format!(
+                            "   {} physical cores ({} strong), {} hardware threads",
+                            plan.physical_cores, plan.strong_cores, plan.logical_cores
+                        ),
+                    )?;
+                } else {
+                    print_line(
+                        out,
+                        &format!(
+                            "   {} physical cores, {} hardware threads",
+                            plan.physical_cores, plan.logical_cores
+                        ),
+                    )?;
+                }
+                collect_ladder(
+                    out,
+                    &mut runner,
+                    plan,
+                    &instances,
+                    locations,
+                    platform,
+                    &res,
+                )?
+            }
+            None => {
+                if !platform.is_linux() && platform != Platform::Windows {
+                    print_header(out, "== ladder")?;
+                    print_line(
+                        out,
+                        &format!("   {}", ladder_unmeasured.as_deref().unwrap_or_default()),
+                    )?;
+                }
+                Vec::new()
+            }
+        };
+        if !ladder.is_empty() {
+            print_header(out, "== ladder summary")?;
+            for line in format_ladder(&ladder, get_report_style()) {
+                print_line(out, &paint_table_line(&line))?;
+            }
+        }
+    }
     let insights = Insights {
         format: INSIGHTS_FORMAT,
         stamp,
@@ -1154,6 +1217,8 @@ pub fn run_insights(
         valgrind,
         allocations_unmeasured,
         allocations,
+        ladder_unmeasured,
+        ladder,
         asked,
     };
     write_insights(&res, &insights)?;
@@ -1925,7 +1990,7 @@ fn judge_noise(
         )?,
         _ => print_line(out, "   background    not sampled on this platform")?,
     }
-    let export = time_the_control(
+    let Some(result) = time_the_control(
         out,
         locations,
         instances,
@@ -1933,15 +1998,12 @@ fn judge_noise(
         platform,
         scratch.get_path(),
         settings,
-    )?;
-    let Some(result) = export.as_ref().and_then(|v| v["results"].get(0)) else {
-        print_line(out, "   workload      hyperfine failed")?;
+    )?
+    else {
+        print_line(out, "   workload      not timed")?;
         return Ok(None);
     };
-    let times: Vec<f64> = result["times"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_f64).collect())
-        .unwrap_or_default();
+    let times = result.times;
     if times.len() < 2 {
         print_line(out, "   workload      hyperfine gave too few runs")?;
         return Ok(None);
@@ -1956,8 +2018,8 @@ fn judge_noise(
     } else {
         0.0
     };
-    let mean = result["mean"].as_f64().unwrap_or(0.0);
-    let cpu = result["user"].as_f64().unwrap_or(0.0) + result["system"].as_f64().unwrap_or(0.0);
+    let mean = result.mean;
+    let cpu = result.user.unwrap_or(0.0) + result.system.unwrap_or(0.0);
     let reached = if mean > 0.0 {
         (cpu / mean * 10.0).round() / 10.0
     } else {
@@ -2220,13 +2282,13 @@ fn check_the_corpus_is_ready(
     check_declares_files(&locations.corpus)?;
     let chosen = build_instances(definitions, locations, options, platform)?;
     check_identical_pairs(&options.expect_identical, &chosen.instances)?;
-    let binaries = collect_binaries(&chosen.instances, platform)?;
+    let binaries = collect_binaries(&chosen.instances, platform);
     let defender = read_defender_state(platform, privileged, &binaries);
     let unequal = find_unequal_exclusions(&defender);
     if let Some(unequal) = &unequal
         && !options.allow_unequal
     {
-        return Err(explain_unequal_exclusions(unequal));
+        return Err(explain_unequal_exclusions(unequal, &binaries));
     }
     Ok(Ready {
         chosen,
@@ -2905,17 +2967,21 @@ fn check_everything(
         Table::OutOfTheBox,
     )?;
     let failures_before = runner.failures.len();
-    runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
-    if runner.failures.len() > failures_before {
+    let timed = runner.run_hyperfine(out, "check", std::slice::from_ref(&bare))?;
+    let version = match capture_with_status("hyperfine", &["--version"]) {
+        Ok((true, printed)) => shorten_version(&printed),
+        _ => String::new(),
+    };
+    if runner.failures.len() > failures_before || timed.is_empty() {
         print_line(
             out,
-            &format!("   hyperfine   {}", paint(Color::Red, "FAILED")),
+            &format!("   hyperfine   {}   {version}", paint(Color::Red, "FAILED")),
         )?;
         bad.push("hyperfine".to_string());
     } else {
         print_line(
             out,
-            &format!("   hyperfine   {}", paint(Color::Green, "ok")),
+            &format!("   hyperfine   {}   {version}", paint(Color::Green, "ok")),
         )?;
     }
     match capture_with_status("git", &["--version"]) {
@@ -2938,7 +3004,7 @@ fn check_everything(
     let state = read_defender_state(
         platform,
         is_privileged(platform),
-        &collect_binaries(instances, platform)?,
+        &collect_binaries(instances, platform),
     );
     if platform == Platform::Windows {
         match find_unequal_exclusions(&state) {
@@ -2967,6 +3033,21 @@ fn check_everything(
                     describe_exclusions(&state)
                 ),
             )?,
+        }
+    }
+    if platform.is_linux() {
+        let tracing = find_tracer(&scratch.join(PROBE_FILE));
+        let privileged = is_privileged(platform);
+        let paranoid = read_paranoid();
+        let profiling = find_profiler(
+            &scratch.join(PMU_PROBE_FILE),
+            privileged,
+            paranoid,
+            USER_PARANOID,
+        );
+        let valgrind = find_valgrind(&scratch.join(VALGRIND_PROBE_FILE));
+        for line in describe_linux_tools(&tracing, &profiling, privileged, paranoid, &valgrind) {
+            print_line(out, &line)?;
         }
     }
     let counted_by_git = match (locations.corpus.is_pinned(), locations.corpus.files) {
@@ -3008,7 +3089,7 @@ fn time_the_control(
     platform: Platform,
     scratch: &Path,
     settings: Settings,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<HyperfineResult>, String> {
     let mut runner = Runner::new(
         scratch,
         settings,
@@ -3022,10 +3103,10 @@ fn time_the_control(
         &locations.corpus.extensions,
         Table::OutOfTheBox,
     )?;
-    runner.run_hyperfine(out, "noise", std::slice::from_ref(&bare))?;
-    Ok(fs::read_to_string(scratch.join("noise.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok()))
+    Ok(runner
+        .run_hyperfine(out, "noise", std::slice::from_ref(&bare))?
+        .into_iter()
+        .next())
 }
 
 fn build_corpus_record(locations: &Locations) -> CorpusRecord {
@@ -3093,6 +3174,7 @@ fn collect_allocations(
     scrub: &[String],
     scratch: &Path,
 ) -> Result<Vec<Allocations>, String> {
+    let floor_target = create_floor_target(scratch)?;
     let mut counted = Vec::new();
     for instance in instances {
         print_line(out, &format!(">> {}", instance.get_name()))?;
@@ -3106,6 +3188,32 @@ fn collect_allocations(
             )?;
             continue;
         }
+        let floor_args = build_args(
+            instance,
+            &floor_target,
+            &locations.corpus.extensions,
+            INSIGHTS_TABLE,
+            false,
+        )?;
+        let floor_into = scratch.join(format!(
+            "valgrind-floor-{}.{PROBE_TEXT_SUFFIX}",
+            instance.get_name()
+        ));
+        let floor = match count_allocations(
+            instance.get_name(),
+            INSIGHTS_TABLE,
+            &instance.identity.binary,
+            &floor_args,
+            &instance.execution_env,
+            scrub,
+            &floor_into,
+        ) {
+            Ok(counts) => counts,
+            Err(refused) => {
+                print_warning(out, &refused)?;
+                continue;
+            }
+        };
         let args = build_args(
             instance,
             &locations.checkout,
@@ -3126,7 +3234,9 @@ fn collect_allocations(
             scrub,
             &into,
         ) {
-            Ok(counts) => {
+            Ok(mut counts) => {
+                counts.floor_allocs = floor.allocs;
+                counts.wall_ms += floor.wall_ms;
                 print_line(
                     out,
                     &format!(
@@ -3140,6 +3250,73 @@ fn collect_allocations(
         }
     }
     Ok(counted)
+}
+
+fn collect_ladder(
+    out: &mut dyn Write,
+    runner: &mut Runner,
+    plan: &LadderPlan,
+    instances: &[Instance],
+    locations: &Locations,
+    platform: Platform,
+    res: &Path,
+) -> Result<Vec<Ladder>, String> {
+    let scrub = collect_scrub(instances);
+    if let Some(first) = instances.first() {
+        let warm_args = build_args(
+            first,
+            &locations.checkout,
+            &locations.corpus.extensions,
+            INSIGHTS_TABLE,
+            false,
+        )?;
+        let _ = run_once(&build_subject(first, &warm_args, &scrub));
+    }
+    let commands: Vec<TimedCommand> = instances
+        .iter()
+        .map(|instance| {
+            build_command(
+                instance,
+                &locations.checkout,
+                &locations.corpus.extensions,
+                INSIGHTS_TABLE,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    for (index, rung) in plan.rungs.iter().enumerate() {
+        if index > 0 {
+            print_line(out, "")?;
+        }
+        runner.set_settings(Settings {
+            warmup: LADDER_WARMUP,
+            runs: rung.runs,
+            settle: 0,
+        });
+        let set_name = get_ladder_set_name(&rung.label);
+        let _guard = pin_current_process(platform, &rung.logical_cpus)?;
+        runner.run_hyperfine(out, &set_name, &commands)?;
+    }
+    let (all_measurements, skipped) = collect_measurements(res, &runner.commands, &[])?;
+    for message in skipped
+        .iter()
+        .filter(|message| message.starts_with(LADDER_PREFIX))
+    {
+        print_warning(out, message)?;
+    }
+    let rung_measurements: Vec<(AffinityRung, Vec<Measurement>)> = plan
+        .rungs
+        .iter()
+        .map(|rung| {
+            let set_name = get_ladder_set_name(&rung.label);
+            let found = all_measurements
+                .iter()
+                .filter(|m| m.set == set_name)
+                .cloned()
+                .collect();
+            (rung.clone(), found)
+        })
+        .collect();
+    Ok(build_ladders(plan, &rung_measurements))
 }
 
 fn describe_what_the_counters_want(
@@ -3495,18 +3672,14 @@ fn collect_scrub(instances: &[Instance]) -> Vec<String> {
     scrub
 }
 
-fn collect_binaries(
-    instances: &[Instance],
-    platform: Platform,
-) -> Result<Vec<CounterBinary>, String> {
+fn collect_binaries(instances: &[Instance], platform: Platform) -> Vec<CounterBinary> {
+    let (system, arch) = (platform.as_system(), detect_arch());
     instances
         .iter()
-        .map(|i| {
-            Ok(CounterBinary {
-                name: i.get_name().to_string(),
-                path: i.identity.binary.clone(),
-                process: i.definition.get_process_name(platform.as_system())?,
-            })
+        .map(|i| CounterBinary {
+            name: i.get_name().to_string(),
+            path: i.identity.binary.clone(),
+            process: i.definition.get_process_name(system, &arch),
         })
         .collect()
 }
@@ -3583,10 +3756,11 @@ fn describe_binary(
     dir: &Path,
     platform: Platform,
 ) -> String {
-    let Ok(named) = definition.get_binary_name(platform.as_system()) else {
+    let (system, arch) = (platform.as_system(), detect_arch());
+    if definition.lacks_a_release_file_for(system, &arch) {
         return paint(Color::Grey, "nothing is published for this system").to_string();
-    };
-    let binary = dir.join(named);
+    }
+    let binary = dir.join(definition.get_binary_name(system, &arch));
     let name = &definition.name;
     if !binary.is_file() {
         let said = match definition.acquisition.is_some() {
@@ -3867,6 +4041,89 @@ fn describe_exclusions(state: &DefenderState) -> String {
         }
         ProcessExclusions::Unequal => "mixed".to_string(),
     }
+}
+
+fn describe_linux_tools(
+    tracing: &Tracing,
+    profiling: &Profiling,
+    privileged: bool,
+    paranoid: Option<i64>,
+    valgrind: &Valgrind,
+) -> [String; 3] {
+    let strace_line = match tracing {
+        Tracing::Ready(version) => format!(
+            "   strace      {}   {}",
+            paint(Color::Green, "ok"),
+            shorten_version(version)
+        ),
+        Tracing::NotThere => format!(
+            "   strace      {}",
+            paint(Color::Yellow, "not found (optional: insights syscalls)")
+        ),
+        Tracing::Refused => format!(
+            "   strace      {}",
+            paint(
+                Color::Yellow,
+                "refused by ptrace (optional: insights syscalls)"
+            )
+        ),
+    };
+    let perf_line = match profiling {
+        Profiling::Ready { version, .. }
+            if !privileged && paranoid.is_some_and(|level| level > OPEN_PARANOID) =>
+        {
+            let level = paranoid.unwrap_or_default();
+            format!(
+                "   perf        {}   {} ({})",
+                paint(Color::Green, "ok"),
+                shorten_version(version),
+                paint(
+                    Color::Yellow,
+                    &format!(
+                        "ab ready; {PARANOID_KEY}={level} blocks insights pmu, needs <={OPEN_PARANOID} or root"
+                    )
+                )
+            )
+        }
+        Profiling::Ready { version, .. } => format!(
+            "   perf        {}   {}",
+            paint(Color::Green, "ok"),
+            shorten_version(version)
+        ),
+        Profiling::Shut(level) => format!(
+            "   perf        {}",
+            paint(
+                Color::Yellow,
+                &format!(
+                    "{PARANOID_KEY}={level} (optional: ab needs <={USER_PARANOID}, insights pmu needs <={OPEN_PARANOID} or root)"
+                )
+            )
+        ),
+        Profiling::NotThere => format!(
+            "   perf        {}",
+            paint(Color::Yellow, "not found (optional: ab, insights pmu)")
+        ),
+        Profiling::Refused => format!(
+            "   perf        {}",
+            paint(Color::Yellow, "no PMU events (optional: ab, insights pmu)")
+        ),
+    };
+    let valgrind_line = match valgrind {
+        Valgrind::Ready(version) => format!(
+            "   valgrind    {}   {}",
+            paint(Color::Green, "ok"),
+            shorten_version(version.strip_prefix("valgrind-").unwrap_or(version))
+        ),
+        Valgrind::NotThere => format!(
+            "   valgrind    {}",
+            paint(Color::Yellow, "not found (optional: insights allocations)")
+        ),
+        Valgrind::Refused => format!(
+            "   valgrind    {}",
+            paint(Color::Yellow, "refused (optional: insights allocations)")
+        ),
+    };
+    [strace_line, perf_line, valgrind_line]
 }
 
 fn paint_table_line(line: &str) -> String {
@@ -4266,7 +4523,7 @@ mod tests {
     }
 
     #[test]
-    fn counters_are_fetched_when_they_are_asked_for_and_a_corpus_alone_leaves_them_alone() {
+    fn counters_are_fetched_when_they_are_asked_for_and_only_a_corpus_leaves_them_alone() {
         let shipped = crate::shipped::collect_definitions(&mut Vec::new(), &[])
             .unwrap()
             .counters;
@@ -4382,7 +4639,7 @@ mod tests {
             .find(|definition| definition.name == "scc")
             .unwrap();
         let platform = Platform::Windows;
-        let binary = dir.join(definition.get_binary_name(platform.as_system()).unwrap());
+        let binary = dir.join(definition.get_binary_name(platform.as_system(), "x86_64"));
         fs::write(&binary, b"a build").unwrap();
         let mut manifest = Manifest(BTreeMap::new());
         let fetched = Fetched {
@@ -4523,6 +4780,88 @@ mod tests {
                 "   mezura@b  args  --threads 4",
                 "             env   MEZURA_DATA_DIR=/x/b",
             ]
+        );
+    }
+
+    #[test]
+    fn the_optional_linux_tools_name_their_versions_and_which_commands_each_missing_or_shut_tool_blocks()
+     {
+        let plain = |lines: [String; 3]| lines.map(|line| strip_ansi(&line));
+        let ready_perf = Profiling::Ready {
+            version: "perf version 6.12.11".to_string(),
+            duration: true,
+        };
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Ready("strace version 6.12".to_string()),
+                &ready_perf,
+                false,
+                Some(1),
+                &Valgrind::Ready("valgrind-3.24.0".to_string()),
+            )),
+            [
+                "   strace      ok   6.12",
+                "   perf        ok   6.12.11",
+                "   valgrind    ok   3.24.0",
+            ]
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Ready("6.12".to_string()),
+                &ready_perf,
+                false,
+                Some(2),
+                &Valgrind::Ready("valgrind-3.24.0".to_string()),
+            ))[1],
+            "   perf        ok   6.12.11 (ab ready; kernel.perf_event_paranoid=2 blocks insights pmu, needs <=1 or root)"
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Ready("6.12".to_string()),
+                &ready_perf,
+                true,
+                Some(2),
+                &Valgrind::Ready("valgrind-3.24.0".to_string()),
+            ))[1],
+            "   perf        ok   6.12.11"
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::NotThere,
+                &Profiling::Shut(3),
+                false,
+                Some(3),
+                &Valgrind::NotThere,
+            )),
+            [
+                "   strace      not found (optional: insights syscalls)",
+                "   perf        kernel.perf_event_paranoid=3 (optional: ab needs <=2, insights pmu needs <=1 or root)",
+                "   valgrind    not found (optional: insights allocations)",
+            ]
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Refused,
+                &Profiling::NotThere,
+                false,
+                None,
+                &Valgrind::Refused,
+            )),
+            [
+                "   strace      refused by ptrace (optional: insights syscalls)",
+                "   perf        not found (optional: ab, insights pmu)",
+                "   valgrind    refused (optional: insights allocations)",
+            ]
+        );
+        assert_eq!(
+            plain(describe_linux_tools(
+                &Tracing::Refused,
+                &Profiling::Refused,
+                false,
+                Some(1),
+                &Valgrind::Refused,
+            ))[1],
+            "   perf        no PMU events (optional: ab, insights pmu)"
         );
     }
 }

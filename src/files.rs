@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -5,6 +6,7 @@ use serde::de::DeserializeOwned;
 
 const GIT_DIR: &str = ".git";
 const ROOT_DIR: &str = ".";
+const EMPTY_FILE_NAME: &str = "linebench-empty-file";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SizedFile {
@@ -25,6 +27,13 @@ pub struct LargestFiles {
 pub fn read_text(path: &Path) -> Result<String, String> {
     fs::read_to_string(path)
         .map_err(|error| format!("{} could not be read: {error}", path.display()))
+}
+
+pub fn write_empty_file() -> Result<PathBuf, String> {
+    let path = env::temp_dir().join(EMPTY_FILE_NAME);
+    fs::write(&path, "")
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))?;
+    Ok(path)
 }
 
 pub fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T, String> {

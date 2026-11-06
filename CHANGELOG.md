@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0, unreleased
+
+New:
+
+- `insights` measures core scaling on Linux and Windows in a new `ladder` section: physical core
+  doublings up to all strong cores, efficiency cores when present, and SMT siblings, pinned through
+  the OS affinity mask and timed by hyperfine, reporting median wall time, speedup, per-core
+  efficiency, peak speedup, Amdahl's serial fraction, and the SMT gain.
+- A counter definition can set `binary-name`, the command a counter is stored and run under when
+  that is not its name.
+- `[acquisition.file]` takes a file per system and architecture, such as `linux-aarch64`, which is
+  tried before the file for the system.
+- `{empty-file}` in `same-work` is an empty file, to point a counter's configuration flag at.
+
+Other:
+
+- On Linux, `check` now reports the optional tools `strace`, `perf` (with
+  `kernel.perf_event_paranoid`), and `valgrind` and which commands each missing or shut tool blocks,
+  without changing the exit code.
+- In `insights`, the `allocations` section now measures a `floor` column over an empty directory
+  and subtracts those startup allocations from `per file`.
+- On Linux, the `memory` section of `insights` now includes the page faults of waited-for child
+  processes in `pages given` and `from disk`.
+- A counter is asked its version with the environment it runs with, so naming a mezura build no
+  longer rewrites your own mezura data directory.
+- `run`, `noise`, `insights`, and `verify` read the exports of hyperfine 2.0 as well as those of
+  1.x. A result that cannot be read is reported with its command and the JSON path that failed.
+- `check` now fails when hyperfine's export cannot be read.
+- mezura is declared at 3.4.0.
+- `fetch` tries a counter or corpus download that failed transiently up to two more times, waiting
+  4s and 12s, and stops on the first attempt when the refusal is final.
+- With the same work, cloc runs with `--config` pointed at an empty file, so an `options.txt` on
+  the machine no longer changes its counts.
+
 ## 0.3.1, 2026-10-29
 
 Other:

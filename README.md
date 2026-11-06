@@ -18,8 +18,8 @@ The shape of the answer over a tree the size of the Linux kernel, names left out
 rounded. The runs worth reading are the ones each counter publishes in its own repository.
 
 The counters are data, one `counters/<name>.toml` each, and linebench never builds one: it
-fetches the release, hashes it, and writes the hash into the record. Today it knows cloc,
-mezura, scc and tokei.
+fetches the release, hashes it, and writes the hash into the record. `linebench --help` names
+the ones it ships.
 
 ## Contents
 
@@ -83,11 +83,11 @@ linebench noise cpython
 sudo linebench run cpython
 ```
 
-The first line downloads the five counters and clones one of the shipped corpora at its pinned
+The first line downloads every counter and clones one of the shipped corpora at its pinned
 commit.  
 The second says what arrived and where.  
-The third proves the machine can measure: every counter runs once and its counts are checked
-against the corpus.  
+The third runs each counter the corpus does not skip once, and checks its counts against the
+corpus.  
 The fourth measures the noise: the background cpu, the spread of a few runs, and whether the
 machine is steady enough to benchmark.  
 The fifth measures, elevated so the power scheme can be set for it.
@@ -108,7 +108,7 @@ network share, measures the mount.
 
 ## The commands
 
-`linebench --help` lists every flag, and `--help` after a command prints that command alone.
+`linebench --help` lists every flag, and `--help` after a command prints only that command.
 
 ### fetch
 
@@ -162,7 +162,7 @@ fetches those and status is the only place that says they exist.
 
 ```
 linebench check linux
-linebench check cpython --counters cloc,mezura,scc,tokei
+linebench check cpython --counters cloc,scc
 linebench check linux,cpython
 linebench check all
 ```
@@ -256,7 +256,7 @@ The control is the instance timed alone at the start and at the end. Its shift i
 machine's own movement, and it is also what `noise` times. `control = "mezura"` in the conf names
 it for every run on the machine, `--control` for one run, and with neither it is the first
 instance named, which with no `--counters` is the first definition alphabetically that the corpus
-does not skip, today mezura. Keep the control the same across the runs you want compared: "since
+does not skip. Keep the control the same across the runs you want compared: "since
 the last run" reads every change against the control's own shift, and that shift is known only
 when an earlier run timed the same control build.
 
@@ -276,6 +276,7 @@ lengthen and disturb it. What each system can answer:
 | the counts of system calls | yes, `strace -c -f` | no | no |
 | the hardware counters | yes, `perf stat` | no | no |
 | the heap allocations | yes, `valgrind` | no | no |
+| the affinity ladder | yes, `sched_setaffinity` | yes, `SetProcessAffinityMask` | no |
 
 **The floor** is what a counter costs before it has counted anything. Three timings per instance,
 thirty runs and no settle: the version answer, `<counter> --version`, and the two ready floors,
@@ -338,23 +339,31 @@ runs each:
 Past four events the cpu shares the hardware out in turns and every count becomes an estimate.
 Each instance is captured once before its passes, which settles the page cache and gives the line
 count the table divides by. Linux only, and it wants root or `kernel.perf_event_paranoid` at 1,
-since above that perf drops the kernel and the counts would cover user space alone.
+since above that perf drops the kernel and the counts would cover only user space.
 
-**The heap allocations** are one execution per instance under `valgrind` with `--leak-check=no` and
-`--undef-value-errors=no`, reporting total allocations, allocations per file, total bytes allocated,
-average bytes per allocation, and bytes still in use at exit. Counters that are scripts (`cloc`) are
-skipped, and counters that bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under
-the table.
+**The heap allocations** are `valgrind` with `--leak-check=no` and `--undef-value-errors=no` over
+the empty floor directory and over the corpus, reporting total allocations, the empty-directory
+floor, allocations per file above the floor, total bytes allocated, average bytes per allocation,
+and bytes still in use at exit. Counters that are scripts (`cloc`) are skipped, and counters that
+bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under the table.
+
+**The affinity ladder** pins the process affinity mask (`sched_setaffinity` on Linux,
+`SetProcessAffinityMask` on Windows, built from the true physical core map in sysfs
+`thread_siblings_list` or `GetLogicalProcessorInformationEx`) to doublings of physical cores up to
+all strong cores, then efficiency cores when present, then SMT siblings, timing each rung through
+hyperfine (3, 3, 5, 5, 10 runs as the rung widens) and reporting median wall time, speedup over one
+physical core, per-core efficiency (`speedup / cores`), peak speedup, Amdahl's serial fraction, and
+the SMT gain.
 
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
-needs is missing. `--only floor,memory,syscalls,pmu,allocations` names which of the insights to
-measure. A part left out is named as left out in the record and on the page, so an empty section is
-never read as a measurement that found nothing.
+needs is missing. `--only floor,memory,syscalls,pmu,allocations,ladder` names which of the insights
+to measure. A part left out is named as left out in the record and on the page, so an empty section
+is never read as a measurement that found nothing.
 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
 machine block, the antivirus state, the corpus with its commit and the instances measured, so it
 stands on its own, and the hyperfine exports sit beside it. `insights.md` is the same session for a
-reader: the machine, the corpus and the five sections above as they were printed. An `--args` or
+reader: the machine, the corpus and the six sections above as they were printed. An `--args` or
 `--env` instance or a build of yours sends the session under `results/insights/local/`.
 
 ### ab
@@ -395,7 +404,7 @@ alongside instructions and cycles. `--files [<n>]` measures the `n` largest file
 (ten by default, at most 100) under `instructions:u` with an empty-file floor subtracted, sorted by
 `b / a` and summed by directory. Several targets, `ab linux,cpython,./src`, are measured in turn.
 Linux only, and it wants root or `kernel.perf_event_paranoid` at 2 or below, since the counts are
-user space alone.
+user space only.
 
 ### report
 
@@ -426,8 +435,9 @@ What one `insights` command wrote is read the same way. Name its directory, or t
 inside it, and the floor is held against itself and against its exports, every memory curve
 against the peak the system reported independently of the samples, every traced instance against
 the calls it listed, every profiled instance against the events it read, every heap summary
-against what it allocated, and every number against the instances the session says it measured. A
-part `--only` left out and measured all the same fails too.
+against what it allocated, every affinity ladder against its rungs and their exports, and every
+number against the instances the session says it measured. A part `--only` left out and measured
+all the same fails too.
 
 ![what verify prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/verify.png)
 
@@ -527,8 +537,8 @@ With no binary of its own the instance runs the release binary, so a `[given]` e
 instance make an instance of their own, so the name carries a tag.
 
 An instance can carry an environment of its own too, `--env mezura@a=MEZURA_DATA_DIR=/x/a` for
-one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set for that instance
-alone in every invocation of it. A counter definition can also give each instance a directory of
+one command or `env = { MEZURA_DATA_DIR = "/x/a" }` in its `[given]` entry, set only for that
+instance in every invocation of it. A counter definition can also give each instance a directory of
 its own through `[run] env` and `{instance-dir}`, as `counters/mezura.toml` does for
 `MEZURA_DATA_DIR`, so two builds of mezura that carry different language files do not rewrite a
 shared data directory inside the runs being measured. Like per-instance arguments, an explicit
@@ -645,7 +655,7 @@ hyperfine's own output, `transcript.txt` is everything the run printed, and `not
 checklist to fill in by hand, with the since block under it. `out/` holds every counter's JSON and
 is deleted once the counts are read. Inside an insights directory, `insights.json` is the session,
 `insights.md` the same session to read, and hyperfine's own output sits beside them for the floor
-phase.
+and ladder phases.
 
 ## Settings
 
@@ -660,7 +670,7 @@ flag belongs to the commands whose help names it, and a command refuses one that
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
-| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations` | | | all five |
+| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations,ladder` | | | all six |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | cloc |
@@ -690,8 +700,8 @@ With no target named, a command that needs one refuses and prints the two forms 
 ## Counters and corpora
 
 A counter is `counters/<name>.toml`. Its keys mirror the linejudge adapter where the idea is the
-same (`name`, `repository`, `version-flag`, `[acquisition]`, the `[read]` paths), so a block copies
-between the two files unchanged:
+same (`name`, `binary-name`, `repository`, `version-flag`, `[acquisition]`, the `[read]` paths), so
+a block copies between the two files unchanged:
 
 ```toml
 name         = "scc"
@@ -723,12 +733,13 @@ blanks   = "Blank"
 
 | key | what it says |
 |---|---|
+| `binary-name` | the file name the counter's command is stored and run under, without the extension; the default is `name` |
 | `args` | the command that gets timed, with `{target}` where the directory goes |
 | `json` | appended only for the capture that reads the counts |
 | `languages` | carries `{extensions}`, or `{names}` for a counter that spells languages by name |
 | `[language-names]` | that counter's name for each extension, matched whatever the case |
 | `extension-case` | `exact` for a counter that matches case, so `{extensions}` is spelled `s,S`; the default is `any` |
-| `same-work` | what the same-work table adds |
+| `same-work` | what the same-work table adds, where `{empty-file}` is an empty file |
 | `same-work-note` | what the results page prints for it |
 | `env` | variables set in `[run]` for every invocation, with `{instance-dir}` expanded to a directory of that instance's own |
 | `volatile` | the fields of the JSON that differ between two runs, in the `[read]` path syntax, so `--expect-identical` can set them aside |
@@ -736,19 +747,20 @@ blanks   = "Blank"
 | `[read]` | where the counts sit in the counter's own JSON |
 | `output` | a compiled reader for JSON the paths cannot reach, `tokei-json` today, in place of `[read]` |
 
-The shipped `[language-names]` covers the extensions the shipped corpora name, and a corpus of
-your own carrying another extension adds a line for it. Every bucket in `[read]` beyond code and
-comments is read by name, so one block covers a counter that prints `blanks` in one mode and
-`extra` in another, and the buckets have to add up to `lines`.
+Each shipped `[language-names]` table covers the extensions the shipped corpora name, and a
+corpus added with `--add` that carries another extension needs a line for it. Every bucket in
+`[read]` beyond code and comments is read by name, so one block covers a counter that prints
+`blanks` in one mode and `extra` in another, and the buckets have to add up to `lines`.
 
 The channels are `github-release-asset` (the file for this system and architecture is picked by the
 words in its name, and the published checksums are checked), `github-release-file` (a file named
-outright per system, `[acquisition.file]`, stored under the counter's own name plus the release
-file's extension, so the process the antivirus sees stays `cloc.exe` across versions), and
-`crates-io` (built with cargo, and the rustc that built it goes into the record). A counter that
-ships as a script runs through its own first line once fetch has marked it runnable, and needs its
-interpreter on the machine, or `check` says so. A counter that is a script on Windows is the one
-case this format does not cover yet.
+outright per system, `[acquisition.file]`, stored under `binary-name` plus the release file's
+extension, so the process the antivirus sees stays `cloc.exe` across versions), and `crates-io`
+(built with cargo, and the rustc that built it goes into the record). `[acquisition.file]` also
+takes a system and an architecture, `windows-aarch64`, which comes before the system alone. A
+counter that ships as a script runs through its own first line once fetch has marked it runnable,
+and needs its interpreter on the machine, or `check` says so. A counter that is a script on
+Windows is the one case this format does not cover yet.
 
 A corpus is `corpora/<name>.toml`:
 
@@ -773,7 +785,7 @@ files carrying those extensions in the tree of that commit, `git ls-tree -r HEAD
 index, working tree or gitignore can move: `check` over a definition with a `commit` and no `files`
 counts them and prints the line to paste, and `run` refuses until it is there. `[skip]` names, per
 system, the counters left out of the default set over this corpus, with WSL counting as linux: cloc
-takes far longer over these trees than the other three, about 90 s per run over the kernel, so a
+takes far longer over these trees than the other counters, about 90 s per run over the kernel, so a
 plain `run` would be mostly it. All three shipped corpora leave it out on every system, and a
 name in `--counters` runs it anyway. Leave `commit` blank to measure a tree as it stands.
 `remote` is needed only to fetch.
@@ -788,7 +800,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-CI runs the three on Linux, Windows and macOS, then fetches the five counters and the cpython
+CI runs the three on Linux, Windows and macOS, then fetches every counter and the cpython
 corpus and runs `check` over it, so a definition that cannot be fetched, run or read on one of the
 three systems fails the build. No timing is read there.
 

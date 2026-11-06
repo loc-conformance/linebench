@@ -17,8 +17,8 @@ args           = ["{target}"]
 json           = ["--json"]
 languages      = ["--include-ext={extensions}"]
 extension-case = "exact"
-same-work      = ["--skip-uniqueness"]
-same-work-note = "no ignore files of its own to turn off, duplicate file detection off"
+same-work      = ["--skip-uniqueness", "--config", "{empty-file}"]
+same-work-note = "no ignore files to turn off, duplicate file detection off, no options file read"
 scrub-env      = []
 
 [read]

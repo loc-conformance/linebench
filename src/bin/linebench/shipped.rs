@@ -74,6 +74,20 @@ pub fn collect_definitions(out: &mut dyn Write, added: &[PathBuf]) -> Result<Def
     }
     counters.sort_by(|a, b| a.name.cmp(&b.name));
     corpora.sort_by(|a, b| a.name.cmp(&b.name));
+    for (at, definition) in counters.iter().enumerate() {
+        let stem = definition.get_binary_stem();
+        if let Some(twin) = counters[..at]
+            .iter()
+            .find(|earlier| earlier.get_binary_stem().eq_ignore_ascii_case(stem))
+        {
+            return Err(format!(
+                "{} and {} both store their binary as {stem}, so one would overwrite the other in \
+                 the counters directory",
+                twin.path.display(),
+                definition.path.display()
+            ));
+        }
+    }
     for corpus in &corpora {
         for (system, names) in &corpus.skip {
             if let Some(name) = names
@@ -183,5 +197,17 @@ blanks   = \"Blank\"
             "{unknown}"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_counters_that_store_their_binary_under_one_name_are_refused() {
+        let dir = env::temp_dir().join("linebench-two_counters_that_store_their_binary");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let twin = OLDER_SCC.replace("name = \"scc\"", "name = \"sc\"\nbinary-name = \"SCC\"");
+        fs::write(dir.join("sc.toml"), twin).unwrap();
+        let refused = collect_definitions(&mut Vec::new(), std::slice::from_ref(&dir)).unwrap_err();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(refused.contains("both store their binary as"), "{refused}");
     }
 }
