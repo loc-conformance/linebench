@@ -7,6 +7,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,10 +24,23 @@ use crate::os::{Unfinished, capture_with_status, capture_with_status_in_env};
 pub const MANIFEST_FILE: &str = "linebench-fetched.toml";
 pub const GIVEN_DIR: &str = "given";
 pub const INSTANCE_SEPARATOR: char = '@';
+pub(crate) const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(4), Duration::from_secs(12)];
+const FINAL_REFUSALS: [&str; 9] = [
+    "is not on this machine",
+    "could not be run",
+    "set binary-name to the command",
+    "this release carries no",
+    "cannot pick a file for",
+    "is a file name with a path inside it",
+    "has no release tagged",
+    "github refused the token",
+    "could not compile",
+];
 const GITHUB_API: &str = "https://api.github.com/repos";
 const GITHUB_TOKEN_ENVS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
 const RATE_LIMIT_MARKS: [&str; 4] = ["error: 403", "error 403", "error: 429", "error 429"];
 const BAD_TOKEN_MARKS: [&str; 2] = ["error: 401", "error 401"];
+const NOT_FOUND_MARKS: [&str; 2] = ["error: 404", "error 404"];
 const CHECKSUM_WORDS: [&str; 2] = ["checksum", "sha256"];
 const PARTIAL_PREFIX: &str = ".partial-";
 const USER_AGENT: &str = concat!(
@@ -147,24 +162,30 @@ pub fn fetch_counter(
         )?;
         return Ok(target);
     }
-    let partial = dir.join(format!("{PARTIAL_PREFIX}{}", definition.name));
-    let _ = fs::remove_dir_all(&partial);
-    fs::create_dir_all(&partial)
-        .map_err(|error| format!("{} could not be created: {error}", partial.display()))?;
-    let assembled = match how.channel {
-        Channel::CratesIo => build_from_crates_io(out, definition, how, &partial, &named),
-        Channel::GithubReleaseAsset => {
-            download_release_asset(out, how, &partial, system, arch, &named)
-        }
-        Channel::GithubReleaseFile => download_release_file(
-            out,
-            how,
-            &partial,
-            &definition.get_release_file_name(system, arch)?,
-        ),
+    let release_file = match how.channel {
+        Channel::GithubReleaseFile => Some(definition.get_release_file_name(system, arch)?),
+        Channel::CratesIo | Channel::GithubReleaseAsset => None,
     };
-    let (binary, source, built_with) = assembled.inspect_err(|_| {
+    let partial = dir.join(format!("{PARTIAL_PREFIX}{}", definition.name));
+    let (binary, source, built_with) = try_a_few_times(out, &RETRY_WAITS, |out| {
         let _ = fs::remove_dir_all(&partial);
+        fs::create_dir_all(&partial)
+            .map_err(|error| format!("{} could not be created: {error}", partial.display()))?;
+        let assembled = match how.channel {
+            Channel::CratesIo => build_from_crates_io(out, definition, how, &partial, &named),
+            Channel::GithubReleaseAsset => {
+                download_release_asset(out, how, &partial, system, arch, &named)
+            }
+            Channel::GithubReleaseFile => download_release_file(
+                out,
+                how,
+                &partial,
+                release_file.as_deref().unwrap_or(&named),
+            ),
+        };
+        assembled.inspect_err(|_| {
+            let _ = fs::remove_dir_all(&partial);
+        })
     })?;
     let execution_env =
         definition.build_execution_env(&partial.join(INSTANCE_DATA_DIR), &BTreeMap::new());
@@ -393,33 +414,77 @@ pub fn calculate_sha256(file: &Path) -> Result<String, String> {
         .collect())
 }
 
-pub(crate) fn explain_github_refusal(repository: &str, refused: &[String]) -> Option<String> {
-    if mentions_any(refused, &BAD_TOKEN_MARKS) {
-        return Some(format!(
+pub(crate) fn try_a_few_times<T>(
+    out: &mut dyn Write,
+    waits: &[Duration],
+    mut step: impl FnMut(&mut dyn Write) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut attempt = step(out);
+    for wait in waits {
+        let Err(refused) = &attempt else {
+            return attempt;
+        };
+        let lowered = refused.to_ascii_lowercase();
+        if FINAL_REFUSALS.iter().any(|mark| lowered.contains(mark)) {
+            return attempt;
+        }
+        print_line(
+            out,
+            &format!("  {refused}; trying again in {}s", wait.as_secs()),
+        )?;
+        thread::sleep(*wait);
+        attempt = step(out);
+    }
+    attempt
+}
+
+pub(crate) fn explain_github_refusal(
+    repository: &str,
+    version: Option<&str>,
+    refused: &[String],
+) -> String {
+    let mentions = |message: &str, marks: &[&str]| {
+        let lowered = message.to_ascii_lowercase();
+        marks.iter().any(|mark| lowered.contains(mark))
+    };
+    if refused.iter().any(|one| mentions(one, &BAD_TOKEN_MARKS)) {
+        return format!(
             "github refused the token in GITHUB_TOKEN or GH_TOKEN ({}): unset it, or set a valid \
              one",
             refused.join("; ")
-        ));
+        );
     }
-    if mentions_any(refused, &RATE_LIMIT_MARKS) {
-        return Some(format!(
+    if refused.iter().any(|one| mentions(one, &RATE_LIMIT_MARKS)) {
+        return format!(
             "github refused to say what {repository} has released ({}): anonymous lookups are \
              limited per address, and a token in GITHUB_TOKEN or GH_TOKEN lifts that",
             refused.join("; ")
-        ));
+        );
     }
-    None
-}
-
-pub(crate) fn mentions_any(refused: &[String], marks: &[&str]) -> bool {
-    refused.iter().any(|message| {
-        let message = message.to_ascii_lowercase();
-        marks.iter().any(|mark| message.contains(mark))
-    })
-}
-
-pub(crate) fn read_github_api_within(url: &str, seconds: u32) -> Result<String, String> {
-    read_github_api_with(url, Some(seconds))
+    if !refused.is_empty() && refused.iter().all(|one| mentions(one, &NOT_FOUND_MARKS)) {
+        return match version {
+            Some(version) => format!(
+                "{repository} has no release tagged v{version} or {version}: {}",
+                refused.join("; ")
+            ),
+            None => format!("github lists no latest release for {repository}"),
+        };
+    }
+    let others: Vec<&str> = refused
+        .iter()
+        .filter(|one| !mentions(one, &NOT_FOUND_MARKS))
+        .map(String::as_str)
+        .collect();
+    match version {
+        Some(version) => format!(
+            "github could not be asked what {repository} released as v{version} or {version}: {}",
+            others.join("; ")
+        ),
+        None => format!(
+            "github could not be asked what {repository} has released: {}",
+            others.join("; ")
+        ),
+    }
 }
 
 pub(crate) fn read_url_within(url: &str, seconds: u32) -> Result<String, String> {
@@ -634,7 +699,7 @@ fn find_release(repository: &str, version: &str) -> Result<Release, String> {
     let mut refused = Vec::new();
     for tag in [format!("v{version}"), version.to_string()] {
         let url = format!("{GITHUB_API}/{repository}/releases/tags/{tag}");
-        match read_github_api(&url) {
+        match read_github_api(&url, None) {
             Ok(document) => {
                 return serde_json::from_str(&document).map_err(|error| {
                     format!("what github answered about {repository} {tag} does not read: {error}")
@@ -644,16 +709,7 @@ fn find_release(repository: &str, version: &str) -> Result<Release, String> {
         }
     }
     refused.dedup();
-    Err(explain_lookup_refusal(repository, version, &refused))
-}
-
-fn explain_lookup_refusal(repository: &str, version: &str, refused: &[String]) -> String {
-    explain_github_refusal(repository, refused).unwrap_or_else(|| {
-        format!(
-            "{repository} has no release tagged v{version} or {version}: {}",
-            refused.join("; ")
-        )
-    })
+    Err(explain_github_refusal(repository, Some(version), &refused))
 }
 
 struct ApiRequest {
@@ -662,11 +718,7 @@ struct ApiRequest {
     wget: Vec<String>,
 }
 
-fn read_github_api(url: &str) -> Result<String, String> {
-    read_github_api_with(url, None)
-}
-
-fn read_github_api_with(url: &str, max_seconds: Option<u32>) -> Result<String, String> {
+pub(crate) fn read_github_api(url: &str, max_seconds: Option<u32>) -> Result<String, String> {
     let token = GITHUB_TOKEN_ENVS
         .iter()
         .find_map(|name| env::var(name).ok())
@@ -885,19 +937,37 @@ mod tests {
         assert_eq!(request.config, None);
         assert_eq!(request.wget, ["-nv", "-O-", url]);
         let limited = ["curl: (22) The requested URL returned error: 403".to_string()];
-        assert!(explain_lookup_refusal("boyter/scc", "4.0.0", &limited).contains("GITHUB_TOKEN"));
+        assert!(
+            explain_github_refusal("boyter/scc", Some("4.0.0"), &limited).contains("GITHUB_TOKEN")
+        );
         let by_wget = ["https://api.github.com/x:\n ERROR 429: Too Many Requests.".to_string()];
-        assert!(explain_lookup_refusal("boyter/scc", "4.0.0", &by_wget).contains("GITHUB_TOKEN"));
+        assert!(
+            explain_github_refusal("boyter/scc", Some("4.0.0"), &by_wget).contains("GITHUB_TOKEN")
+        );
         let stalled = ["curl: (28) Connection timed out after 21403 milliseconds".to_string()];
-        assert!(!explain_lookup_refusal("boyter/scc", "4.0.0", &stalled).contains("GITHUB_TOKEN"));
+        let stalled_refusal = explain_github_refusal("boyter/scc", Some("4.0.0"), &stalled);
+        assert!(!stalled_refusal.contains("GITHUB_TOKEN"));
+        assert!(
+            stalled_refusal.starts_with("github could not be asked what boyter/scc released"),
+            "{stalled_refusal}"
+        );
         let bad_token = ["curl: (22) The requested URL returned error: 401".to_string()];
         assert!(
-            explain_lookup_refusal("boyter/scc", "4.0.0", &bad_token).contains("refused the token")
+            explain_github_refusal("boyter/scc", Some("4.0.0"), &bad_token)
+                .contains("refused the token")
         );
         let missing = ["curl: (22) The requested URL returned error: 404".to_string()];
         assert!(
-            explain_lookup_refusal("boyter/scc", "4.0.0", &missing)
+            explain_github_refusal("boyter/scc", Some("4.0.0"), &missing)
                 .starts_with("boyter/scc has no release tagged v4.0.0 or 4.0.0: curl")
+        );
+        let missing_v_then_stalled = [missing[0].clone(), stalled[0].clone()];
+        let mixed = explain_github_refusal("AlDanial/cloc", Some("2.10"), &missing_v_then_stalled);
+        assert!(
+            mixed.starts_with(
+                "github could not be asked what AlDanial/cloc released as v2.10 or 2.10: curl: (28)"
+            ),
+            "{mixed}"
         );
     }
 
@@ -1201,6 +1271,48 @@ blanks   = \"Blank\"
         let printed = read_version(&definition, &stub, &execution_env).unwrap();
         fs::remove_dir_all(&dir).unwrap();
         assert_eq!(format!("seen {}", instance_dir.display()), printed);
+    }
+
+    #[test]
+    fn a_transient_refusal_is_tried_again_and_a_final_one_stops_on_the_first_attempt() {
+        let waits = [Duration::ZERO, Duration::ZERO];
+        let mut printed = Vec::new();
+        let mut attempts = 0;
+        let outcome = try_a_few_times(&mut printed, &waits, |_| {
+            attempts += 1;
+            match attempts < 3 {
+                true => Err("curl: (56) OpenSSL SSL_read: Connection reset by peer".to_string()),
+                false => Ok("arrived"),
+            }
+        });
+        assert_eq!(outcome.unwrap(), "arrived");
+        assert_eq!(attempts, 3);
+        let said = String::from_utf8(printed).unwrap();
+        assert_eq!(said.matches("trying again in 0s").count(), 2, "{said}");
+
+        for final_refusal in [
+            "curl is not on this machine, and neither is wget",
+            "git could not be run: program not found",
+            "cs.zip holds no codestats.exe; set binary-name to the command it holds, without .exe",
+            "this release carries no cloc-2.10.pl, only cloc-2.10.tar.gz",
+            "this release carries nothing for linux on x86_64, only scc_Plan9_sparc.tar.gz",
+            "plan9 is a system this program cannot pick a file for",
+            "../scc.zip is a file name with a path inside it",
+            "AlDanial/cloc has no release tagged v9.9.9 or 9.9.9: 404",
+            "github refused the token in GITHUB_TOKEN or GH_TOKEN (401)",
+            "error: could not compile `tokei` (bin \"tokei\")",
+        ] {
+            let mut printed = Vec::new();
+            let mut attempts = 0;
+            let refused = try_a_few_times(&mut printed, &waits, |_| -> Result<(), String> {
+                attempts += 1;
+                Err(final_refusal.to_string())
+            })
+            .unwrap_err();
+            assert_eq!(attempts, 1, "{final_refusal}");
+            assert_eq!(refused, final_refusal);
+            assert!(printed.is_empty(), "{final_refusal}");
+        }
     }
 
     fn build_a_release() -> Vec<Asset> {

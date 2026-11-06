@@ -29,6 +29,8 @@ Other:
   1.x. A result that cannot be read is reported with its command and the JSON path that failed.
 - `check` now fails when hyperfine's export cannot be read.
 - mezura is declared at 3.4.0.
+- `fetch` tries a counter or corpus download that failed transiently up to two more times, waiting
+  4s and 12s, and stops on the first attempt when the refusal is final.
 - With the same work, cloc runs with `--config` pointed at an empty file, so an `options.txt` on
   the machine no longer changes its counts.
 
