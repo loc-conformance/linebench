@@ -1,0 +1,34 @@
+name         = "codestats"
+binary-name  = "cs"
+repository   = "https://github.com/trypsynth/codestats"
+version-flag = "--version"
+
+# Release binaries are built with PGO, and a build from crates.io isn't.
+[acquisition]
+channel = "github-release-file"
+name    = "trypsynth/codestats"
+version = "1.0.1"
+
+[acquisition.file]
+linux-x86_64    = "cs-x86_64-unknown-linux-gnu"
+linux-aarch64   = "cs-aarch64-unknown-linux-gnu"
+macos-x86_64    = "cs-x86_64-apple-darwin"
+macos-aarch64   = "cs-aarch64-apple-darwin"
+windows-x86_64  = "cs-x86_64-pc-windows-gnu.exe"
+windows-aarch64 = "cs-aarch64-pc-windows-gnullvm.exe"
+
+[run]
+args           = ["{target}"]
+json           = ["--output", "json-compact"]
+languages      = ["--ext", "{extensions}"]
+same-work      = ["--no-gitignore", "--hidden", "--include-generated", "--no-gitattributes",
+                  "--config", "{empty-file}"]
+same-work-note = "ignore files off, hidden files counted, generated files counted, linguist attributes off, no configuration file read"
+
+[read]
+files    = "totals.file_count"
+lines    = "totals.lines.total"
+code     = "totals.lines.code"
+comments = "totals.lines.comment"
+blanks   = "totals.lines.blank"
+shebangs = "totals.lines.shebang"
