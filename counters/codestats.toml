@@ -7,7 +7,7 @@ version-flag = "--version"
 [acquisition]
 channel = "github-release-file"
 name    = "trypsynth/codestats"
-version = "1.0.1"
+version = "1.1.0"
 
 [acquisition.file]
 linux-x86_64    = "cs-x86_64-unknown-linux-gnu"
@@ -22,7 +22,7 @@ args           = ["{target}"]
 json           = ["--output", "json-compact"]
 languages      = ["--ext", "{extensions}"]
 same-work      = ["--no-gitignore", "--hidden", "--include-generated", "--no-gitattributes",
-                  "--config", "{empty-file}"]
+                  "--no-config"]
 same-work-note = "ignore files off, hidden files counted, generated files counted, linguist attributes off, no configuration file read"
 
 [read]
