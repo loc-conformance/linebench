@@ -4,6 +4,7 @@
 
 New:
 
+- codestats 1.1.0 added as a measured counter.
 - `insights` measures core scaling on Linux and Windows in a new `ladder` section: physical core
   doublings up to all strong cores, efficiency cores when present, and SMT siblings, pinned through
   the OS affinity mask and timed by hyperfine, reporting median wall time, speedup, per-core
@@ -28,7 +29,7 @@ Other:
 - `run`, `noise`, `insights`, and `verify` read the exports of hyperfine 2.0 as well as those of
   1.x. A result that cannot be read is reported with its command and the JSON path that failed.
 - `check` now fails when hyperfine's export cannot be read.
-- mezura is declared at 3.4.0.
+- mezura is declared at 3.5.0.
 - `fetch` tries a counter or corpus download that failed transiently up to two more times, waiting
   4s and 12s, and stops on the first attempt when the refusal is final.
 - With the same work, cloc runs with `--config` pointed at an empty file, so an `options.txt` on
