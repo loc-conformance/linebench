@@ -1,3 +1,14 @@
+use std::io;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
+
+use crate::os::Usage;
+
+/// The kernel counts `ru_inblock` in 512-byte blocks, whatever the block size of the device.
+#[cfg(target_os = "linux")]
+const INBLOCK_BYTES: u64 = 512;
+
 #[cfg(target_os = "linux")]
 pub fn read_affinity_cpus() -> Result<Vec<usize>, String> {
     // Sound because cpu_set_t is a plain bitmask array with no invalid all-zero representation.
@@ -51,4 +62,43 @@ pub fn write_affinity_cpus(cpus: &[usize]) -> Result<(), String> {
 #[cfg(not(target_os = "linux"))]
 pub fn write_affinity_cpus(_cpus: &[usize]) -> Result<(), String> {
     Err("cpu affinity is not supported on this platform".to_string())
+}
+
+#[cfg(target_os = "linux")]
+pub fn reap_without_blocking(pid: u32) -> io::Result<Option<(ExitStatus, Usage)>> {
+    let mut status = 0;
+    // Sound because rusage is plain integers and timevals with no invalid all-zero representation.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // Sound because both pointers are to live locals of the exact types wait4 writes.
+    let reaped = unsafe { libc::wait4(pid as libc::pid_t, &mut status, libc::WNOHANG, &mut usage) };
+    match reaped {
+        0 => Ok(None),
+        -1 => Err(io::Error::last_os_error()),
+        _ => Ok(Some((
+            ExitStatus::from_raw(status),
+            Usage {
+                faults: usage.ru_minflt as u64,
+                disk_read_bytes: usage.ru_inblock as u64 * INBLOCK_BYTES,
+            },
+        ))),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reap_without_blocking(_pid: u32) -> io::Result<Option<(ExitStatus, Usage)>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "a run is reaped with its resource usage on linux",
+    ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub fn drop_from_page_cache(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // Sound because the descriptor belongs to a live File, and a length of zero means all of it.
+    let failed = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    match failed {
+        0 => Ok(()),
+        code => Err(io::Error::from_raw_os_error(code)),
+    }
 }

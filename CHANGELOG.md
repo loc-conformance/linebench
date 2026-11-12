@@ -28,10 +28,12 @@ Other:
   without changing the exit code.
 - In `insights`, the `allocations` section now measures a `floor` column over an empty directory
   and subtracts those startup allocations from `per file`.
-- On Linux, the `memory` section of `insights` now includes the page faults of waited-for child
-  processes in `pages given` and `from disk`.
-- On Windows, the `memory` section of `insights` runs every instance once before it samples it, so
-  the sampled run reads a warm cache, and reads the page count once the run has ended.
+- On Linux, the `memory` section of `insights` takes `pages given` and `from disk` from the kernel
+  as the run is reaped, waited-for child processes included. `from disk` is now the bytes the run
+  read from storage, through `read` as well as through mapped pages; it used to count the pages
+  faulted in from disk, which stay at zero for a counter that reads a cold corpus through `read`.
+- The `memory` section of `insights` runs each instance once before sampling it, so the sampled run
+  reads the corpus from the page cache. On Windows it reads the page count once the run has ended.
 - A counter is asked its version with the environment it runs with, so naming a mezura build no
   longer rewrites your own mezura data directory.
 - `run`, `noise`, `insights`, and `verify` read the exports of hyperfine 2.0 as well as those of

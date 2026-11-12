@@ -14,7 +14,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
 
-use crate::os::{Footprint, PhysicalCore};
+use crate::os::{Footprint, PhysicalCore, Usage};
 
 const HEADER_BYTES: usize = 8;
 
@@ -24,22 +24,19 @@ pub fn is_user_an_admin() -> bool {
 }
 
 pub fn read_process_memory(child: &Child) -> Option<Footprint> {
-    let mut counters = PROCESS_MEMORY_COUNTERS {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        ..Default::default()
-    };
-    // Sound because the pointer is to a live local and cb says how much of it the call may write.
-    let written =
-        unsafe { GetProcessMemoryInfo(child.as_raw_handle(), &mut counters, counters.cb) };
-    if written == 0 {
-        return None;
-    }
+    let counters = query_memory_counters(child)?;
     Some(Footprint {
         resident: counters.WorkingSetSize as u64,
         peak: counters.PeakWorkingSetSize as u64,
-        faults: u64::from(counters.PageFaultCount),
-        from_disk: 0,
     })
+}
+
+pub fn read_usage(child: &Child) -> Usage {
+    Usage {
+        faults: query_memory_counters(child)
+            .map_or(0, |counters| u64::from(counters.PageFaultCount)),
+        disk_read_bytes: 0,
+    }
 }
 
 pub fn read_system_times() -> Option<(u64, u64)> {
@@ -135,6 +132,17 @@ pub fn build_affinity_mask(cpus: &[usize]) -> Result<usize, String> {
         return Err("an empty cpu list has no affinity mask".to_string());
     }
     Ok(mask)
+}
+
+fn query_memory_counters(child: &Child) -> Option<PROCESS_MEMORY_COUNTERS> {
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    // Sound because the pointer is to a live local and cb says how much of it the call may write.
+    let written =
+        unsafe { GetProcessMemoryInfo(child.as_raw_handle(), &mut counters, counters.cb) };
+    (written != 0).then_some(counters)
 }
 
 fn parse_processor_cores(bytes: &[u8], process_mask: usize) -> Vec<PhysicalCore> {

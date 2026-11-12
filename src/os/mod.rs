@@ -4,7 +4,7 @@ use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,12 +29,6 @@ const RSS_LINE: &str = "VmRSS:";
 const PEAK_LINE: &str = "VmHWM:";
 const IDLE_COLUMN: usize = 3;
 const IOWAIT_COLUMN: usize = 4;
-/// The tenth through thirteenth fields of the line, counted past the last bracket, since the
-/// command sits in the second field and can hold spaces and brackets of its own.
-const MINOR_FAULTS: usize = 7;
-const CHILD_MINOR_FAULTS: usize = 8;
-const MAJOR_FAULTS: usize = 9;
-const CHILD_MAJOR_FAULTS: usize = 10;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
 
@@ -61,14 +55,18 @@ impl Drop for AffinityGuard {
     }
 }
 
-/// What a process holds. The fault count only climbs, so the last reading of a run is its total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Footprint {
     pub resident: u64,
     pub peak: u64,
+}
+
+/// What a run was given over its whole life. On Linux it includes the children the run waited for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
     pub faults: u64,
-    /// The pages that had to be read in. Windows folds them into its one total, so there it is zero.
-    pub from_disk: u64,
+    /// Windows counts what it read from storage inside its one fault total, so there it is zero.
+    pub disk_read_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,19 +204,26 @@ pub fn read_process_memory(platform: Platform, child: &Child) -> Option<Footprin
     if !platform.is_linux() {
         return None;
     }
-    let id = child.id();
     let (resident, peak) =
-        parse_proc_status(&fs::read_to_string(format!("/proc/{id}/status")).ok()?)?;
-    let (faults, from_disk) = fs::read_to_string(format!("/proc/{id}/stat"))
-        .ok()
-        .and_then(|stat| parse_process_faults(&stat))
-        .unwrap_or_default();
-    Some(Footprint {
-        resident,
-        peak,
-        faults,
-        from_disk,
-    })
+        parse_proc_status(&fs::read_to_string(format!("/proc/{}/status", child.id())).ok()?)?;
+    Some(Footprint { resident, peak })
+}
+
+#[cfg(windows)]
+pub fn try_reap(_platform: Platform, child: &mut Child) -> io::Result<Option<(ExitStatus, Usage)>> {
+    Ok(child
+        .try_wait()?
+        .map(|status| (status, windows::read_usage(child))))
+}
+
+/// On Linux the run is reaped here, behind the back of `Child`, so nothing may wait on it or kill
+/// it afterwards: its pid can already belong to another process.
+#[cfg(unix)]
+pub fn try_reap(platform: Platform, child: &mut Child) -> io::Result<Option<(ExitStatus, Usage)>> {
+    if !platform.is_linux() {
+        return Ok(child.try_wait()?.map(|status| (status, Usage::default())));
+    }
+    unix::reap_without_blocking(child.id())
 }
 
 #[cfg(windows)]
@@ -360,16 +365,6 @@ pub fn parse_proc_status(text: &str) -> Option<(u64, u64)> {
     Some((read(RSS_LINE)?, read(PEAK_LINE)?))
 }
 
-pub fn parse_process_faults(text: &str) -> Option<(u64, u64)> {
-    let (_, rest) = text.rsplit_once(')')?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    let read = |at: usize| fields.get(at).and_then(|field| field.parse::<u64>().ok());
-    Some((
-        read(MINOR_FAULTS)? + read(CHILD_MINOR_FAULTS)?,
-        read(MAJOR_FAULTS)? + read(CHILD_MAJOR_FAULTS)?,
-    ))
-}
-
 pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
     let line = text.lines().find(|line| line.starts_with(CPU_LINE))?;
     let numbers: Vec<u64> = line
@@ -384,6 +379,11 @@ pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
     Some((idle, numbers.iter().sum()))
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub fn drop_from_page_cache(file: &fs::File) -> io::Result<()> {
+    unix::drop_from_page_cache(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,18 +395,6 @@ mod tests {
         assert_eq!(parse_proc_stat(text), Some((16770, 22775)));
         assert_eq!(parse_proc_stat("cpu  1 2 3\n"), None);
         assert_eq!(parse_proc_stat("intr 5\n"), None);
-    }
-
-    #[test]
-    fn the_minor_faults_are_read_past_a_command_name_holding_spaces_and_brackets() {
-        let plain = "4242 (tokei) R 1 4242 4242 0 -1 4194304 61208 0 17 0 31 9 0 0 20 0";
-        assert_eq!(parse_process_faults(plain), Some((61_208, 17)));
-        let awkward = "4242 (my (odd) name) R 1 4242 4242 0 -1 4194304 27071 0 0 0 31 9 0";
-        assert_eq!(parse_process_faults(awkward), Some((27_071, 0)));
-        let children = "4242 (cloc) S 1 4242 4242 0 -1 4194304 1200 48000 3 19 31 9 0";
-        assert_eq!(parse_process_faults(children), Some((49_200, 22)));
-        assert_eq!(parse_process_faults("4242 (tokei) R 1 2 3"), None);
-        assert_eq!(parse_process_faults("no brackets here at all"), None);
     }
 
     #[test]

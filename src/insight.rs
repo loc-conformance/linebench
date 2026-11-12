@@ -61,7 +61,7 @@ const MEMORY_MEANS: &str = "What each counter held while it counted, sampled whi
                             axis under each curve is the wall time of that run, and the pages are \
                             what the run was given, its own buffers along with the corpus it read.";
 const PAGES_GIVEN: &str = "pages";
-const PAGES_READ_IN: &str = "from disk";
+const READ_FROM_DISK: &str = "from disk";
 const SYSCALLS_MEANS: &str = "What each counter asked of the kernel, counted by the tracer.";
 const PMU_MEANS: &str = "What the cpu did while each counter counted, read through perf in three \
                          passes of four events.";
@@ -419,7 +419,7 @@ pub fn format_memory(curves: &[Curve], style: Style) -> Vec<String> {
             curve.instance,
             format_bytes(curve.peak_bytes),
             describe_count_of(curve.faults, PAGES_GIVEN),
-            describe_count_of(curve.from_disk, PAGES_READ_IN),
+            describe_bytes_of(curve.disk_read_bytes, READ_FROM_DISK),
             curve.polls,
             format_spacing(curve.spacing_us)
         ));
@@ -554,12 +554,12 @@ pub fn format_syscalls(counted: &[Syscalls], style: Style) -> Vec<String> {
 }
 
 pub fn describe_cold_cache(curve: &Curve) -> Option<String> {
-    match curve.from_disk {
+    match curve.disk_read_bytes {
         0 => None,
-        pages => Some(format!(
-            "{} took {} pages from disk, so that run did not read a warm cache",
+        bytes => Some(format!(
+            "{} read {} from disk, so that run did not read a warm cache",
             curve.instance,
-            format_thousands(pages)
+            format_bytes(bytes)
         )),
     }
 }
@@ -1164,6 +1164,13 @@ fn describe_count_of(count: u64, what: &str) -> String {
     }
 }
 
+fn describe_bytes_of(bytes: u64, what: &str) -> String {
+    match bytes {
+        0 => String::new(),
+        _ => format!("   {} {what}", format_bytes(bytes)),
+    }
+}
+
 fn describe_multiplexing(counted: &[Pmu]) -> String {
     let mut sliced: Vec<&str> = Vec::new();
     for one in counted {
@@ -1401,7 +1408,7 @@ mod tests {
             wall_ms: 100,
             peak_bytes,
             faults: 27_071,
-            from_disk: 0,
+            disk_read_bytes: 0,
             samples: (0..=last).map(|step| peak_bytes * step / last).collect(),
         }
     }

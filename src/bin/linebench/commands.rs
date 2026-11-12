@@ -1022,6 +1022,12 @@ pub fn run_insights(
                 false,
             )?;
             print_line(out, &format!(">> {}", instance.get_name()))?;
+            // Each counter fills the page cache with the files it reads itself, so the sampled run
+            // finds them in memory.
+            if let Err(refused) = run_once(&build_subject(instance, &args, &scrub)) {
+                print_warning(out, &refused)?;
+                continue;
+            }
             match sample_memory(
                 platform,
                 instance.get_name(),

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::machine::Platform;
 use crate::measure::Table;
-use crate::os::{apply_execution_env, read_process_memory};
+use crate::os::{apply_execution_env, read_process_memory, try_reap};
 
 pub const MEMORY_STEP_MS: u64 = 2;
 pub const LEAST_SAMPLES: usize = 30;
@@ -27,8 +27,9 @@ pub struct Curve {
     /// The pages the run was given. A platform that cannot report them leaves it at zero.
     #[serde(default)]
     pub faults: u64,
+    /// Windows counts what it read from storage inside its page faults, so there it is zero.
     #[serde(default)]
-    pub from_disk: u64,
+    pub disk_read_bytes: u64,
     pub samples: Vec<u64>,
 }
 
@@ -56,19 +57,14 @@ pub fn sample_memory(
     let step = Duration::from_millis(MEMORY_STEP_MS);
     let mut samples = Vec::new();
     let mut peak = 0;
-    let mut faults = 0;
-    let mut from_disk = 0;
     let mut first = started;
     let mut last = started;
-    loop {
+    let usage = loop {
         let at = Instant::now();
         let reading = read_process_memory(platform, &child);
-        match child
-            .try_wait()
-            .map_err(|error| refuse("waited on", &error))?
-        {
-            Some(status) if status.success() => break,
-            Some(status) => return Err(format!("{instance} ended with {status}")),
+        match try_reap(platform, &mut child).map_err(|error| refuse("waited on", &error))? {
+            Some((status, usage)) if status.success() => break usage,
+            Some((status, _)) => return Err(format!("{instance} ended with {status}")),
             None => {
                 if let Some(held) = reading {
                     if samples.is_empty() {
@@ -77,20 +73,16 @@ pub fn sample_memory(
                     last = at;
                     samples.push(held.resident);
                     peak = peak.max(held.peak);
-                    faults = faults.max(held.faults);
-                    from_disk = from_disk.max(held.from_disk);
                 }
                 thread::sleep(step);
             }
         }
-    }
+    };
     let wall_ms = started.elapsed().as_millis() as u64;
     if platform == Platform::Windows
         && let Some(held) = read_process_memory(platform, &child)
     {
         peak = peak.max(held.peak);
-        faults = faults.max(held.faults);
-        from_disk = from_disk.max(held.from_disk);
     }
     let polls = samples.len();
     let spacing_us = if polls > 1 {
@@ -106,8 +98,8 @@ pub fn sample_memory(
         polls,
         wall_ms,
         peak_bytes: peak,
-        faults,
-        from_disk,
+        faults: usage.faults,
+        disk_read_bytes: usage.disk_read_bytes,
         samples: fold_samples(samples),
     })
 }
@@ -148,5 +140,49 @@ mod tests {
         let folded = fold_samples(long);
         assert_eq!(folded.len(), KEPT_SAMPLES);
         assert!(folded.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_over_a_file_out_of_the_page_cache_counts_what_it_read_from_disk() {
+        use std::env;
+        use std::fs::{self, File};
+        use std::io::Write;
+
+        use crate::os::drop_from_page_cache;
+
+        const FILE_BYTES: usize = 4 * 1024 * 1024;
+        // Beside the test binary, since /tmp is often tmpfs, which keeps every file in memory.
+        let file = env::current_exe()
+            .expect("the test binary has a path")
+            .with_file_name("linebench-a_run_over_a_file_out_of_the_page_cache.txt");
+        let mut written = File::create(&file).expect("the file is created");
+        written
+            .write_all(&vec![b'x'; FILE_BYTES])
+            .expect("the file is written");
+        written.sync_all().expect("the file reaches the disk");
+        drop_from_page_cache(&written).expect("the file leaves the page cache");
+        let read = || {
+            sample_memory(
+                Platform::Linux,
+                "cat",
+                Table::SameWork,
+                Path::new("cat"),
+                &[file.to_string_lossy().into_owned()],
+                &BTreeMap::new(),
+                &[],
+            )
+            .expect("cat reads the file")
+        };
+        let cold = read();
+        let warm = read();
+        fs::remove_file(&file).expect("the file is removed");
+        assert!(
+            cold.disk_read_bytes >= FILE_BYTES as u64,
+            "{} gave {} bytes from disk once out of the page cache",
+            file.display(),
+            cold.disk_read_bytes
+        );
+        assert_eq!(warm.disk_read_bytes, 0);
     }
 }
