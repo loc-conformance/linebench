@@ -120,7 +120,8 @@ linebench run <corpora|all|dir> [--counters a,b,c] [--control <instance>] [--war
     A run under an instance with args, env or a build of its own is written under results/local/,
     since its numbers answer only for that build.
 
-linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls,pmu,allocations,ladder]
+linebench insights <corpus|dir> [--counters a,b,c]
+                [--only floor,memory,syscalls,pmu,allocations,ladder,cold|all]
                 [--yes] [--allow-unequal-exclusions] [--out <dir>] [--extensions rs,c]
                 [--given <c>@<tag>=<path>] [--definition <c>@<tag>=<f>]
                 [--args [<c>@<tag>=]<text>] [--env <c>@<tag>=<NAME>=<v>] [--counters-dir <dir>]
@@ -130,12 +131,17 @@ linebench insights <corpus|dir> [--counters a,b,c] [--only floor,memory,syscalls
     disturbs the times it would report. The floor is what a counter costs before it has counted
     anything, the memory curve is what it held while it counted, the system calls are how much it
     asked of the kernel to do it, the hardware counters are what the cpu did while it ran, the
-    allocations are what it asked of the heap allocator, and the affinity ladder is how it scales
-    as physical cores and hardware threads are added.
+    allocations are what it asked of the heap allocator, the affinity ladder is how it scales
+    as physical cores and hardware threads are added, and the cold cache is how long it takes when
+    its binary and the corpus come from the disk.
+
+    The cold cache empties the page cache of the whole system before each cold run, a write that
+    wants root, so it runs when --only names it. Run sudo -v in the same terminal first and
+    linebench as yourself.
 
     --counters a,b,c           the instances, in the order they are measured
-    --only <parts>             which of floor, memory, syscalls, pmu, allocations and ladder to
-                               measure, default all
+    --only <parts>             which of floor, memory, syscalls, pmu, allocations, ladder and cold
+                               to measure, or all; default all but cold
     --yes                      do not ask when a tool the section needs is missing
     --allow-unequal-exclusions measure even with uneven MS Defender exclusions
     --out <dir>                where the session goes, default results/ here
@@ -204,8 +210,8 @@ linebench verify <a run directory|an insights directory>
     What one insights command wrote is read the same way. The floor and ladder against themselves
     and against their exports, every curve against the peak the system reported, every traced
     instance against the calls it listed, every profiled instance against the events it read,
-    every heap summary against what it allocated, every affinity ladder against its rungs, and
-    every number against the instances that were measured.
+    every heap summary against what it allocated, every affinity ladder against its rungs, every
+    cold cache row against its runs, and every number against the instances that were measured.
 
     Name the directory, or the run.json or insights.json inside it. A folder holding many of them
     is not one, and the refusal says to name a directory further in.

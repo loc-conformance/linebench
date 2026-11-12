@@ -2,10 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::allocations::Allocations;
+use crate::cold::{Cold, calculate_median};
 use crate::corpus::{Counted, Parity, judge_parity};
 use crate::files::read_text;
 use crate::insight::{
-    ALLOCATIONS_PART, FLOOR_PART, INSIGHTS_FILE, LADDER_PART, MEMORY_PART, PMU_PART, SYSCALLS_PART,
+    ALLOCATIONS_PART, COLD_PART, FLOOR_PART, INSIGHTS_FILE, LADDER_PART, MEMORY_PART, PMU_PART,
+    SYSCALLS_PART,
 };
 use crate::insight::{Insights, read_insights};
 use crate::ladder::Ladder;
@@ -188,6 +190,7 @@ pub fn check_insights(dir: &Path) -> Result<Verification, String> {
         .held
         .push(check_the_counted_allocations(&insights.allocations));
     level.held.push(check_the_ladders(&insights.ladder));
+    level.held.push(check_the_cold_runs(&insights.cold));
     level.held.push(check_the_parts_asked_for(&insights));
     let raw = check_exports(dir, &timed);
     let reach = match (timed.is_empty(), raw.absent.is_empty()) {
@@ -246,6 +249,12 @@ fn check_who_was_measured(insights: &Insights) -> Held {
                 .ladder
                 .iter()
                 .map(|one| ("the affinity ladder", one.instance.as_str())),
+        )
+        .chain(
+            insights
+                .cold
+                .iter()
+                .map(|one| ("the cold cache", one.instance.as_str())),
         );
     let mut broken = Vec::new();
     for (part, instance) in measured {
@@ -575,6 +584,47 @@ fn check_the_ladders(ladders: &[Ladder]) -> Held {
     )
 }
 
+fn check_the_cold_runs(measured: &[Cold]) -> Held {
+    let mut broken = Vec::new();
+    for one in measured {
+        if one.cold_ms.is_empty() || one.warm_ms.is_empty() {
+            broken.push(format!(
+                "{}: {} cold and {} warm runs",
+                one.instance,
+                one.cold_ms.len(),
+                one.warm_ms.len()
+            ));
+        }
+        if one.cold_read_bytes.len() != one.cold_ms.len()
+            || one.warm_read_bytes.len() != one.warm_ms.len()
+        {
+            broken.push(format!(
+                "{}: {} cold and {} warm runs carry {} and {} counts of bytes from disk",
+                one.instance,
+                one.cold_ms.len(),
+                one.warm_ms.len(),
+                one.cold_read_bytes.len(),
+                one.warm_read_bytes.len()
+            ));
+        }
+        if one
+            .cold_ms
+            .iter()
+            .chain(&one.warm_ms)
+            .any(|ms| !ms.is_finite() || *ms <= 0.0)
+        {
+            broken.push(format!(
+                "{}: a run carries a time of zero, below zero or not a number",
+                one.instance
+            ));
+        }
+    }
+    Held::of(
+        format!("{} cold cache rows hold together", measured.len()),
+        broken,
+    )
+}
+
 /// A part the session was never asked for carries nothing. The other way around does not hold: a
 /// part asked for can still come back empty, since the tool it needs may not be on the machine.
 fn check_the_parts_asked_for(insights: &Insights) -> Held {
@@ -587,6 +637,7 @@ fn check_the_parts_asked_for(insights: &Insights) -> Held {
         (PMU_PART, !insights.pmu.is_empty()),
         (ALLOCATIONS_PART, !insights.allocations.is_empty()),
         (LADDER_PART, !insights.ladder.is_empty()),
+        (COLD_PART, !insights.cold.is_empty()),
     ] {
         if measured && !asked(part) {
             broken.push(format!(
@@ -962,7 +1013,11 @@ fn hold_against_the_times(m: &Measurement, timed: &Timings) -> Vec<String> {
         .fold(f64::NEG_INFINITY, f64::max);
     let out_of_the_times = [
         ("mean", m.mean_s, calculate_mean(&timed.times)),
-        ("median", m.median_s, calculate_median(&timed.times)),
+        (
+            "median",
+            m.median_s,
+            calculate_median(&timed.times).unwrap_or_default(),
+        ),
         ("min", m.min_s, least),
         ("max", m.max_s, most),
         ("spread", m.stddev_s, calculate_spread(&timed.times)),
@@ -1097,16 +1152,6 @@ fn calculate_spread(times: &[f64]) -> f64 {
     let mean = calculate_mean(times);
     let sum: f64 = times.iter().map(|time| (time - mean).powi(2)).sum();
     (sum / (times.len() - 1) as f64).sqrt()
-}
-
-fn calculate_median(times: &[f64]) -> f64 {
-    let mut sorted = times.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let middle = sorted.len() / 2;
-    match sorted.len() % 2 {
-        0 => (sorted[middle - 1] + sorted[middle]) / 2.0,
-        _ => sorted[middle],
-    }
 }
 
 #[cfg(test)]
@@ -1252,7 +1297,9 @@ mod tests {
             allocations: Vec::new(),
             ladder_unmeasured: None,
             ladder: Vec::new(),
-            asked: crate::insight::ask_for_everything(),
+            cold_unmeasured: None,
+            cold: Vec::new(),
+            asked: crate::insight::ask_for_the_default_parts(),
         }
     }
 
@@ -1628,5 +1675,27 @@ mod tests {
         broken.rungs[1].from_prev = Some(3.0);
         let held = check_the_ladders(&[broken]);
         assert_eq!(held.broken.len(), 3, "{held:?}");
+    }
+
+    #[test]
+    fn a_cold_row_whose_runs_and_byte_counts_disagree_or_that_took_no_time_is_caught() {
+        let valid = Cold {
+            instance: "tokei".to_string(),
+            table: "t1".to_string(),
+            cold_ms: vec![410.0, 420.0],
+            cold_read_bytes: vec![1_700_000_000, 1_700_000_000],
+            warm_ms: vec![100.0, 101.0],
+            warm_read_bytes: vec![0, 0],
+        };
+        assert!(check_the_cold_runs(std::slice::from_ref(&valid)).holds());
+        let mut broken = valid.clone();
+        broken.cold_read_bytes.pop();
+        broken.warm_ms[0] = 0.0;
+        let held = check_the_cold_runs(&[broken]);
+        assert_eq!(held.broken.len(), 2, "{held:?}");
+        let mut empty = valid;
+        empty.warm_ms.clear();
+        empty.warm_read_bytes.clear();
+        assert_eq!(check_the_cold_runs(&[empty]).broken.len(), 1);
     }
 }

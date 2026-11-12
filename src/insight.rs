@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::allocations::Allocations;
+use crate::cold::{Cold, calculate_median, calculate_median_bytes};
 use crate::corpus::shorten_hash;
 use crate::defender::DefenderState;
 use crate::files::read_json;
@@ -40,9 +41,20 @@ pub const SYSCALLS_PART: &str = "syscalls";
 pub const PMU_PART: &str = "pmu";
 pub const ALLOCATIONS_PART: &str = "allocations";
 pub const LADDER_PART: &str = "ladder";
-/// What `insights` measures, and what `--only` names. A run does all of them unless it says
-/// otherwise.
-pub const INSIGHT_PARTS: [&str; 6] = [
+pub const COLD_PART: &str = "cold";
+/// What `insights` measures, and what `--only` names.
+pub const INSIGHT_PARTS: [&str; 7] = [
+    FLOOR_PART,
+    MEMORY_PART,
+    SYSCALLS_PART,
+    PMU_PART,
+    ALLOCATIONS_PART,
+    LADDER_PART,
+    COLD_PART,
+];
+/// What a run measures when `--only` is left out. The cold cache empties the page cache of the
+/// whole system, so it runs when it is named.
+pub const DEFAULT_PARTS: [&str; 6] = [
     FLOOR_PART,
     MEMORY_PART,
     SYSCALLS_PART,
@@ -50,6 +62,8 @@ pub const INSIGHT_PARTS: [&str; 6] = [
     ALLOCATIONS_PART,
     LADDER_PART,
 ];
+/// The parts there were when a record started carrying the ones it was asked for.
+const PARTS_BEFORE_ONLY: [&str; 3] = [FLOOR_PART, MEMORY_PART, SYSCALLS_PART];
 pub const SYSCALLS_HEADING: &str = "family / call";
 const INSTANCE_HEADING: &str = "instance";
 const PAGE_INTRO: &str = "Written by `linebench insights` when the session ends. What a run cannot \
@@ -69,14 +83,24 @@ const ALLOCATIONS_MEANS: &str =
     "What each counter asked of the heap allocator, counted by valgrind.";
 const LADDER_MEANS: &str = "How each counter scales as physical cores and hardware threads are \
                             added through the process affinity mask.";
+const COLD_MEANS: &str = "How long each counter takes when its binary and the corpus come from the \
+                          disk, as after a reboot. Shared libraries that running programs hold \
+                          mapped, libc among them, stay in memory, as they do after a reboot too. \
+                          The cold times hold for the disk of this machine.";
 const NO_SYSCALLS: &str = "The system calls were not counted in this session.";
 const NO_PMU: &str = "The hardware counters were not read in this session.";
 const NO_ALLOCATIONS: &str = "The heap allocations were not counted in this session.";
 const NO_LADDER: &str = "The affinity ladder was not measured in this session.";
+const NO_COLD: &str = "The cold cache was not measured in this session.";
 const NOT_ASKED: &str = "Not asked for in this session.";
 const PMU_TITLE: &str = "Hardware counters";
 const ALLOCATIONS_TITLE: &str = "Allocations";
 const LADDER_TITLE: &str = "Affinity ladder";
+const COLD_TITLE: &str = "Cold cache";
+const COLD_NOTE: &str = "each cold run follows an emptied page cache, the counters take turns in \
+                         rounds of alternating order, and the first two rounds of cold runs and \
+                         of warm runs are thrown away; from disk is what the device gave, \
+                         readahead included";
 const LADDER_SUMMARY: &str = "summary";
 const LADDER_MEDIAN: &str = "median";
 const LADDER_SPEEDUP: &str = "speedup";
@@ -151,6 +175,14 @@ const ALLOCATIONS_HEADINGS: [&str; 7] = [
     "per alloc",
     "at exit",
 ];
+const COLD_HEADINGS: [&str; 6] = [
+    "instance",
+    "cold",
+    "spread",
+    "warm",
+    "cold / warm",
+    "from disk",
+];
 const MEMBER_INDENT: &str = "  ";
 const REST_LABEL: &str = "rest";
 const SHOWN_PART: u64 = 100;
@@ -194,14 +226,18 @@ pub struct Insights {
     pub ladder_unmeasured: Option<String>,
     #[serde(default)]
     pub ladder: Vec<Ladder>,
+    #[serde(default)]
+    pub cold_unmeasured: Option<String>,
+    #[serde(default)]
+    pub cold: Vec<Cold>,
     /// The parts this run was asked for. A record written before --only was there asked for all of
-    /// them, which is what an empty field would otherwise look like.
-    #[serde(default = "ask_for_everything")]
+    /// the three parts there were, which is what an empty field would otherwise look like.
+    #[serde(default = "ask_for_the_parts_before_only")]
     pub asked: Vec<String>,
 }
 
-pub fn ask_for_everything() -> Vec<String> {
-    INSIGHT_PARTS.iter().map(|part| part.to_string()).collect()
+pub fn ask_for_the_default_parts() -> Vec<String> {
+    DEFAULT_PARTS.iter().map(|part| part.to_string()).collect()
 }
 
 pub fn build_insights_path(
@@ -332,6 +368,14 @@ pub fn build_insights_page(insights: &Insights, versions: &[(String, String)]) -
         insights.ladder_unmeasured.as_deref(),
         NO_LADDER,
         scaled,
+    ));
+    lines.extend(lay_out_section(
+        asked_for(COLD_PART),
+        COLD_TITLE,
+        COLD_MEANS,
+        insights.cold_unmeasured.as_deref(),
+        NO_COLD,
+        format_cold(&insights.cold),
     ));
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
@@ -895,6 +939,84 @@ pub fn format_ladder(ladders: &[Ladder], style: Style) -> Vec<String> {
     lines
 }
 
+pub fn format_cold(measured: &[Cold]) -> Vec<String> {
+    if measured.is_empty() {
+        return Vec::new();
+    }
+    let labels: Vec<&str> = measured.iter().map(|one| one.instance.as_str()).collect();
+    let mut in_memory: Vec<&str> = Vec::new();
+    let rows: Vec<Vec<String>> = measured
+        .iter()
+        .map(|one| {
+            let cold = calculate_median(&one.cold_ms);
+            let warm = calculate_median(&one.warm_ms);
+            let least = one.cold_ms.iter().copied().reduce(f64::min);
+            let most = one.cold_ms.iter().copied().reduce(f64::max);
+            let read = calculate_median_bytes(&one.cold_read_bytes);
+            if read == Some(0) {
+                in_memory.push(one.instance.as_str());
+            }
+            vec![
+                cold.map_or_else(String::new, |ms| format!("{ms:.1} ms")),
+                least.zip(most).map_or_else(String::new, |(least, most)| {
+                    format!("{least:.1} to {most:.1} ms")
+                }),
+                warm.map_or_else(String::new, |ms| format!("{ms:.1} ms")),
+                match (cold, warm) {
+                    (Some(cold), Some(warm)) if warm > 0.0 => format!("{:.2}x", cold / warm),
+                    _ => String::new(),
+                },
+                match read {
+                    Some(bytes) if bytes > 0 => format_bytes(bytes),
+                    _ => String::new(),
+                },
+            ]
+        })
+        .collect();
+    let mut lines = lay_out_summary_table(&COLD_HEADINGS, &labels, &rows);
+    lines.push(String::new());
+    lines.push(format!("{INDENT}{COLD_NOTE}"));
+    if !in_memory.is_empty() {
+        let pronoun = match in_memory.len() {
+            1 => "its",
+            _ => "their",
+        };
+        lines.push(format!(
+            "{INDENT}{} read 0 bytes from disk after the page cache was emptied, so {pronoun} \
+             files sit on a filesystem held in memory, such as tmpfs",
+            in_memory.join(", ")
+        ));
+    }
+    lines
+}
+
+/// One line per run of an instance, printed while the session measures.
+pub fn format_cold_runs(one: &Cold) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (label, times, read) in [
+        ("cold", &one.cold_ms, &one.cold_read_bytes),
+        ("warm", &one.warm_ms, &one.warm_read_bytes),
+    ] {
+        for (at, (ms, bytes)) in times.iter().zip(read).enumerate() {
+            lines.push(format!(
+                "{INDENT}{label} {} of {}   {ms:.1} ms{}",
+                at + 1,
+                times.len(),
+                describe_bytes_of(*bytes, READ_FROM_DISK)
+            ));
+        }
+    }
+    lines
+}
+
+fn ask_for_the_parts_before_only() -> Vec<String> {
+    PARTS_BEFORE_ONLY
+        .iter()
+        .map(|part| part.to_string())
+        .collect()
+}
+
+/// A part that stopped halfway keeps the rows it measured, and its reason goes under them.
 fn lay_out_section(
     asked: bool,
     heading: &str,
@@ -911,7 +1033,13 @@ fn lay_out_section(
             unmeasured.unwrap_or(fallback).to_string(),
             String::new(),
         ],
-        (true, false) => wrap_in_fence(heading, means, body),
+        (true, false) => {
+            let mut lines = wrap_in_fence(heading, means, body);
+            if let Some(reason) = unmeasured {
+                lines.extend([reason.to_string(), String::new()]);
+            }
+            lines
+        }
     }
 }
 
@@ -1519,7 +1647,9 @@ mod tests {
             allocations: Vec::new(),
             ladder_unmeasured: None,
             ladder: Vec::new(),
-            asked: ask_for_everything(),
+            cold_unmeasured: None,
+            cold: Vec::new(),
+            asked: ask_for_the_default_parts(),
         }
     }
 
@@ -2125,5 +2255,93 @@ mod tests {
         let page = build_insights_page(&insights, &only_tokei()).join("\n");
         assert!(page.contains(LADDER_MEANS), "{page}");
         assert!(page.contains("6.25x (16t)"), "{page}");
+    }
+
+    #[test]
+    fn the_cold_cache_summary_sets_the_median_cold_run_against_the_median_warm_one() {
+        let measured = vec![
+            Cold {
+                instance: "mezura".to_string(),
+                table: "t1".to_string(),
+                cold_ms: vec![1210.0, 1190.0, 1180.0, 1250.0, 1200.0],
+                cold_read_bytes: vec![1_600_000_000; 5],
+                warm_ms: vec![101.0, 99.0, 100.0, 98.0, 102.0],
+                warm_read_bytes: vec![0; 5],
+            },
+            Cold {
+                instance: "scc".to_string(),
+                table: "t1".to_string(),
+                cold_ms: vec![40.0, 42.0, 41.0, 43.0, 44.0],
+                cold_read_bytes: vec![0; 5],
+                warm_ms: vec![20.0; 5],
+                warm_read_bytes: vec![0; 5],
+            },
+        ];
+        let lines = format_cold(&measured);
+        assert_eq!(
+            lines[1].split_whitespace().collect::<Vec<&str>>(),
+            [
+                "mezura", "1200.0", "ms", "1180.0", "to", "1250.0", "ms", "100.0", "ms", "12.00x",
+                "1.5", "GB"
+            ]
+        );
+        assert_eq!(
+            lines[2].split_whitespace().collect::<Vec<&str>>(),
+            [
+                "scc", "42.0", "ms", "40.0", "to", "44.0", "ms", "20.0", "ms", "2.10x"
+            ]
+        );
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .contains("scc read 0 bytes from disk after the page cache was emptied, so its"),
+            "{lines:?}"
+        );
+        let progress = format_cold_runs(&measured[0]);
+        assert_eq!(progress.len(), 10);
+        assert_eq!(
+            progress[0].trim(),
+            "cold 1 of 5   1210.0 ms   1.5 GB from disk"
+        );
+        assert_eq!(progress[5].trim(), "warm 1 of 5   101.0 ms");
+
+        let mut insights = build_insights(Vec::new(), Vec::new());
+        assert!(
+            build_insights_page(&insights, &only_tokei())
+                .join("\n")
+                .contains(&format!("## {COLD_TITLE}\n\n{NOT_ASKED}"))
+        );
+        insights.asked.push(COLD_PART.to_string());
+        insights.cold = measured;
+        let page = build_insights_page(&insights, &only_tokei()).join("\n");
+        assert!(page.contains(COLD_MEANS), "{page}");
+        assert!(page.contains("12.00x"), "{page}");
+        insights.cold.truncate(1);
+        insights.cold_unmeasured = Some("sudo: a password is required".to_string());
+        let page = build_insights_page(&insights, &only_tokei()).join("\n");
+        assert!(page.contains("12.00x"), "{page}");
+        assert!(
+            page.ends_with("```\n\nsudo: a password is required"),
+            "{page}"
+        );
+        insights.cold = Vec::new();
+        let page = build_insights_page(&insights, &only_tokei()).join("\n");
+        assert!(
+            page.contains("## Cold cache\n\nsudo: a password is required"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_record_from_before_only_was_asked_for_the_three_parts_there_were() {
+        let mut written =
+            serde_json::to_value(build_insights(Vec::new(), Vec::new())).expect("it serializes");
+        written
+            .as_object_mut()
+            .expect("a record is an object")
+            .remove("asked");
+        let read: Insights = serde_json::from_value(written).expect("it reads back");
+        assert_eq!(read.asked, ["floor", "memory", "syscalls"]);
     }
 }

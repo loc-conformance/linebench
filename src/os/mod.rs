@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -31,6 +33,13 @@ const IDLE_COLUMN: usize = 3;
 const IOWAIT_COLUMN: usize = 4;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(20);
+const SUDO: &str = "sudo";
+const NO_PROMPT: &str = "-n";
+#[cfg(target_os = "linux")]
+const DROP_CACHES: &str = "/proc/sys/vm/drop_caches";
+/// 1 empties the page cache, 2 the cached directory entries and inodes, 3 both.
+#[cfg(target_os = "linux")]
+const DROP_EVERYTHING: &[u8] = b"3\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalCore {
@@ -227,6 +236,68 @@ pub fn try_reap(platform: Platform, child: &mut Child) -> io::Result<Option<(Exi
 }
 
 #[cfg(windows)]
+pub fn reap(_platform: Platform, child: &mut Child) -> io::Result<(ExitStatus, Usage)> {
+    let status = child.wait()?;
+    Ok((status, windows::read_usage(child)))
+}
+
+/// On Linux the run is reaped behind the back of `Child`, as in `try_reap`.
+#[cfg(unix)]
+pub fn reap(platform: Platform, child: &mut Child) -> io::Result<(ExitStatus, Usage)> {
+    if !platform.is_linux() {
+        return Ok((child.wait()?, Usage::default()));
+    }
+    unix::reap(child.id())
+}
+
+/// Empties the kernel page cache and its cached directory entries and inodes, for the whole
+/// system. The write wants root: as root it is made here, otherwise through `sudo -n tee`, which
+/// fails at once where sudo would ask for a password.
+#[cfg(target_os = "linux")]
+pub fn drop_page_cache(privileged: bool) -> Result<(), String> {
+    unix::sync_filesystems();
+    let written = match privileged {
+        true => fs::write(DROP_CACHES, DROP_EVERYTHING).map_err(|error| error.to_string()),
+        false => write_through_sudo(DROP_CACHES, DROP_EVERYTHING),
+    };
+    written.map_err(|reason| format!("{DROP_CACHES} could not be written: {reason}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn drop_page_cache(_privileged: bool) -> Result<(), String> {
+    Err("the page cache is emptied on linux".to_string())
+}
+
+/// Goes as far as `drop_page_cache` up to the open of the file: as root it opens it for writing,
+/// otherwise it runs the same `sudo -n tee` on an empty input, so a sudoers rule that allows that
+/// one command passes the same as a remembered password. The kernel empties the cache on a write,
+/// and both stop at the open.
+#[cfg(target_os = "linux")]
+pub fn check_page_cache_can_be_dropped(privileged: bool) -> Result<(), String> {
+    let opened = match privileged {
+        true => fs::OpenOptions::new()
+            .write(true)
+            .open(DROP_CACHES)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        false => write_through_sudo(DROP_CACHES, &[]),
+    };
+    opened.map_err(|reason| format!("{DROP_CACHES} could not be written: {reason}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn check_page_cache_can_be_dropped(_privileged: bool) -> Result<(), String> {
+    Err("the page cache is emptied on linux".to_string())
+}
+
+/// Starts again the minutes sudo remembers the password for, and says whether it did. It fails at
+/// once where a plain sudo would ask for the password: once the minutes have run out, and under a
+/// sudoers rule that covers the one write while the user's other entries want a password.
+pub fn keep_sudo_alive() -> bool {
+    run_quietly(SUDO, &[NO_PROMPT, "-v"])
+}
+
+#[cfg(windows)]
 pub fn read_system_times(_platform: Platform) -> Option<(u64, u64)> {
     windows::read_system_times()
 }
@@ -377,6 +448,30 @@ pub fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
     }
     let idle = numbers[IDLE_COLUMN] + numbers.get(IOWAIT_COLUMN).copied().unwrap_or(0);
     Some((idle, numbers.iter().sum()))
+}
+
+/// `sudo echo 3 > file` fails, since the user's own shell opens the file before sudo starts, so the
+/// bytes go through `tee` running as root.
+#[cfg(target_os = "linux")]
+fn write_through_sudo(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let mut tee = Command::new(SUDO)
+        .args([NO_PROMPT, "tee", path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{SUDO} could not be run: {error}"))?;
+    let wrote = tee.stdin.take().map(|mut stdin| stdin.write_all(bytes));
+    let finished = tee
+        .wait_with_output()
+        .map_err(|error| format!("{SUDO} could not be waited on: {error}"))?;
+    let said = String::from_utf8_lossy(&finished.stderr).trim().to_string();
+    match (finished.status.success(), wrote) {
+        (true, Some(Ok(()))) => Ok(()),
+        (true, _) => Err("tee ended before it was given what to write".to_string()),
+        (false, _) if said.is_empty() => Err(format!("{SUDO} ended with {}", finished.status)),
+        (false, _) => Err(said),
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

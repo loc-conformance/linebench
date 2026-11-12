@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod allocations;
+pub mod cold;
 pub mod corpus;
 pub mod counters;
 pub mod defender;

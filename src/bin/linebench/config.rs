@@ -249,14 +249,17 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 let named = read_list(flag, first, &mut rest)?;
                 if let Some(stray) = named
                     .iter()
-                    .find(|name| !INSIGHT_PARTS.contains(&name.as_str()))
+                    .find(|name| *name != EVERYTHING && !INSIGHT_PARTS.contains(&name.as_str()))
                 {
                     return Err(format!(
-                        "{flag} takes any of {}, and {stray} is none of them",
+                        "{flag} takes {EVERYTHING} or any of {}, and {stray} is none of them",
                         INSIGHT_PARTS.join(", ")
                     ));
                 }
-                options.only = Some(named);
+                options.only = Some(match named.iter().any(|name| name == EVERYTHING) {
+                    true => INSIGHT_PARTS.iter().map(|part| part.to_string()).collect(),
+                    false => named,
+                });
             }
             "--extensions" => {
                 let first = value()?;
@@ -2064,10 +2067,19 @@ mod tests {
             parse("insights linux --only pmu").unwrap().only,
             Some(vec!["pmu".to_string()])
         );
+        let every_part: Vec<String> = INSIGHT_PARTS.iter().map(|part| part.to_string()).collect();
+        assert_eq!(
+            parse("insights linux --only all").unwrap().only,
+            Some(every_part.clone())
+        );
+        assert_eq!(
+            parse("insights linux --only memory,all").unwrap().only,
+            Some(every_part)
+        );
         let refused = parse("insights linux --only floor,noise").unwrap_err();
         assert_eq!(
             refused,
-            "--only takes any of floor, memory, syscalls, pmu, allocations, ladder, and noise is none of them"
+            "--only takes all or any of floor, memory, syscalls, pmu, allocations, ladder, cold, and noise is none of them"
         );
         let elsewhere = parse("run linux --only floor").unwrap_err();
         assert!(

@@ -66,11 +66,49 @@ pub fn write_affinity_cpus(_cpus: &[usize]) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 pub fn reap_without_blocking(pid: u32) -> io::Result<Option<(ExitStatus, Usage)>> {
+    wait_for(pid, libc::WNOHANG)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reap_without_blocking(_pid: u32) -> io::Result<Option<(ExitStatus, Usage)>> {
+    Err(build_reap_refusal())
+}
+
+/// A signal caught while waiting, such as the Ctrl-C handler, ends the wait early, so it starts
+/// again.
+#[cfg(target_os = "linux")]
+pub fn reap(pid: u32) -> io::Result<(ExitStatus, Usage)> {
+    loop {
+        match wait_for(pid, 0) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+            Ok(reaped) => {
+                return reaped
+                    .ok_or_else(|| io::Error::other("wait4 returned before the run ended"));
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reap(_pid: u32) -> io::Result<(ExitStatus, Usage)> {
+    Err(build_reap_refusal())
+}
+
+/// `drop_caches` leaves dirty pages in memory, so they are written out first.
+#[cfg(target_os = "linux")]
+pub fn sync_filesystems() {
+    // Sound because sync has an empty argument list and acts on kernel buffers.
+    unsafe { libc::sync() }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for(pid: u32, flags: libc::c_int) -> io::Result<Option<(ExitStatus, Usage)>> {
     let mut status = 0;
     // Sound because rusage is plain integers and timevals with no invalid all-zero representation.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // Sound because both pointers are to live locals of the exact types wait4 writes.
-    let reaped = unsafe { libc::wait4(pid as libc::pid_t, &mut status, libc::WNOHANG, &mut usage) };
+    let reaped = unsafe { libc::wait4(pid as libc::pid_t, &mut status, flags, &mut usage) };
     match reaped {
         0 => Ok(None),
         -1 => Err(io::Error::last_os_error()),
@@ -85,11 +123,11 @@ pub fn reap_without_blocking(pid: u32) -> io::Result<Option<(ExitStatus, Usage)>
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn reap_without_blocking(_pid: u32) -> io::Result<Option<(ExitStatus, Usage)>> {
-    Err(io::Error::new(
+fn build_reap_refusal() -> io::Error {
+    io::Error::new(
         io::ErrorKind::Unsupported,
         "a run is reaped with its resource usage on linux",
-    ))
+    )
 }
 
 #[cfg(all(test, target_os = "linux"))]

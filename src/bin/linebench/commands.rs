@@ -26,6 +26,7 @@ use crate::prep::{self, AppliedPrep};
 use linebench::allocations::{
     Allocations, Valgrind, count_allocations, find_valgrind, is_elf_binary,
 };
+use linebench::cold::{Cold, measure_cold, time_run};
 use linebench::corpus::{
     Corpus, Counted, Parity, Verdict, check_commit, check_declares_files, count_tracked_files,
     describe_empty_count, judge_parity, read_changes, read_git_state, setup_corpus, shorten_hash,
@@ -39,14 +40,15 @@ use linebench::fetch::GIVEN_DIR;
 use linebench::fetch::{Manifest, calculate_sha256, fetch_counter, read_manifest};
 use linebench::files::{LargestFiles, find_largest_files};
 use linebench::insight::{
-    ALLOCATIONS_PART, FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE, INSIGHTS_FORMAT,
-    INSIGHTS_PAGE, LADDER_PART, MEMORY_PART, PMU_PART, SYSCALLS_HEADING, SYSCALLS_PART,
-    VERSION_SET,
+    ALLOCATIONS_PART, COLD_PART, FLOOR_PART, FLOOR_RUNS, FLOOR_WARMUP, INSIGHTS_FILE,
+    INSIGHTS_FORMAT, INSIGHTS_PAGE, LADDER_PART, MEMORY_PART, PMU_PART, SYSCALLS_HEADING,
+    SYSCALLS_PART, VERSION_SET,
 };
 use linebench::insight::{
-    Insights, ask_for_everything, build_insights_path, describe_cold_cache, format_allocations,
-    format_floor, format_ladder, format_memory, format_pmu, format_syscalls,
-    format_syscalls_summary, get_floor_set_name, write_insights, write_insights_page,
+    Insights, ask_for_the_default_parts, build_insights_path, describe_cold_cache,
+    format_allocations, format_cold, format_cold_runs, format_floor, format_ladder, format_memory,
+    format_pmu, format_syscalls, format_syscalls_summary, get_floor_set_name, write_insights,
+    write_insights_page,
 };
 use linebench::ladder::{
     AffinityRung, Ladder, LadderPlan, build_ladder_plan, build_ladders, get_ladder_set_name,
@@ -67,7 +69,10 @@ use linebench::measure::{
     join_command, run_phases, strip_ansi,
 };
 use linebench::measure::{OUT_DIR, TABLES};
-use linebench::os::{capture_with_status, is_privileged, pin_current_process, read_core_topology};
+use linebench::os::{
+    capture_with_status, check_page_cache_can_be_dropped, drop_page_cache, is_privileged,
+    keep_sudo_alive, pin_current_process, read_core_topology,
+};
 use linebench::pmu::{
     AB_RUNS, AB_WARMUP, DURATION_TIME, FILE_RUNS, OPEN_PARANOID, PARANOID_KEY, PASSES, PROFILER,
     USER_PARANOID,
@@ -124,6 +129,19 @@ const VALGRIND_REFUSED: &str = "valgrind is here and it wrote no heap summary, s
                                 allocations cannot be counted.";
 const VALGRIND_ELSEWHERE: &str =
     "valgrind runs only on linux, so the heap allocations cannot be counted here.";
+const COLD_ELSEWHERE: &str = "the page cache is emptied through /proc/sys/vm/drop_caches on \
+                              linux, so the cold cache cannot be measured here.";
+const COLD_UNDER_WSL: &str = "WSL keeps its files in the Windows file cache as well as its own, so \
+                              the cold cache cannot be measured here.";
+const COLD_WANTS_ROOT: &str = "Emptying the page cache wants root for this one write, so the cold \
+                               cache cannot be measured. Run sudo -v in this terminal, then \
+                               linebench as yourself, or add the sudoers rule the README gives.";
+const COLD_SUDO_RAN_OUT: &str = "sudo forgot the password before the cold cache was measured. Run \
+                                 sudo -v, then insights --only cold.";
+const COLD_EMPTIES: &str = "the page cache of the whole system is emptied before each cold run";
+const COLD_LEFT_OUT: &str = "the cold cache runs when --only names it, since it empties the page \
+                             cache of the whole system and wants root. Run sudo -v, then --only \
+                             cold, or --only all for every part.";
 const INSIGHTS_ASKS: &str = "Run the rest anyway? [Y/n] ";
 const CARRYING_ON: &str = "carrying on.";
 const PMU_PROBE_FILE: &str = "pmu-probe.tsv";
@@ -865,8 +883,11 @@ pub fn run_insights(
     let scratch = Scratch::create("insights")?;
     let asked = match &options.only {
         Some(named) => named.clone(),
-        None => ask_for_everything(),
+        None => ask_for_the_default_parts(),
     };
+    if options.only.is_none() && platform == Platform::Linux {
+        print_line(out, COLD_LEFT_OUT)?;
+    }
     let asked_for = |part: &str| asked.iter().any(|held| held == part);
     let (tracer, unmeasured) = match (platform.is_linux(), asked_for(SYSCALLS_PART)) {
         (_, false) => (None, None),
@@ -910,12 +931,27 @@ pub fn run_insights(
             Err(refused) => (None, Some(refused)),
         },
     };
+    let cold_unmeasured = describe_what_cold_wants(platform, asked_for(COLD_PART), || {
+        check_page_cache_can_be_dropped(privileged)
+    });
+    let cold_through_sudo = asked_for(COLD_PART) && cold_unmeasured.is_none() && !privileged;
+    // A sudoers rule for the one write lets the drop through and refuses `sudo -v`, and every
+    // refusal is a line in the journal, so the first one ends the calls.
+    let sudo_remembers = std::cell::Cell::new(cold_through_sudo);
+    let keep_cold_possible = || {
+        if sudo_remembers.get() {
+            sudo_remembers.set(keep_sudo_alive());
+        }
+    };
     let stopping: Vec<&str> = match platform {
         Platform::Linux | Platform::Wsl => [
             unmeasured.as_deref(),
             unread.as_deref(),
             allocations_unmeasured.as_deref(),
             ladder_unmeasured.as_deref(),
+            cold_unmeasured
+                .as_deref()
+                .filter(|_| platform == Platform::Linux),
         ]
         .into_iter()
         .flatten()
@@ -963,6 +999,7 @@ pub fn run_insights(
         versions.push((instance.get_name().to_string(), recorded));
     }
     let mut measurements = Vec::new();
+    keep_cold_possible();
     if asked_for(FLOOR_PART) {
         let target = create_floor_target(scratch.get_path())?;
         print_header(out, "== floor")?;
@@ -990,7 +1027,8 @@ pub fn run_insights(
     } else if (asked_for(MEMORY_PART)
         || asked_for(SYSCALLS_PART)
         || asked_for(ALLOCATIONS_PART)
-        || asked_for(LADDER_PART))
+        || asked_for(LADDER_PART)
+        || asked_for(COLD_PART))
         && instances
             .iter()
             .any(|instance| !instance.definition.run.env.is_empty())
@@ -1011,6 +1049,7 @@ pub fn run_insights(
         }
     }
     let mut curves = Vec::new();
+    keep_cold_possible();
     if asked_for(MEMORY_PART) {
         print_header(out, "== memory")?;
         for instance in &instances {
@@ -1052,6 +1091,7 @@ pub fn run_insights(
         }
     }
     let mut syscalls = Vec::new();
+    keep_cold_possible();
     if asked_for(SYSCALLS_PART) {
         syscalls = match &tracer {
             Some(version) => {
@@ -1082,6 +1122,7 @@ pub fn run_insights(
         }
     }
     let mut pmu = Vec::new();
+    keep_cold_possible();
     if asked_for(PMU_PART) {
         pmu = match &profiler {
             Some(version) => {
@@ -1121,6 +1162,7 @@ pub fn run_insights(
         }
     }
     let mut allocations = Vec::new();
+    keep_cold_possible();
     if asked_for(ALLOCATIONS_PART) {
         allocations = match &valgrind {
             Some(version) => {
@@ -1150,6 +1192,7 @@ pub fn run_insights(
         }
     }
     let mut ladder = Vec::new();
+    keep_cold_possible();
     if asked_for(LADDER_PART) {
         ladder = match &ladder_plan {
             Some(plan) => {
@@ -1199,6 +1242,34 @@ pub fn run_insights(
             }
         }
     }
+    let mut cold = Vec::new();
+    let mut cold_unmeasured = cold_unmeasured;
+    if asked_for(COLD_PART) {
+        if cold_through_sudo && let Err(reason) = check_page_cache_can_be_dropped(privileged) {
+            let ran_out = format!("{reason}. {COLD_SUDO_RAN_OUT}");
+            print_warning(out, &ran_out)?;
+            cold_unmeasured = Some(ran_out);
+        }
+        match &cold_unmeasured {
+            None => {
+                print_header(out, "== cold")?;
+                let part = collect_cold(out, &instances, locations, &scrub, platform, privileged)?;
+                cold = part.measured;
+                cold_unmeasured = part.halted;
+            }
+            Some(reason) if platform != Platform::Linux => {
+                print_header(out, "== cold")?;
+                print_line(out, &format!("   {reason}"))?;
+            }
+            Some(_) => {}
+        }
+        if !cold.is_empty() {
+            print_header(out, "== cold summary")?;
+            for line in format_cold(&cold) {
+                print_line(out, &paint_table_line(&line))?;
+            }
+        }
+    }
     let insights = Insights {
         format: INSIGHTS_FORMAT,
         stamp,
@@ -1225,6 +1296,8 @@ pub fn run_insights(
         allocations,
         ladder_unmeasured,
         ladder,
+        cold_unmeasured,
+        cold,
         asked,
     };
     write_insights(&res, &insights)?;
@@ -2142,6 +2215,11 @@ struct Measured {
     code: i32,
     record: Record,
     res: PathBuf,
+}
+
+struct ColdPart {
+    measured: Vec<Cold>,
+    halted: Option<String>,
 }
 
 struct Scratch(PathBuf);
@@ -3323,6 +3401,71 @@ fn collect_ladder(
         })
         .collect();
     Ok(build_ladders(plan, &rung_measurements))
+}
+
+fn collect_cold(
+    out: &mut dyn Write,
+    instances: &[Instance],
+    locations: &Locations,
+    scrub: &[String],
+    platform: Platform,
+    privileged: bool,
+) -> Result<ColdPart, String> {
+    print_line(out, &format!("   {COLD_EMPTIES}"))?;
+    let args = instances
+        .iter()
+        .map(|instance| {
+            build_args(
+                instance,
+                &locations.checkout,
+                &locations.corpus.extensions,
+                INSIGHTS_TABLE,
+                false,
+            )
+        })
+        .collect::<Result<Vec<Vec<String>>, String>>()?;
+    let subjects: Vec<Subject> = instances
+        .iter()
+        .zip(&args)
+        .map(|(instance, args)| build_subject(instance, args, scrub))
+        .collect();
+    let names: Vec<&str> = instances.iter().map(Instance::get_name).collect();
+    let rounds = measure_cold(
+        &names,
+        INSIGHTS_TABLE,
+        &mut || drop_page_cache(privileged),
+        &mut |at| time_run(platform, &subjects[at]),
+    );
+    for refused in rounds.dropped.iter().chain(&rounds.halted) {
+        print_warning(out, refused)?;
+    }
+    for one in &rounds.measured {
+        print_line(out, &format!(">> {}", one.instance))?;
+        for line in format_cold_runs(one) {
+            print_line(out, &line)?;
+        }
+    }
+    Ok(ColdPart {
+        measured: rounds.measured,
+        halted: rounds.halted,
+    })
+}
+
+/// `check_the_drop` runs sudo, so it is called for a cold part wanted on linux and skipped
+/// everywhere else.
+fn describe_what_cold_wants(
+    platform: Platform,
+    asked_for: bool,
+    check_the_drop: impl FnOnce() -> Result<(), String>,
+) -> Option<String> {
+    match (asked_for, platform) {
+        (false, _) => None,
+        (true, Platform::Linux) => check_the_drop()
+            .err()
+            .map(|reason| format!("{reason}. {COLD_WANTS_ROOT}")),
+        (true, Platform::Wsl) => Some(COLD_UNDER_WSL.to_string()),
+        (true, _) => Some(COLD_ELSEWHERE.to_string()),
+    }
 }
 
 fn describe_what_the_counters_want(
@@ -4526,6 +4669,42 @@ mod tests {
         assert!(!needs_an_ordinary_terminal(Platform::Windows, true, false));
         assert!(!needs_an_ordinary_terminal(Platform::Linux, true, true));
         assert!(!needs_an_ordinary_terminal(Platform::Linux, false, false));
+    }
+
+    #[test]
+    fn the_cold_cache_wants_native_linux_and_a_write_to_drop_caches_and_asks_sudo_when_wanted_there()
+     {
+        let never = || -> Result<(), String> {
+            panic!("sudo was run for a cold part left out or off native linux")
+        };
+        assert_eq!(
+            describe_what_cold_wants(Platform::Linux, false, never),
+            None
+        );
+        assert_eq!(
+            describe_what_cold_wants(Platform::Wsl, true, never).as_deref(),
+            Some(COLD_UNDER_WSL)
+        );
+        assert_eq!(
+            describe_what_cold_wants(Platform::Windows, true, never).as_deref(),
+            Some(COLD_ELSEWHERE)
+        );
+        let refused = describe_what_cold_wants(Platform::Linux, true, || {
+            Err(
+                "/proc/sys/vm/drop_caches could not be written: sudo: a password is required"
+                    .into(),
+            )
+        })
+        .expect("a refused write is a reason");
+        assert!(
+            refused.starts_with("/proc/sys/vm/drop_caches could not be written: sudo: a password")
+                && refused.ends_with(COLD_WANTS_ROOT),
+            "{refused}"
+        );
+        assert_eq!(
+            describe_what_cold_wants(Platform::Linux, true, || Ok(())),
+            None
+        );
     }
 
     #[test]

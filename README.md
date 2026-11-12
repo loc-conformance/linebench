@@ -277,6 +277,7 @@ lengthen and disturb it. What each system can answer:
 | the hardware counters | yes, `perf stat` | no | no |
 | the heap allocations | yes, `valgrind` | no | no |
 | the affinity ladder | yes, `sched_setaffinity` | yes, `SetProcessAffinityMask` | no |
+| the cold cache | yes, `/proc/sys/vm/drop_caches` | no | no |
 
 **The floor** is what a counter costs before it has counted anything. Three timings per instance,
 thirty runs and no settle: the version answer, `<counter> --version`, and the two ready floors,
@@ -358,15 +359,50 @@ hyperfine (3, 3, 5, 5, 10 runs as the rung widens) and reporting median wall tim
 physical core, per-core efficiency (`speedup / cores`), peak speedup, Amdahl's serial fraction, and
 the SMT gain.
 
+**The cold cache** times each counter after the page cache of the whole system has been emptied,
+with its cached directory entries and inodes (`sync`, then `3` into `/proc/sys/vm/drop_caches`),
+so the binary and the corpus come from the disk, as on the first run after a reboot. Shared
+libraries that running programs hold mapped, libc among them, stay in memory, as they do after a
+reboot too: the kernel keeps every page a process has mapped.
+
+The counters take turns. A round runs each counter once, every cold run after a purge of its own,
+and the next round runs them in the opposite order. A cold run comes out faster the closer it sits
+to the start of a session, by up to a fifth on one machine and for a cause not yet found, so the
+first two rounds, one in each order, are thrown away and four more are kept: in four rounds of
+alternating order every counter takes every place equally often. Four warm rounds follow the same
+way on the cache the cold runs filled, after two more that are thrown away. linebench times each
+run from the spawn to the reaping (`wait4`), which hands back `from disk` as well: the bytes the
+run read from storage, readahead included. The table gives the median cold run, the spread of the
+cold runs, the median warm run, the two against each other, and the median from disk. A cold time
+is the counter and the disk together, so it compares between the counters of one session and says
+little against the disk of another machine. It is measured on Linux, when `--only` names it; WSL
+is left out, since its files pass through the Windows cache as well.
+
+The write to `drop_caches` wants root, and the session stays yours. Run `sudo -v` in the terminal,
+then `linebench insights` as yourself, and linebench makes the write through `sudo -n tee`, which
+fails at once where sudo would ask for a password. sudo remembers the password for 15 minutes per
+terminal on Debian, linebench starts that time again between the sections, and a password that
+runs out all the same leaves the cold cache unmeasured with every other section kept. A run from
+cron, an IDE task or anything else outside a terminal gets the write through a sudoers rule for
+that one command, written with `sudo visudo -f /etc/sudoers.d/linebench-drop-caches`:
+
+```
+<you> ALL=(root) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches
+```
+
+As root, as on a CI runner, linebench writes the file itself, and every file the session writes
+belongs to root.
+
 `--counters` picks the instances and their order, and `--yes` carries on when a tool a section
-needs is missing. `--only floor,memory,syscalls,pmu,allocations,ladder` names which of the insights
-to measure. A part left out is named as left out in the record and on the page, so an empty section
-is never read as a measurement that found nothing.
+needs is missing. `--only floor,memory,syscalls,pmu,allocations,ladder,cold` names which of the
+insights to measure, and `--only all` names every one. A run with no `--only` measures all but
+the cold cache, and on Linux it says so as it starts. A part left out is named as left out in the
+record and on the page, so an empty section is never read as a measurement that found nothing.
 
 A session lands in `results/insights/<corpus>/<system>/<stamp>/`. `insights.json` carries its own
 machine block, the antivirus state, the corpus with its commit and the instances measured, so it
 stands on its own, and the hyperfine exports sit beside it. `insights.md` is the same session for a
-reader: the machine, the corpus and the six sections above as they were printed. An `--args` or
+reader: the machine, the corpus and the seven sections above as they were printed. An `--args` or
 `--env` instance or a build of yours sends the session under `results/insights/local/`.
 
 ### ab
@@ -438,9 +474,9 @@ What one `insights` command wrote is read the same way. Name its directory, or t
 inside it, and the floor is held against itself and against its exports, every memory curve
 against the peak the system reported independently of the samples, every traced instance against
 the calls it listed, every profiled instance against the events it read, every heap summary
-against what it allocated, every affinity ladder against its rungs and their exports, and every
-number against the instances the session says it measured. A part `--only` left out and measured
-all the same fails too.
+against what it allocated, every affinity ladder against its rungs and their exports, every cold
+cache row against its runs, and every number against the instances the session says it measured.
+A part `--only` left out and measured all the same fails too.
 
 ![what verify prints](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/verify.png)
 
@@ -673,7 +709,7 @@ flag belongs to the commands whose help names it, and a command refuses one that
 | what to count in a directory | `--extensions rs,c` | | | |
 | the counter binaries | `--counters-dir <dir>` | `LINEBENCH_COUNTERS` | `counters = "<dir>"` | `counters/` in linebench's own directory |
 | where results go | `--out <dir>` | `LINEBENCH_OUT` | `out = "<dir>"` | `results/` in the current directory |
-| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations,ladder` | | | all six |
+| what `insights` measures | `--only floor,memory,syscalls,pmu,allocations,ladder,cold`, or `--only all` | | | all but cold |
 | definitions of your own | `--add <path>`, repeatable | | `add = ["<path>", ...]` | |
 | the control | `--control <instance>` | | `control = "<instance>"` | the first instance named |
 | counters left out on this machine | | | `skip = ["cloc"]` | cloc |
