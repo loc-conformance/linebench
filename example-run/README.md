@@ -265,7 +265,7 @@ Same-work times, the sections above show only the newest run per machine and cor
   - mezura: ignore files off, dotted directories entered, no default and no project settings read, shebang lines unread, keyword counting off, minified, generated and non code files counted, region counting model, content identification left on since scc has no way to turn its own off
   - scc: ignore files off, complexity and cost estimates off, no config file read
   - tokei: ignore files off, hidden files and directories counted, which is everything tokei has beyond the counting
-- Out of the box: bare `counter <dir>` with no flags, plus an instance's own arguments where it has them.
+- Out of the box: the same language set for every counter, with each counter at its own defaults and an instance's own arguments where it has them.
 - The exact flags: each counter's definition under `counters/` in the linebench repository.
 
 ## Terms

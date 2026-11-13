@@ -9,6 +9,12 @@ New:
   doublings up to all strong cores, efficiency cores when present, and SMT siblings, pinned through
   the OS affinity mask and timed by hyperfine, reporting median wall time, speedup, per-core
   efficiency, peak speedup, Amdahl's serial fraction, and the SMT gain.
+- `insights` measures each counter over a cold cache on native Linux in a new `cold` section. Every
+  run follows a write of `3` to `/proc/sys/vm/drop_caches`, through `sudo -n` after a `sudo -v`, or
+  straight to the file as root. Wall time and the bytes read from disk come from the run itself.
+  The counters take turns in rounds of alternating order, and the first two rounds are thrown away.
+  The section runs only with `--only cold` or `--only all`, and WSL and Windows record why it was
+  left out.
 - A counter definition can set `binary-name`, the command a counter is stored and run under when
   that is not its name.
 - `[acquisition.file]` takes a file per system and architecture, such as `linux-aarch64`, which is
@@ -24,6 +30,8 @@ Other:
   and subtracts those startup allocations from `per file`.
 - On Linux, the `memory` section of `insights` now includes the page faults of waited-for child
   processes in `pages given` and `from disk`.
+- On Windows, the `memory` section of `insights` runs every instance once before it samples it, so
+  the sampled run reads a warm cache, and reads the page count once the run has ended.
 - A counter is asked its version with the environment it runs with, so naming a mezura build no
   longer rewrites your own mezura data directory.
 - `run`, `noise`, `insights`, and `verify` read the exports of hyperfine 2.0 as well as those of
