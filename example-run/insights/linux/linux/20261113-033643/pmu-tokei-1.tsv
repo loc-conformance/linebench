@@ -1,0 +1,6 @@
+# started on Fri Nov 13 05:36:55 2026
+
+63366091035		instructions	0,04%	6141099618	100,00	2	insn per cycle
+29438040548		cycles	0,73%	6141099618	100,00		
+14691919518		branch-instructions	0,03%	6141099618	100,00		
+100606318		branch-misses	0,41%	6141099618	100,00	0	of all branches

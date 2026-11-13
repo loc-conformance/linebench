@@ -1,0 +1,6 @@
+# started on Fri Nov 13 05:36:52 2026
+
+15502142621		L1-dcache-loads	0,22%	3086576124	100,00		
+138599163		L1-dcache-load-misses	0,69%	3086576124	100,00	0	of all L1-dcache accesses
+381044572		cache-references	0,56%	3086576124	100,00		
+30551732		cache-misses	1,98%	3086576124	100,00	8	of all cache refs

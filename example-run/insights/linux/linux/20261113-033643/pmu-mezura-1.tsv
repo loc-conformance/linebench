@@ -1,0 +1,6 @@
+# started on Fri Nov 13 05:36:50 2026
+
+8888489154		instructions	0,02%	906602777	100,00	2	insn per cycle
+4381364460		cycles	0,42%	906602777	100,00		
+1512481579		branch-instructions	0,02%	906602777	100,00		
+18728529		branch-misses	0,17%	906602777	100,00	1	of all branches
