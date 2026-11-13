@@ -1,6 +1,6 @@
 # Benchmark results
 
-Written by `linebench report` after every run, and rewritten whole each time. One section per machine, and under it the newest run over each corpus, biggest corpus first. Older runs are listed in the "Every run" table further down. A run holding a build or arguments of your own is kept apart, under its own headings. What every term means and how this was measured: the last two sections.
+Written by `linebench report` after every run, and rewritten whole each time. One section per machine, and under it the newest run over each corpus, biggest corpus first. Older runs are listed in the "Every run" table further down. A run holding your own build or arguments is kept apart, under its own headings. What every term means and how this was measured: the last two sections.
 
 ## Windows, AMD Ryzen 7 9700X 8-Core Processor
 

@@ -117,26 +117,28 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
     if found.is_empty() {
         return Vec::new();
     }
+    let mut shown = Shown::default();
+    let mut sections = format_family(found, Family::Release, &mut shown);
+    sections.extend(format_family(found, Family::Local, &mut shown));
+    let mut intro =
+        "Written by `linebench report` after every run, and rewritten whole each time. \
+                     One section per machine, and under it the newest run over each corpus, \
+                     biggest corpus first."
+            .to_string();
+    if shown.every_run_table {
+        intro.push_str(" Older runs are listed in the \"Every run\" table further down.");
+    }
+    intro.push_str(
+        " A run holding your own build or arguments is kept apart, under its own headings. What \
+         every term means and how this was measured: the last two sections.",
+    );
     let mut lines = vec![
         "# Benchmark results".to_string(),
         String::new(),
-        "Written by `linebench report` after every run, and rewritten whole each time. One \
-         section per \
-         machine, and under it the newest run over each corpus, biggest corpus first. Older runs \
-         are listed in the \
-         \"Every run\" table further down. A run holding a build or arguments of your own is kept \
-         apart, under its own headings. What every term means and how this was measured: the last \
-         two sections."
-            .to_string(),
+        intro,
         String::new(),
     ];
-    let mut single_order_seen = false;
-    lines.extend(format_family(
-        found,
-        Family::Release,
-        &mut single_order_seen,
-    ));
-    lines.extend(format_family(found, Family::Local, &mut single_order_seen));
+    lines.extend(sections);
     let newest = found
         .iter()
         .filter(|entry| !entry.is_local())
@@ -147,7 +149,7 @@ pub fn build_results_page(found: &[FoundRun]) -> Vec<String> {
                 .max_by(|one, other| one.record.stamp.cmp(&other.record.stamp))
         });
     if let Some(newest) = newest {
-        lines.extend(format_methodology(&newest.record, single_order_seen));
+        lines.extend(format_methodology(&newest.record, &shown));
     }
     lines.push(VERIFY_INVITE.to_string());
     lines
@@ -518,6 +520,14 @@ struct SetAside<'a> {
     reasons: Vec<String>,
 }
 
+/// What the sections put on the page, which decides what its opening and its terms explain.
+#[derive(Default)]
+struct Shown {
+    one_order_row: bool,
+    since_block: bool,
+    every_run_table: bool,
+}
+
 type ReadContext = fn(&Record) -> String;
 
 // The corpora of a machine are read biggest first.
@@ -526,7 +536,7 @@ fn count_files(record: &Record) -> u64 {
 }
 
 /// The newest run per machine and corpus in full, the rest in one table under them.
-fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut bool) -> Vec<String> {
+fn format_family(found: &[FoundRun], family: Family, shown: &mut Shown) -> Vec<String> {
     let mut runs: Vec<&FoundRun> = found.iter().filter(|entry| family.has(entry)).collect();
     if runs.is_empty() {
         return Vec::new();
@@ -544,12 +554,12 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
         );
         latest.insert(key, entry);
     }
-    let mut shown: Vec<&FoundRun> = latest.into_values().collect();
+    let mut in_full: Vec<&FoundRun> = latest.into_values().collect();
     // The newest run of each machine, which orders the machines and describes them. The corpora
     // under a machine are ordered by size, so its first run is no longer its newest one, and the
     // heading would otherwise carry whatever that machine was when it counted the biggest corpus.
     let mut newest_of: BTreeMap<String, &FoundRun> = BTreeMap::new();
-    for entry in shown.iter().copied() {
+    for entry in in_full.iter().copied() {
         newest_of
             .entry(name_the_machine(&entry.record))
             .and_modify(|held| {
@@ -559,7 +569,7 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
             })
             .or_insert(entry);
     }
-    shown.sort_by(|a, b| {
+    in_full.sort_by(|a, b| {
         let (one, other) = (name_the_machine(&a.record), name_the_machine(&b.record));
         newest_of[&other]
             .record
@@ -571,7 +581,7 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
     });
     let mut lines = Vec::new();
     let mut said = String::new();
-    for entry in &shown {
+    for entry in &in_full {
         let machine = name_the_machine(&entry.record);
         if machine != said {
             lines.extend(format_machine_heading(&newest_of[&machine].record, family));
@@ -582,13 +592,10 @@ fn format_family(found: &[FoundRun], family: Family, single_order_seen: &mut boo
             .filter(|f| f.record.stamp < entry.record.stamp)
             .map(|f| &f.record)
             .collect();
-        lines.extend(format_run_section(
-            &entry.record,
-            &earlier,
-            single_order_seen,
-        ));
+        lines.extend(format_run_section(&entry.record, &earlier, shown));
     }
-    if runs.len() > shown.len() {
+    if runs.len() > in_full.len() {
+        shown.every_run_table = true;
         lines.extend(format_every_run(&runs, family));
     }
     lines
@@ -617,11 +624,7 @@ fn name_the_machine(record: &Record) -> String {
     )
 }
 
-fn format_run_section(
-    record: &Record,
-    earlier: &[&Record],
-    single_order_seen: &mut bool,
-) -> Vec<String> {
+fn format_run_section(record: &Record, earlier: &[&Record], shown: &mut Shown) -> Vec<String> {
     let machine = &record.machine;
     let head = record
         .corpus
@@ -680,7 +683,7 @@ fn format_run_section(
         for row in rows {
             let mut wall = format_wall(row.mean_s, row.stddev_s);
             if row.single_order {
-                *single_order_seen = true;
+                shown.one_order_row = true;
                 record_single = true;
                 wall.push_str(" (one order only)");
             }
@@ -851,6 +854,7 @@ fn format_run_section(
     lines.push(String::new());
     let since = format_since(record, earlier);
     if since.len() > 1 {
+        shown.since_block = true;
         lines.push("```".to_string());
         lines.extend(since);
         lines.push("```".to_string());
@@ -926,9 +930,9 @@ fn format_every_run(runs: &[&FoundRun], family: Family) -> Vec<String> {
     lines
 }
 
-fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
+fn format_methodology(newest: &Record, shown: &Shown) -> Vec<String> {
     let mut twice = "- Every table is measured twice, in one command order and then in the reverse. The numbers shown average the two, and how far they disagreed is printed in each run's trust checks.".to_string();
-    if single_order_seen {
+    if shown.one_order_row {
         twice.push_str(" A row marked \"one order only\" has just the one.");
     }
     let mut lines = vec![
@@ -965,9 +969,11 @@ fn format_methodology(newest: &Record, single_order_seen: bool) -> Vec<String> {
         "- **lines per cpu second**: the lines this counter counted, divided by its user plus system cpu. How cheaply it counts, with the number of cores taken out of the picture.".to_string(),
         "- **files / lines**: what the counter reported counting. Under \"Same work\" every counter must nearly agree, and the equal work check says whether they did. Out of the box they differ by design.".to_string(),
         "- **machine steadiness**: the same binary timed at the start and at the end of the whole run. The percentage is how far apart the two means came out.".to_string(),
-        "- **since the last run**: each instance's same-work wall against its own latest comparable earlier run, ± the σ of that change from the two means' own σ (σ/√n per order, the order gap kept whole). \"within the noise\" means the change minus the control's own shift is inside the combined σ.".to_string(),
-        String::new(),
     ]);
+    if shown.since_block {
+        lines.push("- **since the last run**: each instance's same-work wall against its own latest comparable earlier run, ± the σ of that change from the two means' own σ (σ/√n per order, the order gap kept whole). \"within the noise\" means the change minus the control's own shift is inside the combined σ.".to_string());
+    }
+    lines.push(String::new());
     lines
 }
 
@@ -2246,6 +2252,36 @@ mod tests {
         assert_eq!(counted("### linux corpus"), 2, "{page}");
     }
 
+    #[test]
+    fn a_page_without_older_runs_mentions_neither_the_every_run_table_nor_the_since_term() {
+        let page_of = |stamps: &[&str]| {
+            let found: Vec<FoundRun> = stamps
+                .iter()
+                .map(|stamp| {
+                    let mut record = build_record(stamp, &[("mezura", 0.32)], "nvme0");
+                    record.corpus.name = "linux".to_string();
+                    FoundRun {
+                        relative: format!("linux/{stamp}"),
+                        record,
+                    }
+                })
+                .collect();
+            build_results_page(&found).join("\n")
+        };
+        let alone = page_of(&["20260903-100000"]);
+        assert!(!alone.contains("Every run"), "{alone}");
+        assert!(!alone.contains("since the last run"), "{alone}");
+        let with_older = page_of(&["20260902-100000", "20260903-100000"]);
+        assert!(
+            with_older.contains("Older runs are listed in the \"Every run\" table"),
+            "{with_older}"
+        );
+        assert!(
+            with_older.contains("**since the last run**"),
+            "{with_older}"
+        );
+    }
+
     fn build_record(stamp: &str, rows: &[(&str, f64)], device: &str) -> Record {
         let instances: Vec<InstanceRecord> = rows
             .iter()
@@ -2355,7 +2391,7 @@ mod tests {
         let mut record = build_record("20260902-100000", &[("mezura", 0.30)], "nvme0");
         record.date = String::new();
         record.machine.linebench = String::new();
-        let section = format_run_section(&record, &[], &mut false);
+        let section = format_run_section(&record, &[], &mut Shown::default());
         assert!(
             section.iter().all(|line| !line.starts_with("measured")),
             "{section:?}"

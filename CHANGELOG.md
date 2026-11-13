@@ -42,6 +42,8 @@ Other:
   4s and 12s, and stops on the first attempt when the refusal is final.
 - With the same work, cloc runs with `--config` pointed at an empty file, so an `options.txt` on
   the machine no longer changes its counts.
+- The results page mentions the "Every run" table and the term "since the last run" only when it
+  holds an older run.
 
 ## 0.3.1, 2026-10-29
 
