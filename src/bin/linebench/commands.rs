@@ -3298,6 +3298,16 @@ fn collect_allocations(
                 continue;
             }
         };
+        // A counter with an allocator of its own shows valgrind 0 allocations over the empty
+        // directory as well, and its corpus run under valgrind can take half an hour.
+        if floor.allocs == 0 {
+            print_line(
+                out,
+                "   valgrind counted 0 allocations over the empty directory, so the corpus run is left out",
+            )?;
+            counted.push(floor);
+            continue;
+        }
         let args = build_args(
             instance,
             &locations.checkout,

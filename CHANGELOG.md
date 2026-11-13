@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1, 2026-11-13
+
+Other:
+
+- The `allocations` section of `insights` leaves out the corpus run of a counter that valgrind
+  sees making 0 allocations over the empty directory, as scc does with its own allocator, so that
+  run no longer takes half an hour to end in the same note.
+
 ## 0.4.0, 2026-11-13
 
 New:
