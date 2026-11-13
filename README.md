@@ -348,8 +348,11 @@ since above that perf drops the kernel and the counts would cover only user spac
 **The heap allocations** are `valgrind` with `--leak-check=no` and `--undef-value-errors=no` over
 the empty floor directory and over the corpus, reporting total allocations, the empty-directory
 floor, allocations per file above the floor, total bytes allocated, average bytes per allocation,
-and bytes still in use at exit. Counters that are scripts (`cloc`) are skipped, and counters that
-bypass `libc`'s allocator (such as Go's runtime in `scc`) are noted under the table.
+and bytes still in use at exit. Counters that are scripts (`cloc`) are skipped. A counter that
+valgrind sees making 0 allocations over the empty directory has an allocator of its own (Go's
+runtime in `scc`): its corpus run is left out, and the table notes it.
+
+![the heap allocations of each counter over the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/allocations.png)
 
 **The affinity ladder** pins the process affinity mask (`sched_setaffinity` on Linux,
 `SetProcessAffinityMask` on Windows, built from the true physical core map in sysfs
@@ -358,6 +361,8 @@ all strong cores, then efficiency cores when present, then SMT siblings, timing 
 hyperfine (3, 3, 5, 5, 10 runs as the rung widens) and reporting median wall time, speedup over one
 physical core, per-core efficiency (`speedup / cores`), peak speedup, Amdahl's serial fraction, and
 the SMT gain.
+
+![how each counter scales over the kernel as cores are added](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/ladder.png)
 
 **The cold cache** times each counter after the page cache of the whole system has been emptied,
 with its cached directory entries and inodes (`sync`, then `3` into `/proc/sys/vm/drop_caches`),
@@ -377,6 +382,8 @@ cold runs, the median warm run, the two against each other, and the median from 
 is the counter and the disk together, so it compares between the counters of one session and says
 little against the disk of another machine. It is measured on Linux, when `--only` names it; WSL
 is left out, since its files pass through the Windows cache as well.
+
+![each counter over a cold cache on the kernel](https://raw.githubusercontent.com/loc-conformance/linebench/main/assets/screenshots/cold.png)
 
 The write to `drop_caches` wants root, and the session stays yours. Run `sudo -v` in the terminal,
 then `linebench insights` as yourself, and linebench makes the write through `sudo -n tee`, which
