@@ -6,7 +6,7 @@ volatile     = ["header.elapsed_seconds", "header.files_per_second", "header.lin
 [acquisition]
 channel = "github-release-file"
 name    = "AlDanial/cloc"
-version = "2.10"
+version = "2.12"
 
 [acquisition.file]
 windows = "cloc-{version}.exe"
